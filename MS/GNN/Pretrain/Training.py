@@ -1,8 +1,8 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-
-from .DijkstraGnn import get_pyg_data_from_nx, generate_expert_label, GNNPretrainModel, GLOBAL_STATS, DynamicGraphDataset, DataLoader
+from torch_geometric.loader import DataLoader
+from .DijkstraGnn import get_pyg_data_from_nx, generate_expert_label, GNNPretrainModel, GLOBAL_STATS, DynamicGraphDataset
 from ...Env.NetworkGenerator import TopologyGenerator
 
 if __name__ == "__main__":
@@ -43,7 +43,7 @@ if __name__ == "__main__":
   
     # [关键] 每个 epoch 重新创建 Dataset 和 DataLoader
     # 这是为了让新的 epoch 能生成新的随机图，保持数据的无限多样性
-    dataset = DynamicGraphDataset(topo_gen, GLOBAL_STATS, max_samples_per_epoch=SAMPLES_PER_EPOCH)
+    dataset = DynamicGraphDataset(topo_gen, GLOBAL_STATS, max_samples=SAMPLES_PER_EPOCH)
     # num_workers > 0 可以多进程生成图，加速训练，但可能需要处理一些多进程共享种子的细节
     # 这里先用 num_workers=0 (主进程生成) 保证简单稳定
     train_loader = DataLoader(dataset, batch_size=BATCH_SIZE, num_workers=0) 
