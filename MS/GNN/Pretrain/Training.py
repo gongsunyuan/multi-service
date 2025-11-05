@@ -16,6 +16,7 @@ if __name__ == "__main__":
   EDGE_FEAT_DIM = 2     # 边特征数
   LEARNING_RATE = 1e-4  # 学习率
   STEPS_PER_EPOCH = 200 #
+  BATCH_SIZE_VIRTUAL = 64
 
   device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")         # 定义device
   topo_gen = TopologyGenerator(num_nodes_range=(20, 30), m_ba=2)                  # Networkx 拓扑生成器
@@ -73,7 +74,9 @@ if __name__ == "__main__":
       # 5. 计算损失
       # 比较 GNN 的输出分数 (logits) 和 Dijkstra 标签
       loss = loss_fn(edge_logits, y_true_edge_labels)
-      
+      loss = loss / BATCH_SIZE_VIRTUAL
+      loss.backward()
+
       # --- [新] 计算准确率 ---
       # edge_logits 是原始分数, > 0.0 意味着模型预测为 1 (在路径上)
       predicted_labels = (edge_logits > 0.0).float()
@@ -81,11 +84,13 @@ if __name__ == "__main__":
       correct_predictions = (predicted_labels == y_true_edge_labels).float()
       accuracy = correct_predictions.mean() # 计算平均正确率
 
-      loss.backward()
-      optimizer.step()
-      total_loss += loss.item()
+      total_loss += loss.item() * BATCH_SIZE_VIRTUAL
       total_acc += accuracy.item() # <--- [新] 累加准确率
-        
+      
+      if (step + 1) % BATCH_SIZE_VIRTUAL == 0:
+        optimizer.step()     # 累积了一批，迈出一大步
+        optimizer.zero_grad() # 清空梯度，准备下一批
+
     avg_loss = total_loss / STEPS_PER_EPOCH
     avg_acc = total_acc / STEPS_PER_EPOCH
     if (epoch + 1) % 10 == 0:
