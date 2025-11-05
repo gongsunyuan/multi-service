@@ -6,95 +6,92 @@ from .DijkstraGnn import get_pyg_data_from_nx, generate_expert_label, GNNPretrai
 from ...Env.NetworkGenerator import TopologyGenerator
 
 if __name__ == "__main__":
-  print("🚀 开始阶段 1B: GNN 主体预训练 (模仿 Dijkstra)...")
+  print("🚀 开始阶段 1B: GNN 主体预训练 (Mini-batch DataLoader 模式)...")
 
-  # 1. 初始化
-  GNN_DIM = 128          # D_gnn 隐藏节点特征数
-  EPOCHS = 6000          # 训练轮数
-  NUM_LAYERS = 6        # L Gnn 层数
-  NODE_FEAT_DIM = 3     # (degree, is_source, is_dest) 阶段特征数
-  EDGE_FEAT_DIM = 2     # 边特征数
-  LEARNING_RATE = 1e-4  # 学习率
-  STEPS_PER_EPOCH = 200 #
-  BATCH_SIZE_VIRTUAL = 64
+  # --- 1. 超参数配置 ---
+  EPOCHS = 100          # 总轮数可以适当减少，因为现在每轮看的图多了
+  GNN_DIM = 128         # 建议增加宽度
+  NUM_LAYERS = 6        # [重要] 建议增加深度以覆盖网络直径
+  BATCH_SIZE = 64       # [关键] 真正的小批量大小
+  LEARNING_RATE = 1e-3  # Batch变大后，学习率通常可以稍微调大一点
+  SAMPLES_PER_EPOCH = 6400 # 每个 epoch 总共看多少张图 (6400 / 64 = 100 steps)
+  
+  NODE_FEAT_DIM = 3     # 假设你采用了我之前建议的 BFS Hop 特征，如果是旧的则为 3
+  EDGE_FEAT_DIM = 2
 
-  device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")         # 定义device
-  topo_gen = TopologyGenerator(num_nodes_range=(20, 30), m_ba=2)                  # Networkx 拓扑生成器
-  model = GNNPretrainModel(NODE_FEAT_DIM, GNN_DIM, EDGE_FEAT_DIM, NUM_LAYERS)     # Gnn 预训练模型
-  optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)                    # Adam 优化器
+  device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+  print(f"Using device: {device}")
 
-  model.to(device)                                                                # 将模型移到 device
+  # --- 2. 初始化组件 ---
+  topo_gen = TopologyGenerator(num_nodes_range=(20, 30), m_ba=2)                           # topo generator
+  model = GNNPretrainModel(NODE_FEAT_DIM, GNN_DIM, EDGE_FEAT_DIM, NUM_LAYERS).to(device)   # gnn model
+  optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)                             # optimizer 
 
-  # 将 pos_weight 传入损失函数
-  base_loss_fn = nn.BCEWithLogitsLoss()# 损失函数：二元交叉熵 (每条边是否在最短路径上)
+  # [重要] 固定 pos_weight 以防止震荡。
+  # 根据经验，20-30节点的图，负边大约是正边的 15-25 倍。
+  # 我们取一个保守值 15.0，让模型稍微多预测一点正样本，保证 Recall。
+  POS_WEIGHT_FIXED = torch.tensor([15.0]).to(device)
+  loss_fn = nn.BCEWithLogitsLoss(pos_weight=POS_WEIGHT_FIXED)
 
-  # 2. [关键] "中和" FiLM 的参数
-  # 我们创建 gamma=1.0 和 beta=0.0 的常量张量
+  # FiLM 中和参数
   GAMMA_NEUTRAL = torch.ones((NUM_LAYERS, GNN_DIM), dtype=torch.float).to(device)
   BETA_NEUTRAL = torch.zeros((NUM_LAYERS, GNN_DIM), dtype=torch.float).to(device)
 
-
+  # --- 3. 训练循环 ---
   for epoch in range(EPOCHS):
     model.train()
+  
+    # [关键] 每个 epoch 重新创建 Dataset 和 DataLoader
+    # 这是为了让新的 epoch 能生成新的随机图，保持数据的无限多样性
+    dataset = DynamicGraphDataset(topo_gen, GLOBAL_STATS, max_samples_per_epoch=SAMPLES_PER_EPOCH)
+    # num_workers > 0 可以多进程生成图，加速训练，但可能需要处理一些多进程共享种子的细节
+    # 这里先用 num_workers=0 (主进程生成) 保证简单稳定
+    train_loader = DataLoader(dataset, batch_size=BATCH_SIZE, num_workers=0) 
+
     total_loss = 0.0
     total_acc = 0.0
-    
-    for step in range(STEPS_PER_EPOCH):
-      # 3. 生成数据和标签
-      G_nx = topo_gen.generate_topology()
-      S, D = topo_gen.select_source_destination()
-      
-      data, G_nx_with_attrs = get_pyg_data_from_nx(G_nx, S, D, GLOBAL_STATS)
-      data = data.to(device)
+    num_batches = 0
 
-      # 基于 'delay' 计算专家路径标签
-      y_true_edge_labels = generate_expert_label(G_nx_with_attrs, S, D, data.edge_index)
+    # 使用 tqdm 包装 loader 以显示进度条
+    pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS}", unit="batch")
+    
+    for batch_data in pbar:
+      # batch_data 是一个 "巨图"，包含了 BATCH_SIZE (e.g., 64) 个小图
+      # 它的 .edge_index, .x, .edge_attr 都是自动拼接好的
+      batch_data = batch_data.to(device)
       
-      # 跳过不可达的图
-      if y_true_edge_labels is None:                                
-        continue
-      
-      y_true_edge_labels = y_true_edge_labels.to(device)
-      # 4. 训练
       optimizer.zero_grad()
       
-      num_pos = y_true_edge_labels.sum()
-      num_neg = y_true_edge_labels.shape[0] - num_pos
-      # [关键] 调用模型，并传入“中和”参数
-      edge_logits = model(data, manual_gamma=GAMMA_NEUTRAL, manual_beta=BETA_NEUTRAL)
+      # 前向传播：模型像处理一个大图一样处理这个 batch
+      edge_logits = model(batch_data, manual_gamma=GAMMA_NEUTRAL, manual_beta=BETA_NEUTRAL)
       
-      if num_pos > 0 and num_neg > 0:
-        pos_weight_value = num_neg / num_pos
-        # 动态创建损失函数
-        loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight_value.to(device))
-      else:
-        # 如果没有正/负样本, 使用基础损失 (无权重)
-        loss_fn = base_loss_fn
+      # 计算损失：batch_data.y 包含了这 64 个图的所有边的标签
+      loss = loss_fn(edge_logits, batch_data.y)
       
-      # 5. 计算损失
-      # 比较 GNN 的输出分数 (logits) 和 Dijkstra 标签
-      loss = loss_fn(edge_logits, y_true_edge_labels)
-      loss = loss / BATCH_SIZE_VIRTUAL
       loss.backward()
-
-      # --- [新] 计算准确率 ---
-      # edge_logits 是原始分数, > 0.0 意味着模型预测为 1 (在路径上)
-      predicted_labels = (edge_logits > 0.0).float()
-      # y_true_edge_labels 是 0.0 或 1.0
-      correct_predictions = (predicted_labels == y_true_edge_labels).float()
-      accuracy = correct_predictions.mean() # 计算平均正确率
-
-      total_loss += loss.item() * BATCH_SIZE_VIRTUAL
-      total_acc += accuracy.item() # <--- [新] 累加准确率
       
-      if (step + 1) % BATCH_SIZE_VIRTUAL == 0:
-        optimizer.step()     # 累积了一批，迈出一大步
-        optimizer.zero_grad() # 清空梯度，准备下一批
+      # [可选] 梯度裁剪，防止爆炸
+      torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+      
+      optimizer.step()
 
-    avg_loss = total_loss / STEPS_PER_EPOCH
-    avg_acc = total_acc / STEPS_PER_EPOCH
-    if (epoch + 1) % 10 == 0:
-      print(f"Epoch {epoch+1}/{EPOCHS}, 预训练损失: {avg_loss:.6f}, 准确率: {avg_acc*100:.2f}%")
+      # 统计指标
+      current_loss = loss.item()
+      total_loss += current_loss
+      
+      # 简单准确率
+      predicted = (edge_logits > 0.0).float()
+      current_acc = (predicted == batch_data.y).float().mean().item()
+      total_acc += current_acc
+      num_batches += 1
+      
+      # 更新进度条显示
+      pbar.set_postfix({"Loss": f"{current_loss:.4f}", "Acc": f"{current_acc:.2%}"})
+
+    # Epoch 结束总结
+    avg_loss = total_loss / num_batches
+    avg_acc = total_acc / num_batches
+    print(f"Epoch {epoch+1} 完成. Avg Loss: {avg_loss:.4f}, Avg Acc: {avg_acc:.2%}")
 
   # 6. 保存预训练好的 GNN 主体
   # 注意：保存的是整个模型，在阶段 2 加载时需要选择性加载

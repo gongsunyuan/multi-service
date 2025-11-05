@@ -1,20 +1,70 @@
+import random
+import numpy as np
+import networkx as nx
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch_geometric.nn as pyg_nn
 from torch_geometric.data import Data
 from torch_geometric.utils import to_networkx
-import networkx as nx
-import numpy as np
-import random
+from torch.utils.data import IterableDataset
 from ...Env.NetworkGenerator import TopologyGenerator
-import torch
 
 GLOBAL_STATS = {
   'delay': {'min': 1.0, 'max': 10.0},     # 假设 G.edges() 延迟范围
   'bw':    {'min': 100.0, 'max': 1000.0}, # 假设 G.edges() 带宽范围
-  'degree': {'min': 2.0, 'max': 10.0}    # 估计的 BA 拓扑度范围
 }
+
+def generate_single_sample(topo_gen: TopologyGenerator, global_stats: dict) -> Data:
+  """
+  不断尝试生成拓扑，直到获得一个合法的（S->D可达）带标签样本。
+  """
+  while True:
+    # 1. 生成拓扑和 S/D 对
+    G_nx = topo_gen.generate_topology()
+    try:
+      S, D = topo_gen.select_source_destination()
+    except ValueError: # 防止偶尔生成的图没有足够的节点或不可达
+      continue
+
+    # 2. 转换为 PyG Data 对象
+    data, G_nx_with_attrs = get_pyg_data_from_nx(G_nx, S, D, global_stats)
+    
+    # 3. 计算专家标签
+    y_true = generate_expert_label(G_nx_with_attrs, S, D, data.edge_index)
+    
+    if y_true is not None:
+      # [关键] 将标签直接挂载到 Data 对象上，名为 'y'
+      data.y = y_true
+      return data
+
+# === 新增：动态图数据集 ===
+class DynamicGraphDataset(IterableDataset):
+  def __init__(self, topo_gen, global_stats, max_samples_per_epoch):
+    """
+    :param max_samples_per_epoch: 每个 epoch 生成多少个样本后停止，防止无限循环。
+    """
+    self.topo_gen = topo_gen
+    self.global_stats = global_stats
+    self.max_samples = max_samples_per_epoch
+
+  def __iter__(self):
+    worker_info = torch.utils.data.get_worker_info()
+    if worker_info is None:  # 单进程模式
+      iter_start = 0
+      iter_end = self.max_samples
+    else:  
+      # 多进程模式 (DataLoader num_workers > 0)
+      # 将总任务量分配给各个 worker
+      per_worker = int(math.ceil(self.max_samples / float(worker_info.num_workers)))
+      worker_id = worker_info.id
+      iter_start = worker_id * per_worker
+      iter_end = min(iter_start + per_worker, self.max_samples)
+        
+    count = iter_start
+    while count < iter_end:
+      yield generate_single_sample(self.topo_gen, self.global_stats)
+      count += 1
 
 def normalize_features(
   edge_attr_tensor: torch.Tensor, 
