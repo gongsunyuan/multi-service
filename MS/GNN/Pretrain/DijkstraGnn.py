@@ -9,6 +9,7 @@ import numpy as np
 import random
 from ...Env.NetworkGenerator import TopologyGenerator
 import torch
+
 GLOBAL_STATS = {
   'delay': {'min': 1.0, 'max': 10.0},     # 假设 G.edges() 延迟范围
   'bw':    {'min': 100.0, 'max': 1000.0}, # 假设 G.edges() 带宽范围
@@ -19,7 +20,7 @@ def normalize_features(
   edge_attr_tensor: torch.Tensor, 
   degrees_tensor: torch.Tensor, 
   global_stats: dict
-) -> tuple[torch.Tensor, torch.Tensor]:
+  ) -> tuple[torch.Tensor, torch.Tensor]:
   """
   使用全局统计数据 (global_stats) 对边特征和节点度进行 Min-Max 归一化。
 
@@ -51,7 +52,6 @@ def normalize_features(
   # --- 2. 归一化 Node Degrees ---
   degrees_norm = degrees_tensor.clone()
 
-      
   return edge_attr_norm, degrees_norm
 
 # 假设的 GNN 输入准备函数
@@ -95,6 +95,7 @@ def get_pyg_data_from_nx(G: nx.Graph, S_node: int, D_node: int, global_stats: di
 
   return Data(x=node_features, edge_index=edge_index, edge_attr=edge_attr), G
 
+# 正确答案
 def generate_expert_label(G: nx.Graph, S_node: int, D_node: int, edge_index: torch.Tensor):
   """
   使用 Dijkstra (以 'delay' 为权重) 计算专家路径，并生成 GNN 标签。
@@ -130,7 +131,7 @@ def generate_expert_label(G: nx.Graph, S_node: int, D_node: int, edge_index: tor
 # 注意：这只是 GNN 主体和输出头，不包含 LSTM 和 FiLM 生成器
 
 class GNNPretrainModel(nn.Module):
-  def __init__(self, node_feat_dim, gnn_dim, edge_feat_dim, num_layers=3):
+  def __init__(self, node_feat_dim, gnn_dim, edge_feat_dim, num_layers=6):
     super().__init__()
     self.gnn_dim = gnn_dim
     self.num_layers = num_layers

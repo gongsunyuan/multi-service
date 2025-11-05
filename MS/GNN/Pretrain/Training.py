@@ -9,9 +9,9 @@ if __name__ == "__main__":
   print("🚀 开始阶段 1B: GNN 主体预训练 (模仿 Dijkstra)...")
 
   # 1. 初始化
-  GNN_DIM = 64          # D_gnn 隐藏节点特征数
+  GNN_DIM = 128          # D_gnn 隐藏节点特征数
   EPOCHS = 6000          # 训练轮数
-  NUM_LAYERS = 3        # L Gnn 层数
+  NUM_LAYERS = 6        # L Gnn 层数
   NODE_FEAT_DIM = 3     # (degree, is_source, is_dest) 阶段特征数
   EDGE_FEAT_DIM = 2     # 边特征数
   LEARNING_RATE = 1e-4  # 学习率
