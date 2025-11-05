@@ -10,7 +10,7 @@ from torch.utils.data import IterableDataset
 GLOBAL_STATS = {
   'delay': {'min': 1.0, 'max': 10.0},
   'bw':    {'min': 100.0, 'max': 1000.0},
-  'degree': {'min': 2.0, 'max': 10.0}
+  'degree': {'min': 2.0, 'max': 30.0}
 }
 
 # === 核心函数 1: 图数据转换 (含 5 维节点特征) ===

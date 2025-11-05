@@ -1,6 +1,8 @@
 import torch
+from tqdm import tqdm
 import torch.nn as nn
 import torch.optim as optim
+from torch.optim import lr_scheduler
 from torch_geometric.loader import DataLoader
 from .DijkstraGnn import get_pyg_data_from_nx, generate_expert_label, GNNPretrainModel, GLOBAL_STATS, DynamicGraphDataset
 from ...Env.NetworkGenerator import TopologyGenerator
@@ -16,7 +18,7 @@ if __name__ == "__main__":
   LEARNING_RATE = 1e-3  # Batch变大后，学习率通常可以稍微调大一点
   SAMPLES_PER_EPOCH = 6400 # 每个 epoch 总共看多少张图 (6400 / 64 = 100 steps)
   
-  NODE_FEAT_DIM = 3     # 假设你采用了我之前建议的 BFS Hop 特征，如果是旧的则为 3
+  NODE_FEAT_DIM = 5     # 
   EDGE_FEAT_DIM = 2
 
   device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -26,6 +28,17 @@ if __name__ == "__main__":
   topo_gen = TopologyGenerator(num_nodes_range=(20, 30), m_ba=2)                           # topo generator
   model = GNNPretrainModel(NODE_FEAT_DIM, GNN_DIM, EDGE_FEAT_DIM, NUM_LAYERS).to(device)   # gnn model
   optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)                             # optimizer 
+  
+  # ReduceLROnPlateau 调度器
+  scheduler = lr_scheduler.ReduceLROnPlateau(
+    optimizer, 
+    mode='min',         # 监控 Loss，目标是最小化
+    factor=0.1,         # 每次学习率降低 10 倍
+    patience=5,         # 连续 5 个 Epoch 性能不提升，则触发
+    threshold=0.001,    # 损失改善超过 0.001 才算有效改善
+    min_lr=1e-6,        # 最小学习率
+    # verbose=True        # 触发时打印信息
+  )
 
   # [重要] 固定 pos_weight 以防止震荡。
   # 根据经验，20-30节点的图，负边大约是正边的 15-25 倍。
@@ -90,9 +103,9 @@ if __name__ == "__main__":
 
     # Epoch 结束总结
     avg_loss = total_loss / num_batches
-    avg_acc = total_acc / num_batches
+    avg_acc  = total_acc  / num_batches
     print(f"Epoch {epoch+1} 完成. Avg Loss: {avg_loss:.4f}, Avg Acc: {avg_acc:.2%}")
-
+    scheduler.step(avg_loss)
   # 6. 保存预训练好的 GNN 主体
   # 注意：保存的是整个模型，在阶段 2 加载时需要选择性加载
   print("✅ 阶段 1B 完成。保存 GNN 主体权重...")
