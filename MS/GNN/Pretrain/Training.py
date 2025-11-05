@@ -17,27 +17,15 @@ if __name__ == "__main__":
   LEARNING_RATE = 1e-4  # 学习率
   STEPS_PER_EPOCH = 200 #
 
-
-  topo_gen = TopologyGenerator(num_nodes_range=(20, 30), m_ba=2)   # Networkx 拓扑生成器
+  device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")         # 定义device
+  topo_gen = TopologyGenerator(num_nodes_range=(20, 30), m_ba=2)                  # Networkx 拓扑生成器
   model = GNNPretrainModel(NODE_FEAT_DIM, GNN_DIM, EDGE_FEAT_DIM, NUM_LAYERS)     # Gnn 预训练模型
-  optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)     # Adam 优化器
+  optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)                    # Adam 优化器
 
-  device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
-  model.to(device) # 将模型移到 device
-  # 估算负/正样本比例。
-  # 假设一个 (20, 30) 节点的图, m_ba=2, 大约有 2*25=50 条物理边 -> 100 条有向边
-  # 最短路径平均长度 (hops) 可能是 4-5。
-  avg_total_edges = 100
-  avg_path_edges = 5
-  avg_neg_edges = avg_total_edges - avg_path_edges # 95
-  
-  # pos_weight = (负样本数 / 正样本数)
-  # pos_weight_value = avg_neg_edges / avg_path_edges # 95 / 5 = 19.0
-  # pos_weight = torch.tensor([pos_weight_value]) 
-  
+  model.to(device)                                                                # 将模型移到 device
+
   # 将 pos_weight 传入损失函数
   base_loss_fn = nn.BCEWithLogitsLoss()# 损失函数：二元交叉熵 (每条边是否在最短路径上)
-  # print(f"✅ 启用类别不平衡修正, pos_weight={pos_weight_value:.2f}")
 
   # 2. [关键] "中和" FiLM 的参数
   # 我们创建 gamma=1.0 和 beta=0.0 的常量张量
@@ -61,7 +49,8 @@ if __name__ == "__main__":
       # 基于 'delay' 计算专家路径标签
       y_true_edge_labels = generate_expert_label(G_nx_with_attrs, S, D, data.edge_index)
       
-      if y_true_edge_labels is None: # 跳过不可达的图
+      # 跳过不可达的图
+      if y_true_edge_labels is None:                                
         continue
       
       y_true_edge_labels = y_true_edge_labels.to(device)
