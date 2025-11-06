@@ -52,7 +52,7 @@ if __name__ == "__main__":
   SAMPLES_PER_EPOCH = 6400
   
   # [调整] 配合热重启，初始 LR 可以稍微给高一点点，让它有能力跳出坑
-  LEARNING_RATE = 2e-4  
+  LEARNING_RATE = 1e-6
   
   NODE_FEAT_DIM = 5
   EDGE_FEAT_DIM = 2
@@ -91,7 +91,7 @@ if __name__ == "__main__":
   # eta_min=1e-6: 学习率最低降到 1e-6
   from torch.optim import lr_scheduler
   scheduler = lr_scheduler.CosineAnnealingWarmRestarts(
-    optimizer, T_0=50, T_mult=1, eta_min=1e-7
+    optimizer, T_0=50, T_mult=2, eta_min=1e-8
   )
 
   # [核心升级 2] 使用 Focal Loss 替代 BCE
