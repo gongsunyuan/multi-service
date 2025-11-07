@@ -71,7 +71,7 @@ if __name__ == "__main__":
   model = GNNPretrainModel(NODE_FEAT_DIM, GNN_DIM, EDGE_FEAT_DIM, NUM_LAYERS)
   
   swa_model = AveragedModel(model) # 创建 SWA 模型影子
-  swa_start = 300 # 从第 300 轮开始收集 SWA 权重
+  swa_start = 0 # 从第 300 轮开始收集 SWA 权重
   
   
   start_epoch = 0
@@ -81,14 +81,14 @@ if __name__ == "__main__":
     new_state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
     model.load_state_dict(new_state_dict)
     print("✅ 模型权重加载成功！")
-    start_epoch = 300
+    start_epoch = 0
 
   model = model.to(device)
   if torch.cuda.device_count() > 1:
     print(f"✨ 启用 {torch.cuda.device_count()} 张 GPU 进行 PyG DataParallel 加速")
     model = DataParallel(model)
       
-  optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-5) # [微调] 加一点点 weight_decay 防止过拟合
+  optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-10) # [微调] 加一点点 weight_decay 防止过拟合
   swa_scheduler = SWALR(optimizer, swa_lr=1e-5)
   # [核心升级 1] 使用余弦退火热重启调度器
   # T_0=50: 首次重启周期为 50 Epoch
