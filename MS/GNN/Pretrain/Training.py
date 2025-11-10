@@ -46,7 +46,7 @@ if __name__ == "__main__":
   print("🚀 开始阶段 1B: GNN 主体预训练 (终极冲刺 - Focal Loss + 热重启)...")
 
   # --- 1. 超参数配置 ---
-  EPOCHS = 3000          # 保持 400，配合热重启需要更多轮次
+  EPOCHS = 3000          
   GNN_DIM = 256
   NUM_LAYERS = 6
   BATCH_SIZE = 128       
@@ -71,7 +71,7 @@ if __name__ == "__main__":
   model = GNNPretrainModel(NODE_FEAT_DIM, GNN_DIM, EDGE_FEAT_DIM, NUM_LAYERS)
   
   swa_model = AveragedModel(model) # 创建 SWA 模型影子
-  swa_start = 0 # 从第 300 轮开始收集 SWA 权重
+  swa_start = 0                    # 从第 300 轮开始收集 SWA 权重
   
   
   start_epoch = 0
@@ -136,7 +136,7 @@ if __name__ == "__main__":
       pbar.set_postfix({"Loss": f"{current_loss:.4f}", "Acc": f"{current_acc:.2%}"})
 
     avg_loss = total_loss / num_batches
-    avg_acc = total_acc / num_batches
+    avg_acc  = total_acc / num_batches
     current_lr = optimizer.param_groups[0]['lr']
     
     # 注意：CosineAnnealingWarmRestarts 需要在每次 step() 后更新，或者每 epoch 更新

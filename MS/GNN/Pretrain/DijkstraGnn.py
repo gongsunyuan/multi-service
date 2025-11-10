@@ -83,16 +83,16 @@ def generate_expert_label(G: nx.Graph, S_node: int, D_node: int, edge_index: tor
 
 # === 核心类 1: 动态数据集 ===
 def generate_single_sample(topo_gen, global_stats):
-    while True:
-        G_nx = topo_gen.generate_topology()
-        try:
-            S, D = topo_gen.select_source_destination()
-        except: continue
-        data, G_with_attrs = get_pyg_data_from_nx(G_nx, S, D, global_stats)
-        y = generate_expert_label(G_with_attrs, S, D, data.edge_index)
-        if y is not None:
-            data.y = y
-            return data
+  while True:
+    G_nx = topo_gen.generate_topology()
+    try:
+      S, D = topo_gen.select_source_destination()
+    except: continue
+    data, G_with_attrs = get_pyg_data_from_nx(G_nx, S, D, global_stats)
+    y = generate_expert_label(G_with_attrs, S, D, data.edge_index)
+    if y is not None:
+      data.y = y
+      return data
 
 class DynamicGraphDataset(IterableDataset):
     def __init__(self, topo_gen, global_stats, max_samples):
