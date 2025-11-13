@@ -3,7 +3,6 @@ import subprocess
 import time
 import re # 导入正则表达式库
 from mininet.net import Mininet
-from mininet.topo import topo
 from enum import Enum # 需要导入 FlowGenerator 中的 Enum
 import numpy as np
 import sys
@@ -184,7 +183,7 @@ def measure_latency_ping_from_output(result: str) -> float:
     ping_regex = re.search(r"rtt min/avg/max/mdev = [\d\.]+/([\d\.]+)/", result)
     if ping_regex:
       avg_rtt = float(ping_regex.group(1))
-        return avg_rtt / 2.0 # 单向延迟
+      return avg_rtt / 2.0 # 单向延迟
   except Exception as e:
     print(f"Error parsing ping output: {e}")
   return 1000.0 # 惩罚值
@@ -297,25 +296,49 @@ def run_traffic_capture(S_host, D_host, flow_profile, N_PACKETS=50):
   # --- 根据模式启动对应的服务器 ---
   iperf_server_cmd = f'iperf -s -p 5001'
   if mode == 'udp':
-    iperf_server_cmd += ' -u' # 如果是 UDP，添加 -u
+    iperf_server_cmd += ' -u'
   
   D_host.cmd(f'{iperf_server_cmd} &')
   # -----------------------------------
 
-  # 启动 tcpdump
-  capture_command = f'tcpdump -i {S_host.intfNames()[0]} -c {N_PACKETS} -w {temp_pcap_file}'
-  S_host.cmd(f'{capture_command} &')
+  # 【修复】 动态查找正确的接口名，而不是假设 [0]
+  correct_intf = None
+  for intf in S_host.intfNames():
+    if intf != 'lo':
+      correct_intf = intf
+      break
   
+  if correct_intf is None:
+    print(f"错误: 找不到 {S_host.name} 的有效接口 (非 'lo')")
+    D_host.cmd('kill %iperf')
+    return None
+
+  # 使用 -c N_PACKETS (它会自动退出)
+  capture_command = f'tcpdump -i {correct_intf} -c {N_PACKETS} -w {temp_pcap_file}'
+  
+  print(f"INFO: 启动 tcpdump (在 {correct_intf} 上监听)...")
+  # B. 使用 Popen 启动 tcpdump
+  tcpdump_proc = S_host.popen(capture_command, shell=True)
+
+  # C. 等待 tcpdump 启动
   time.sleep(0.5) 
   
-  # 启动 iperf client 
+  # D. 启动 iperf client (阻塞, 运行 5 秒)
+  print("INFO: 启动 iperf client...")
   client_cmd = f'iperf -c {D_host.IP()} -p 5001 -{mode[0]} -b {rate} -t 5'
   S_host.cmd(client_cmd) 
-  
+  print("INFO: iperf client 结束。")
+
+  # E. 【关键】等待 tcpdump 进程结束
+  # 因为 iperf 运行了5秒 (产生了数千个包),
+  # tcpdump -c 50 会在 iperf 结束前 *早就* 捕获 50 个包并自动退出了。
+  # .wait() 会立即返回，不会挂起。
+  print("INFO: 等待 tcpdump 写入文件...")
+  tcpdump_proc.wait()
+  print("INFO: tcpdump 结束。")
+
   # 清理 iperf server 进程
   D_host.cmd('kill %iperf')
   
   return temp_pcap_file
-
-
 
