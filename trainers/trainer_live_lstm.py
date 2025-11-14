@@ -46,7 +46,7 @@ def run_live_training():
   net = None
   
   # --- 训练参数 ---
-  TRAINING_STEPS = 500  # 我们总共生成 500 个样本
+  TRAINING_STEPS = 1000  # 我们总共生成 1000 个样本
   LEARNING_RATE = 0.001
   
   # --- 模型参数 (!! 关键 !!) ---
@@ -55,7 +55,7 @@ def run_live_training():
   INPUT_DIM = 2           # 2个参数 (delay, IAT)
   RNN_LAYERS = 2          # RNN 层数
   OUTPUT_DIM = 3          # 3个类别 (VOIP, STREAMING, INTERACTIVE)
-  HIDDEN_DIM = 128        # 
+  HIDDEN_DIM = 256        # 
   
   # 类别映射 (FlowType.value 是 1-based, 损失函数是 0-based)
   # FlowType.VOIP.value = 1 -> 索引 0
@@ -112,11 +112,11 @@ def run_live_training():
     # 这就是 "在线训练" 循环
     # 它取代了 "for data in dataloader:"
     # ----------------------------------------------------
-    pbar = tqdm(range(TRAINING_STEPS))
+    pbar = tqdm()
     total_loss = 0.0
     correct_predictions = 0
 
-    for i in pbar:
+    for i in range(TRAINING_STEPS):
       # A. 生成一个新样本 (数据+标签)
       # --------------------------
       flow_type, flow_profile = flow_gen.get_random_flow()
@@ -145,25 +145,25 @@ def run_live_training():
       
       # E. 执行训练步骤
       # -----------------
-      optimizer.zero_grad()            # 清空梯度
-      logits = model(input_tensor)     # 前向传播
-      loss = criterion(logits, label_tensor) # 计算损失
-      loss.backward()                  # 反向传播
-      optimizer.step()                 # 更新权重
+      optimizer.zero_grad()                   # 清空梯度
+      logits = model(input_tensor)            # 前向传播
+      loss = criterion(logits, label_tensor)  # 计算损失
+      loss.backward()                         # 反向传播
+      optimizer.step()                        # 更新权重
       
       # F. 记录统计数据
       # -----------------
       total_loss += loss.item()
       predicted_index = torch.argmax(logits, dim=1).item()
       if predicted_index == label:
-          correct_predictions += 1
+        correct_predictions += 1
       
-      if (i+1) % 50 == 0:
-          avg_loss = total_loss / 50
-          accuracy = correct_predictions / 50
-          info(f"\n[步骤 {i+1}/{TRAINING_STEPS}] 平均损失: {avg_loss:.4f}, 准确率: {accuracy*100:.2f}%\n")
-          total_loss = 0.0
-          correct_predictions = 0
+      if (i+1) % 500 == 0:
+        avg_loss = total_loss / 500
+        accuracy = correct_predictions / 500
+        info(f"\n[步骤 {i+1}/{TRAINING_STEPS}] 平均损失: {avg_loss:.4f}, 准确率: {accuracy*100:.2f}%\n")
+        total_loss = 0.0
+        correct_predictions = 0
 
     info(f"*** 训练完成 ***\n")
     
@@ -174,20 +174,20 @@ def run_live_training():
 
   
   except Exception as e:
-      info(f"\n--- 仿真出错 ---")
-      info(f"{e}\n")
-      import traceback
-      traceback.print_exc()
+    info(f"\n--- 仿真出错 ---")
+    info(f"{e}\n")
+    import traceback
+    traceback.print_exc()
       
   finally:
-      # 确保 Mininet 总是被停止
-      if net:
-          info("\n*** 步骤 6: 停止 Mininet ***\n")
-          net.stop()
-      
-      # 确保 Mininet 被彻底清理
-      info("INFO: 运行 mn -c 以防万一...\n")
-      os.system('sudo mn -c')
+    # 确保 Mininet 总是被停止
+    if net:
+      info("\n*** 步骤 6: 停止 Mininet ***\n")
+      net.stop()
+    
+    # 确保 Mininet 被彻底清理
+    info("INFO: 运行 mn -c 以防万一...\n")
+    os.system('sudo mn -c')
 
 
 if __name__ == '__main__':
