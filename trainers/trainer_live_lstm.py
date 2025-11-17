@@ -3,16 +3,17 @@ import sys
 import networkx as nx
 import numpy as np
 import time
-from mininet.net import Mininet
+from functools import partial
 from mininet.topo import Topo
-from mininet.node import OVSKernelSwitch, RemoteController
+from mininet.net import Mininet
 from mininet.link import TCLink
 from mininet.log import setLogLevel, info
-from functools import partial
+import torch.optim.lr_scheduler as lr_scheduler
+from mininet.node import OVSKernelSwitch, RemoteController
 # --- 导入你的环境文件 ---
 from MS.Env.NetworkGenerator import TopologyGenerator
 from MS.Env.FlowGenerator import FlowGenerator, FlowType
-from MS.Env.MininetController import get_flow_fingerprint, measure_path_qos
+from MS.Env.MininetController import get_a_mininet, send_packet_and_capture
 
 # --- 导入 PyTorch 和你的 RNN 分类器 ---
 import torch
@@ -21,173 +22,148 @@ import torch.optim as optim
 from MS.LSTM.Pretrain.TmpClassifier import RNNClassifier #
 from tqdm import tqdm # 用于显示进度条
 
-# -----------------------------------------------
-# GraphTopo 类 (与 tmp_runner.py 中修复后的一致)
-# -----------------------------------------------
-class GraphTopo(Topo):
-  def __init__(self, blueprint_g: nx.Graph, **opts):
-    Topo.__init__(self, **opts)
-    
-    for node_id in blueprint_g.nodes():
-      self.addSwitch(f's{node_id}', protocols='OpenFlow13')
-      self.addHost(f'h{node_id}')
-      self.addLink(f'h{node_id}', f's{node_id}', bw=1000, delay='0.1ms')
 
-    for u, v, data in blueprint_g.edges(data=True):
-      bw = data.get('bandwidth', 1000)
-      delay = f"{data.get('delay', 1)}ms"
-      self.addLink(f's{u}', f's{v}', bw=bw, delay=delay)
-
-# -----------------------------------------------
-# 核心训练逻辑
-# -----------------------------------------------
 def run_live_training():
-  """主运行函数"""
-  net = None
   
-  # --- 训练参数 ---
-  TRAINING_STEPS = 1000  # 我们总共生成 1000 个样本
+  # 训练参数
   LEARNING_RATE = 0.001
+  TOTAL_BATCH = 200
+  ACCUMULATION_STEPS = 128  # 梯度累积
+  TRAINING_STEPS = ACCUMULATION_STEPS*TOTAL_BATCH  # 我们总共生成 128*200 个样本
   
-  # --- 模型参数 (!! 关键 !!) ---
-  # 根据你上次的 "size mismatch" 错误日志，
-  # 我们知道你的 Classify-model.pth 是用这些参数训练的：
-  INPUT_DIM = 2           # 2个参数 (delay, IAT)
-  RNN_LAYERS = 2          # RNN 层数
-  OUTPUT_DIM = 3          # 3个类别 (VOIP, STREAMING, INTERACTIVE)
-  HIDDEN_DIM = 256        # 
+  Lstm_PATH       = "./trained_model/trained_lstm.pth"
+  Classifier_PATH = "./trained_model/trained_classifier.pth"
   
-  # 类别映射 (FlowType.value 是 1-based, 损失函数是 0-based)
-  # FlowType.VOIP.value = 1 -> 索引 0
-  # FlowType.STREAMING.value = 2 -> 索引 1
-  # FlowType.INTERACTIVE.value = 3 -> 索引 2
+  # 模型参数 
+  INPUT_DIM = 2            # 2个参数 (delay, IAT)
+  RNN_LAYERS = 2           # RNN 层数
+  NUM_CLASSES = 3          # 3个类别 (VOIP, STREAMING, INTERACTIVE)
+  HIDDEN_DIM  = 256        # 
   
-  # --- 初始化 PyTorch 组件 ---
-  info(f"*** 正在初始化模型 (HIDDEN_DIM={HIDDEN_DIM}, OUTPUT_DIM={OUTPUT_DIM})\n")
+  
+  # 初始化 PyTorch 组件
+
   model = RNNClassifier(
     input_dim=INPUT_DIM, 
     rnn_hidden_dim=HIDDEN_DIM, 
-    num_classes=OUTPUT_DIM, 
+    num_classes=NUM_CLASSES, 
     rnn_layers=RNN_LAYERS
     )
   
-  # (重要: 确保 TmpClassifier.py 里的 intermediate_dim 已被修复为 64)
   
   criterion = nn.CrossEntropyLoss()
   optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
-  
+
+  """
+    mode='min' : 我们希望监控的指标(loss)越小越好
+    factor=0.5 : 触发调整时，新LR = 旧LR * 0.5
+    patience=3: 如果连续 10 次更新（即 10 * 128 个流），Loss 都没有明显下降，才触发减少
+    verbose=True: 触发时打印日志
+  """
+
+  scheduler = lr_scheduler.ReduceLROnPlateau(
+    optimizer, 
+    mode='min', 
+    factor=0.5, 
+    patience=10
+  )
+
   # 将模型置于训练模式
   model.train()
 
+  # 流生成参数
+  FLOW_DURATION = 30          # 最长发包时间
+  N_PACKETS_TO_CAPTURE = 30   # 抓包数量
+
+  """
+  为了尽可能快速的获取包，采用简单的拓扑：只包含两个节点 h1，h2
+  """
+
+  g = nx.Graph()
+  g.add_nodes_from(["1", "2"])
+  g.add_edge("1", "2")
+
   try:
-    # --- 步骤 1: 生成拓扑 ---
-    print("--- 步骤 1: 生成拓扑 [NetworkGenerator] ---")
-    topo_gen = TopologyGenerator(num_nodes_range=(5, 8))
-    g = topo_gen.generate_topology()
-    print(f"拓扑生成完毕: {len(g.nodes())} 个节点, {len(g.edges())} 条边。")
-
-    # --- 步骤 2: 启动 Mininet ---
-    print("\n--- 步骤 2: 启动 Mininet ---")
-    RemoteCtrl = partial(RemoteController, ip='127.0.0.1', port=6633)
-
-    net = Mininet(
-      topo=GraphTopo(g),
-      switch=OVSKernelSwitch,
-      link=TCLink,
-      controller=RemoteCtrl
-    )
-
-    net.start()
-    
-    # --- 步骤 2.B: 测试 Mininet 连通性 (pingAll) ---
-    print("\n--- 步骤 2.B: 测试 Mininet 连通性 (pingAll) ---")
-    packet_loss_percentage = net.pingAll()
-
-    # --- 步骤 3: 实例化生成器 ---
-    flow_gen = FlowGenerator()
-
-    info(f"*** 步骤 4: 开始在线训练 (共 {TRAINING_STEPS} 步)\n")
-    
-    # ----------------------------------------------------
-    # 这就是 "在线训练" 循环
-    # 它取代了 "for data in dataloader:"
-    # ----------------------------------------------------
-    pbar = tqdm()
-    total_loss = 0.0
-    correct_predictions = 0
-
-    for i in range(TRAINING_STEPS):
-      # A. 生成一个新样本 (数据+标签)
-      # --------------------------
-      flow_type, flow_profile = flow_gen.get_random_flow()
-      # 【关键】标签：FlowType.value (1,2,3) -> 损失函数 (0,1,2)
-      label = flow_type.value - 1 
-      label_tensor = torch.tensor([label], dtype=torch.long) #
-
-      # B. 获取 Mininet 中的主机
-      # --------------------------
-      s_id, d_id = topo_gen.select_source_destination()
-      S_host = net.get(f'h{s_id}')
-      D_host = net.get(f'h{d_id}')
+    with get_a_mininet(g) as net:
+      print("======网络已启动=======")
+      print(net.hosts)
+      net.pingAll()
       
-      # C. 在 Mininet 中"实时"生成指纹 (数据)
-      # ---------------------------------
-      fingerprint_matrix = get_flow_fingerprint(S_host, D_host, flow_profile) #
-      
-      if fingerprint_matrix is None:
-        info(f"警告: 第 {i} 步指纹生成失败，跳过。\n")
-        continue
-    
-      # D. 准备 PyTorch 张量
-      # --------------------
-      # (50, 2) -> (1, 50, 2) (添加 Batch 维度)
-      input_tensor = torch.from_numpy(fingerprint_matrix).unsqueeze(0) 
-      
-      # E. 执行训练步骤
-      # -----------------
-      optimizer.zero_grad()                   # 清空梯度
-      logits = model(input_tensor)            # 前向传播
-      loss = criterion(logits, label_tensor)  # 计算损失
-      loss.backward()                         # 反向传播
-      optimizer.step()                        # 更新权重
-      
-      # F. 记录统计数据
-      # -----------------
-      total_loss += loss.item()
-      predicted_index = torch.argmax(logits, dim=1).item()
-      if predicted_index == label:
-        correct_predictions += 1
-      
-      if (i+1) % 500 == 0:
-        avg_loss = total_loss / 500
-        accuracy = correct_predictions / 500
-        info(f"\n[步骤 {i+1}/{TRAINING_STEPS}] 平均损失: {avg_loss:.4f}, 准确率: {accuracy*100:.2f}%\n")
-        total_loss = 0.0
-        correct_predictions = 0
+      server, client = net.get("h1", "h2")
 
-    info(f"*** 训练完成 ***\n")
-    
-    # --- 步骤 5: 保存新训练的模型 ---
-    output_model_path = "./lstm_live_trained.pth"
-    torch.save(model.state_dict(), output_model_path)
-    info(f"新模型已保存到: {output_model_path}\n")
+      flow_gen = FlowGenerator()   #实例化生成器 
 
-  
+      info(f"==== 开始在线训练 (共 {TRAINING_STEPS} 个数据), 每批次 {ACCUMULATION_STEPS} 个数据=====")
+      
+      pbar = tqdm(range(TRAINING_STEPS))
+      correct_predictions = 0
+      total_loss = 0.0
+      best_acc = 0.0
+
+      for i in pbar:
+        # 生成一个新样本 (数据+标签)
+        flow_type, flow_profile = flow_gen.get_random_flow()
+        # 标签：FlowType.value (1,2,3) -> 损失函数 (0,1,2)
+        label = flow_type.value - 1 
+        label_tensor = torch.tensor([label], dtype=torch.long) #
+
+        input_tensor = send_packet_and_capture(
+          server=server,
+          client=client,
+          flow_type=flow_type,
+          duration_sec=FLOW_DURATION,
+          n_packets_to_capture=N_PACKETS_TO_CAPTURE
+        ).float()
+
+        logits = model(input_tensor)            # 向前传播
+        loss = criterion(logits, label_tensor)  # 计算损失
+        loss = loss/ACCUMULATION_STEPS          # 归一化
+        loss.backward()                         # 反向传播，梯度积累
+        
+        # 记录统计数据
+        total_loss += loss.item()*ACCUMULATION_STEPS
+        predicted_index = torch.argmax(logits, dim=1).item()
+
+        if predicted_index == label:
+          correct_predictions += 1
+        
+        if (i+1) % ACCUMULATION_STEPS == 0:
+          # 更新模型
+          optimizer.step()
+          optimizer.zero_grad()
+
+          # 更新统计数据
+          avg_loss = total_loss / ACCUMULATION_STEPS
+          accuracy = correct_predictions / ACCUMULATION_STEPS
+
+          #  更新学习率
+          scheduler.step(avg_loss)
+          current_lr = optimizer.param_groups[0]['lr']
+
+          # 打印当前训练情况
+          pbar.set_postfix({
+            'Loss': f'{avg_loss:.4f}', 
+            'Acc': f'{acc:.2%}',
+            'LR': f'{current_lr:.1e}'
+          })
+
+          # 保存最佳模型
+          if best_acc < accuracy:
+            torch.save(model.lstm.state_dict(), Lstm_PATH)
+            torch.save(model.state_dict(), Classifier_PATH)
+            best_acc = accuracy
+
+          total_loss = 0.0
+          correct_predictions = 0
+
+      info(f"====训练完成====\n")
+      print(f"best acc: {best_acc}")
+
   except Exception as e:
     info(f"\n--- 仿真出错 ---")
     info(f"{e}\n")
     import traceback
     traceback.print_exc()
-      
-  finally:
-    # 确保 Mininet 总是被停止
-    if net:
-      info("\n*** 步骤 6: 停止 Mininet ***\n")
-      net.stop()
-    
-    # 确保 Mininet 被彻底清理
-    info("INFO: 运行 mn -c 以防万一...\n")
-    os.system('sudo mn -c')
 
 
 if __name__ == '__main__':

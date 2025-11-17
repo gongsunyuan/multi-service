@@ -7,18 +7,19 @@ from tqdm import tqdm # 导入进度条库
 
 from .TmpClassifier import RNNClassifier
 from ..PreferenceModule import PreferenceModule 
-from .FlowGenerator import FlowGenerator, FlowFingerprintDataset, normalize_fingerprint, N_PACKETS, NUM_CLASSES
+from .TmpFlowGenerator import FlowGenerator, FlowFingerprintDataset, normalize_fingerprint, N_PACKETS, NUM_CLASSES
 
 # 训练参数
-EPOCHS = 20
+EPOCHS = 300
 INPUT_DIM = 2 
 RNN_LAYERS = 2
-BATCH_SIZE = 128
+BATCH_SIZE = 512
 LEARNING_RATE = 1e-4
 RNN_HIDDEN_DIM = 128 
-TEST_SET_SIZE = BATCH_SIZE * 300   
-TRAIN_SET_SIZE = BATCH_SIZE * 500 
-PRETRAINED_PATH = "./MS/LSTM/Pretrain/Classify-model.pth"
+TEST_SET_SIZE = BATCH_SIZE * 3000   
+TRAIN_SET_SIZE = BATCH_SIZE * 5000 
+Classifier_PATH = "./MS/LSTM/Pretrain/Classify-model.pth"
+Preference_PATH = "MS/LSTM/Preference-model.pth"
 
 def evaluate(model, test_loader, criterion, device):
   """在测试集上评估模型的性能"""
@@ -134,7 +135,11 @@ def train_phase_1a():
       # 仅保存 LSTM Body (preference_module) 的权重
       torch.save(
         model.state_dict(), 
-        PRETRAINED_PATH
+        Classifier_PATH
+      )
+      torch.save(
+        model.preference_module.state_dict(),
+        Preference_PATH
       )
   print(f"最佳测试准确率: {best_test_acc:.2f}%. 保存 [LSTM Body] 权重到 {PRETRAINED_PATH}")
 

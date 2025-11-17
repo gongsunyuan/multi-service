@@ -266,7 +266,7 @@ def send_packet_and_capture(
   server_ip = server.IP()
   client_ip = client.IP()
   
-  print(f"server ip: {server_ip} client_ip: {client_ip}")
+  # print(f"server ip: {server_ip} client_ip: {client_ip}")
   # 2. 找到要监听的接口 (s1-eth1)
   server_intf = None
   for intf in server.intfList():
@@ -289,10 +289,13 @@ def send_packet_and_capture(
 
   # 4. 准备 tshark 命令 (这是最快的方法)
   display_filter = f"src host {client_ip} and dst host {server_ip}"
+  timeout_duration = duration_sec+5
+
   tshark_cmd = [
     'sudo',
     'tshark',
     '-c', str(n_packets_to_capture), # 抓 N 个包后停止
+    '-a', f'duration:{timeout_duration}',
     '-i', switch_intf_name,
     '-l', # 行缓冲 (实时)
     '-T', 'fields',
@@ -311,28 +314,28 @@ def send_packet_and_capture(
 
   try:
     # 5. [Action 2] 启动流量
-    print(f"[Net] 启动 D-ITG 接收端 (h1)...")
+    # print(f"[Net] 启动 D-ITG 接收端 (h1)...")
     server_proc = server.popen('ITGRecv')
     sleep(1)
   
     # 6. [Action 3] 启动 tshark 捕获管道
-    print(f"[Capture] 启动 tshark 管道: {' '.join(tshark_cmd)}")
+    # print(f"[Capture] 启动 tshark 管道: {' '.join(tshark_cmd)}")
     tshark_proc = subprocess.Popen(
       tshark_cmd, 
       stdout=subprocess.PIPE, 
-      stderr=subprocess.PIPE,
+      stderr=subprocess.DEVNULL,
       text=True
     )
 
     sleep(1)
-    print(f"[Net] 启动 D-ITG 发送端 (h2): {client_cmd}")
+    # print(f"[Net] 启动 D-ITG 发送端 (h2): {client_cmd}")
     client_proc = client.popen(client_cmd)
     # 7. [核心] 实时从管道读取并封装向量
     for line in tshark_proc.stdout:
       line = line.strip()
       if not line:
         continue
-      print(f"[RAW CAPTURE] 抓到了: {line}")
+      # print(f"[RAW CAPTURE] 抓到了: {line}")
       try:
 
         size_str, iat_str, src_ip, dst_ip = line.split(',')
@@ -354,14 +357,35 @@ def send_packet_and_capture(
   except Exception as e:
     print(f"[Error] 实验执行出错: {e}")
   finally:
-    # 8. 清理
-    print("[Net] 清理进程...")
-    if tshark_proc: tshark_proc.terminate()
-    if client_proc: client_proc.terminate()
-    if server_proc: server_proc.terminate()
+    # print("[Net] 清理进程...")
+    # 清理 tshark
+    if tshark_proc:
+      try:
+        tshark_proc.terminate()
+        # 给它 1 秒钟时间去死，不行就强杀
+        tshark_proc.wait(timeout=1) 
+      except subprocess.TimeoutExpired:
+        tshark_proc.kill()
+    
+    # 清理客户端
+    if client_proc:
+      try:
+        client_proc.terminate()
+        client_proc.wait(timeout=1)
+      except subprocess.TimeoutExpired:
+        client_proc.kill() # 确保杀死
+    
+    if server_proc:
+      try:
+        server_proc.terminate()
+        server_proc.wait(timeout=1)
+      except subprocess.TimeoutExpired:
+        serve_proc.kill()
+    # 清理服务端 (强制杀)
+    server.cmd('killall -9 ITGRecv')
 
-  print(f"[Capture] 捕获完成. 获得 {len(feature_matrix)} 个向量。")
-  return torch.tensor(feature_matrix, dtype=float)
+  # print(f"[Capture] 捕获完成. 获得 {len(feature_matrix)} 个向量。")
+  return torch.tensor(feature_matrix, dtype=float).unsqueeze(0)
 
 # 根据流类型，返回不同的 D-ITG 命令。
 def get_flow_command(
@@ -404,6 +428,27 @@ def get_flow_command(
     final_cmd = f"{base_cmd} {specific_args}"
     
     return final_cmd
+
+def normalize_fingerprint(tensor: torch.Tensor) -> torch.Tensor:
+  """
+  对流量指纹 Tensor 进行归一化处理。
+  输入形状: (N, 3) -> [Size, IAT, Direction]
+  """
+  # 1. 克隆 Tensor 以免修改原始数据 (可选)
+  norm_tensor = tensor.clone()
+  
+  # --- 列 0: 包大小 (Size) ---
+  # 使用 Min-Max 归一化。
+  # 网络包最大通常是 1514 (MTU + Ethernet Header)。
+  # 将其缩放到 [0, 1] 范围内。
+  norm_tensor[:, 0] = norm_tensor[:, 0] / 1514.0
+  
+  # --- 列 1: 包间隔 (IAT) ---
+  # 使用 缩放 放大IAT。
+  norm_tensor[:, 1] = norm_tensor[:, 1] * 100.0
+  
+  return norm_tensor
+
 
 
 

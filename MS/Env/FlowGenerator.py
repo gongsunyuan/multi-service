@@ -10,19 +10,19 @@ class FlowType(Enum):
 FLOW_PROFILES = {
   FlowType.VOIP: {
     'protocol': 'UDP',       # 改名为 protocol 更通用
-    'ditg_preset': 'VoIP -x G.711.2' # D-ITG 专用参数
+    'ditg_preset': 'VoIP -x G.711.2', # D-ITG 专用参数
     'qoe_critical': {'max_delay': 150, 'max_jitter': 50}, # ms
     'reward_fn': 'E-Model'
   },
   FlowType.STREAMING: {
     'protocol': 'UDP',
-    'ditg_preset': 'CSa'
+    'ditg_preset': 'CSa',
     'qoe_critical': {'min_bandwidth': 5, 'max_loss_rate': 1e-6}, # Mbps, %
     'reward_fn': '3GPP-QCI6'
   },
-  FlowType.INTERACTIVE: {
+  FlowType.GAMING: {
     'protocol': 'TCP',
-    'ditg_manual': '-B E 2000 E 3000 -c 1460 -C 1000'    # 视频流手动参数
+    'ditg_manual': '-B E 2000 E 3000 -c 1460 -C 1000',    # 视频流手动参数
     'qoe_critical': {'max_delay': 50, 'max_jitter': 30}, # ms
     'reward_fn': '3GPP-QCI80'
   }
