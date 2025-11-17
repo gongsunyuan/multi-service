@@ -385,7 +385,9 @@ def send_packet_and_capture(
     server.cmd('killall -9 ITGRecv')
 
   # print(f"[Capture] 捕获完成. 获得 {len(feature_matrix)} 个向量。")
-  return torch.tensor(feature_matrix, dtype=float).unsqueeze(0)
+  fingerprint_tensor = torch.tensor(feature_matrix, dtype=float)
+
+  return normalize_fingerprint(fingerprint_tensor).unsqueeze(0)
 
 # 根据流类型，返回不同的 D-ITG 命令。
 def get_flow_command(
@@ -441,11 +443,11 @@ def normalize_fingerprint(tensor: torch.Tensor) -> torch.Tensor:
   # 使用 Min-Max 归一化。
   # 网络包最大通常是 1514 (MTU + Ethernet Header)。
   # 将其缩放到 [0, 1] 范围内。
-  norm_tensor[:, 0] = norm_tensor[:, 0] / 1514.0
+  norm_tensor[:, 0] = norm_tensor[:, 0] / 1600.0
   
-  # --- 列 1: 包间隔 (IAT) ---
-  # 使用 缩放 放大IAT。
-  norm_tensor[:, 1] = norm_tensor[:, 1] * 100.0
+  iat_cap = 0.1  # 100ms
+  iat_clamped = torch.clamp(norm_tensor[:, 1], max=iat_cap)   # 截断 (Clamp)
+  norm_tensor[:, 1] = iat_clamped / iat_cap                   # 归一化
   
   return norm_tensor
 
