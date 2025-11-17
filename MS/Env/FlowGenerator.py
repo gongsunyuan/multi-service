@@ -16,8 +16,8 @@ FLOW_PROFILES = {
   },
   FlowType.STREAMING: {
     'protocol': 'TCP',
-    'ditg_manual': '-B E 2000 E 3000 -c 1460 -C 1000',    # 视频流手动参数
-    'qoe_critical': {'min_bandwidth': 5, 'max_loss_rate': 1e-6}, # Mbps, %
+    'ditg_manual': '-B U 500 1000 C 100 -c 1460 -C 1000',        # 视频流手动参数 
+    'qoe_critical': {'min_bandwidth': 5, 'max_loss_rate': 1e-6}, # Mbps
     'reward_fn': '3GPP-QCI6'
   },
   FlowType.GAMING: {
@@ -25,8 +25,7 @@ FLOW_PROFILES = {
     'ditg_preset': 'CSa',
     'qoe_critical': {'max_delay': 50, 'max_jitter': 30}, # ms
     'reward_fn': '3GPP-QCI80'
-  }
-}
+  }}
 
 class FlowGenerator:
   def get_random_flow(self) -> tuple[FlowType, dict]:

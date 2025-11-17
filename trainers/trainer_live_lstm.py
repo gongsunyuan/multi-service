@@ -13,14 +13,14 @@ from mininet.node import OVSKernelSwitch, RemoteController
 # --- 导入你的环境文件 ---
 from MS.Env.NetworkGenerator import TopologyGenerator
 from MS.Env.FlowGenerator import FlowGenerator, FlowType
-from MS.Env.MininetController import get_a_mininet, send_packet_and_capture
+from MS.Env.MininetController import get_a_mininet, get_a_fingerprint
 
 # --- 导入 PyTorch 和你的 RNN 分类器 ---
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from MS.LSTM.Pretrain.TmpClassifier import RNNClassifier #
-from tqdm import tqdm # 用于显示进度条
+from tqdm import tqdm 
 
 
 def run_live_training():
@@ -29,7 +29,7 @@ def run_live_training():
   LEARNING_RATE = 4e-3
   TOTAL_BATCH = 200
   ACCUMULATION_STEPS = 128  # 梯度累积
-  TRAINING_STEPS = ACCUMULATION_STEPS*TOTAL_BATCH  # 我们总共生成 128*200 个样本
+  TRAINING_STEPS = ACCUMULATION_STEPS*TOTAL_BATCH  # 生成样本数
   
   Lstm_PATH       = "./trained_model/trained_lstm.pth"
   Classifier_PATH = "./trained_model/trained_classifier.pth"
@@ -72,7 +72,6 @@ def run_live_training():
   model.train()
 
   # 流生成参数
-  FLOW_DURATION = 30          # 最长发包时间
   N_PACKETS_TO_CAPTURE = 30   # 抓包数量
 
   """
@@ -93,8 +92,8 @@ def run_live_training():
 
       flow_gen = FlowGenerator()   #实例化生成器 
 
-      info(f"==== 开始在线训练 (共 {TRAINING_STEPS} 个数据), 每批次 {ACCUMULATION_STEPS} 个数据=====")
-      info(f"==== 使用设备：{device}")
+      print(f"==== 开始在线训练 (共 {TRAINING_STEPS} 个数据), 每批次 {ACCUMULATION_STEPS} 个数据=====")
+      print(f"==== 使用设备：{device}")
       pbar = tqdm(range(TRAINING_STEPS))
       correct_predictions = 0
       total_loss = 0.0
@@ -107,11 +106,10 @@ def run_live_training():
         label = flow_type.value - 1 
         label_tensor = torch.tensor([label], dtype=torch.long) #
 
-        input_tensor = send_packet_and_capture(
+        input_tensor = get_a_fingerprint(
           server=server,
           client=client,
           flow_type=flow_type,
-          duration_sec=FLOW_DURATION,
           n_packets_to_capture=N_PACKETS_TO_CAPTURE
         ).float()
 
@@ -146,7 +144,7 @@ def run_live_training():
           current_lr = optimizer.param_groups[0]['lr']
 
           # 打印当前训练情况
-          pbar.write({f'Loss:{avg_loss:.4f} Acc: {accuracy:.2%} LR: {current_lr:.1e}'})
+          pbar.write(f"Loss:{avg_loss:.4f} Acc: {accuracy:.2%} LR: {current_lr:.1e}")
 
           # 保存最佳模型
           if best_acc < accuracy:

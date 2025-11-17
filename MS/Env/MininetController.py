@@ -203,7 +203,7 @@ def measure_latency_ping_from_output(result: str) -> float:
 
 # mininet 定义
 class GraphTopo(Topo):
-  def __init__(self, blueprint_g: nx.Graph, r2q_value: int, **opts):
+  def __init__(self, blueprint_g: nx.Graph, **opts):
     Topo.__init__(self, **opts)
 
     for node_id in blueprint_g.nodes():
@@ -221,10 +221,9 @@ class GraphTopo(Topo):
 @contextmanager
 def get_a_mininet(g: nx.Graph):
   RemoteCtrl = partial(RemoteController, ip='127.0.0.1', port=6633)
-  NEW_R2Q = 80000 # 解决 HTB 警告
 
   net = Mininet(
-    topo=GraphTopo(g, r2q_value=NEW_R2Q),
+    topo=GraphTopo(g),
     switch=OVSKernelSwitch,
     link=TCLink,
     controller=RemoteCtrl,
@@ -235,9 +234,39 @@ def get_a_mininet(g: nx.Graph):
     yield net
   finally:
     net.stop()
-    os.system('sudo mn -c')
 
   return net
+
+# 获取一个流量特征张量
+def get_a_fingerprint(
+  server, 
+  client, 
+  flow_type: FlowType, 
+  n_packets_to_capture=30, 
+  **flow_params
+  ):
+  duration_sec = 15 
+
+  final_tensor = send_packet_and_capture(
+    server=server,
+    client=client,
+    flow_type=flow_type,
+    duration_sec=duration_sec,
+    n_packets_to_capture=n_packets_to_capture)
+  
+  while final_tensor.size(0) < 30:
+    # print(f"{flow_type.name}----{final_tensor.size(0)}")
+    sleep(1)
+    final_tensor = send_packet_and_capture(
+      server=server,
+      client=client,
+      flow_type=flow_type,
+      duration_sec=duration_sec,
+      n_packets_to_capture=n_packets_to_capture)
+  
+  # if flow_type==FlowType.STREAMING:
+  #   print(f"{flow_type.name}{final_tensor.size(0)}")
+  return normalize_fingerprint(final_tensor).unsqueeze(0)
 
 # 发送流量并捕获包特征
 def send_packet_and_capture(
@@ -284,12 +313,11 @@ def send_packet_and_capture(
     flow_type=flow_type,
     target_ip=server_ip,
     duration_sec=duration_sec,
-    **flow_params
-  )
+    **flow_params)
 
   # 4. 准备 tshark 命令 (这是最快的方法)
   display_filter = f"src host {client_ip} and dst host {server_ip}"
-  timeout_duration = duration_sec+5
+  timeout_duration = duration_sec+1
 
   tshark_cmd = [
     'sudo',
@@ -304,8 +332,7 @@ def send_packet_and_capture(
     '-e', 'ip.src',
     '-e', 'ip.dst',
     '-E', 'separator=,',
-    '-f', display_filter
-  ]
+    '-f', display_filter]
   
   feature_matrix = []
   client_proc = None
@@ -316,7 +343,6 @@ def send_packet_and_capture(
     # 5. [Action 2] 启动流量
     # print(f"[Net] 启动 D-ITG 接收端 (h1)...")
     server_proc = server.popen('ITGRecv')
-    sleep(1)
   
     # 6. [Action 3] 启动 tshark 捕获管道
     # print(f"[Capture] 启动 tshark 管道: {' '.join(tshark_cmd)}")
@@ -326,8 +352,8 @@ def send_packet_and_capture(
       stderr=subprocess.DEVNULL,
       text=True
     )
-
-    sleep(1)
+    sleep_time= 1.2 if flow_type==FlowType.STREAMING else 0.1
+    sleep(sleep_time)
     # print(f"[Net] 启动 D-ITG 发送端 (h2): {client_cmd}")
     client_proc = client.popen(client_cmd)
     # 7. [核心] 实时从管道读取并封装向量
@@ -372,7 +398,7 @@ def send_packet_and_capture(
   # print(f"[Capture] 捕获完成. 获得 {len(feature_matrix)} 个向量。")
   fingerprint_tensor = torch.tensor(feature_matrix, dtype=float)
 
-  return normalize_fingerprint(fingerprint_tensor).unsqueeze(0)
+  return fingerprint_tensor
 
 # 根据流类型，返回不同的 D-ITG 命令。
 def get_flow_command(
@@ -416,6 +442,7 @@ def get_flow_command(
     
     return final_cmd
 
+# 将特征向量归一化
 def normalize_fingerprint(tensor: torch.Tensor) -> torch.Tensor:
   """
   对流量指纹 Tensor 进行归一化处理。

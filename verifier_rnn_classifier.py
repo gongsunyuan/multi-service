@@ -6,12 +6,10 @@ import time
 from mininet.net import Mininet
 from mininet.log import setLogLevel, info
 
-# --- 导入你的环境文件 ---
 from MS.Env.NetworkGenerator import TopologyGenerator
 from MS.Env.FlowGenerator import FlowGenerator, FlowType
-from MS.Env.MininetController import get_flow_fingerprint, measure_path_qos, get_a_mininet
+from MS.Env.MininetController import get_a_mininet, get_a_fingerprint
 
-# --- 导入 PyTorch 和你的 RNN 分类器 ---
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -27,7 +25,7 @@ def run_live_verifying():
   """主运行函数"""
   
   # 验证参数
-  VERIFIER_SAMPLE = 2000
+  VERIFIER_SAMPLE = 300
   LOAD_MODEL_PATH = "./MS/LSTM/Classify-model.pth"
   
   # --- 模型参数 ---
@@ -57,9 +55,10 @@ def run_live_verifying():
   try:
     # --- 步骤 1: 生成拓扑 ---
     print("==== 生成拓扑 ====")
-    topo_gen = TopologyGenerator(num_nodes_range=(5, 8))
-    g = topo_gen.generate_topology()
-    print(f"拓扑生成完毕: {len(g.nodes())} 个节点, {len(g.edges())} 条边。")
+    g = nx.Graph()
+    g.add_nodes_from(["3", "4"])
+    g.add_edge("3", "4")
+
 
     # --- 步骤 2: 启动 Mininet ---
     print("\n==== 启动 Mininet ====")
@@ -68,7 +67,7 @@ def run_live_verifying():
       # --- 步骤 2.B: 测试 Mininet 连通性 (pingAll) ---
       print("\n==== 测试 Mininet 连通性 (pingAll)====")
       net.pingAll() # 不需要存储返回值
-      net.pingAll()
+
       # --- 步骤 3: 实例化生成器 ---
       flow_gen = FlowGenerator()
 
@@ -84,21 +83,11 @@ def run_live_verifying():
         label = flow_type.value - 1 
         label_tensor = torch.tensor([label], dtype=torch.long)
 
-        # B. 获取 Mininet 中的主机
-        s_id, d_id = topo_gen.select_source_destination()
-        S_host = net.get(f'h{s_id}')
-        D_host = net.get(f'h{d_id}')
+        server, client = net.get('h3', 'h4')
         
-        # C. 在 Mininet 中"实时"生成指纹 (数据)
-        fingerprint_matrix = get_flow_fingerprint(S_host, D_host, flow_profile) 
-        
-        if fingerprint_matrix is None:
-          pbar.write(f"警告: 第 {i+1} 步指纹生成失败，跳过。\n")
-          continue
-      
         # D. 准备 PyTorch 张量
         # --------------------
-        input_tensor = torch.from_numpy(fingerprint_matrix).unsqueeze(0).float() 
+        input_tensor = get_a_fingerprint(server, client, flow_type, n_packets_to_capture=50).float() 
         logits = model(input_tensor)            # 前向传播
 
         # F. 记录统计数据
