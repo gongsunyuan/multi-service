@@ -131,6 +131,9 @@ def run_live_training():
           correct_predictions += 1
         
         if (i+1) % ACCUMULATION_STEPS == 0:
+          
+          torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+          
           # 更新模型
           optimizer.step()
           optimizer.zero_grad()
