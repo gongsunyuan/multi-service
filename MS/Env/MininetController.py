@@ -219,17 +219,18 @@ class GraphTopo(Topo):
 
 # mininet 启动
 @contextmanager
-def get_a_mininet(g: nx.Graph):
-  RemoteCtrl = partial(RemoteController, ip='127.0.0.1', port=6633)
+def get_a_mininet(g: nx.Graph, remote_port=6633):
+  RemoteCtrl = partial(RemoteController, ip='127.0.0.1', port=remote_port)
 
   net = Mininet(
     topo=GraphTopo(g),
     switch=OVSKernelSwitch,
     link=TCLink,
-    controller=RemoteCtrl,
+    controller=RemoteCtrl
   )
 
   try:
+    setLogLevel('error')
     net.start()
     yield net
   finally:
@@ -289,7 +290,7 @@ def send_packet_and_capture(
     **flow_params: 传递给 generate_ditg_command 的额外参数。
   
   返回:
-    np.ndarray: 形状为 (N, 3) 的特征矩阵 [[Size, IAT], ...]。
+    torch.tensor: 形状为 (N, 3) 的特征矩阵 [[Size, IAT], ...]。
   """
 
   server_ip = server.IP()

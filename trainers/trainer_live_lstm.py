@@ -10,12 +10,11 @@ from mininet.link import TCLink
 from mininet.log import setLogLevel, info
 import torch.optim.lr_scheduler as lr_scheduler
 from mininet.node import OVSKernelSwitch, RemoteController
-# --- 导入你的环境文件 ---
+
 from MS.Env.NetworkGenerator import TopologyGenerator
 from MS.Env.FlowGenerator import FlowGenerator, FlowType
 from MS.Env.MininetController import get_a_mininet, get_a_fingerprint
 
-# --- 导入 PyTorch 和你的 RNN 分类器 ---
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -49,8 +48,12 @@ def run_live_training():
     num_classes=NUM_CLASSES, 
     rnn_layers=RNN_LAYERS
     )
-  
-  
+
+  try:
+    model.load_state_dict(torch.load(Classifier_PATH))
+  except Exception as e:
+    print(f"模型加载失败：\n {e}")
+
   criterion = nn.CrossEntropyLoss()
   optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
@@ -133,7 +136,7 @@ def run_live_training():
         if (i+1) % ACCUMULATION_STEPS == 0:
           
           torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-          
+
           # 更新模型
           optimizer.step()
           optimizer.zero_grad()

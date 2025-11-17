@@ -26,13 +26,13 @@ def run_live_verifying():
   
   # 验证参数
   VERIFIER_SAMPLE = 300
-  LOAD_MODEL_PATH = "./MS/LSTM/Classify-model.pth"
+  LOAD_MODEL_PATH = "./MS/LSTM/Pretrain/Classify-model.pth"
   
   # --- 模型参数 ---
   INPUT_DIM = 2            # 2个参数 (delay, IAT)
   RNN_LAYERS = 2           # RNN 层数
   NUM_CLASSES = 3          # 3个类别 (VOIP, STREAMING, INTERACTIVE)
-  HIDDEN_DIM = 256         # 
+  HIDDEN_DIM = 128         # 
   
   # --- 初始化 PyTorch 组件 ---
   info(f"*** 正在初始化模型 (HIDDEN_DIM={HIDDEN_DIM}, NUM_ClASSES={NUM_CLASSES})\n")
@@ -45,9 +45,12 @@ def run_live_verifying():
   
   criterion = nn.CrossEntropyLoss()
   try:
-    model.load_state_dict(LOAD_MODEL_PATH)
+    model.load_state_dict(torch.load(LOAD_MODEL_PATH))
   except Exception as e:
-    print(f"模型加载失败：\n {e}")
+    info(f"\n--- 仿真出错 ---")
+    info(f"{e}\n")
+    import traceback
+    traceback.print_exc()
 
   # 将模型置于评估模式
   model.eval()
@@ -106,8 +109,6 @@ def run_live_verifying():
     import traceback
     traceback.print_exc()
 
-  finally:
-    os.system('sudo mn -c')
 
 
 if __name__ == '__main__':
