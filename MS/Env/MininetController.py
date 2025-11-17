@@ -12,7 +12,7 @@ import shlex
 import networkx as nx
 from mininet.topo import Topo
 from functools import partial
-
+from mininet.log import setLogLevel, info
 from scapy.all import rdpcap
 from scapy.layers.inet import IP
 from .FlowGenerator import FlowType, FLOW_PROFILES
@@ -222,6 +222,8 @@ class GraphTopo(Topo):
 def get_a_mininet(g: nx.Graph, remote_port=6633):
   RemoteCtrl = partial(RemoteController, ip='127.0.0.1', port=remote_port)
 
+  setLogLevel('error')
+  
   net = Mininet(
     topo=GraphTopo(g),
     switch=OVSKernelSwitch,
@@ -230,7 +232,6 @@ def get_a_mininet(g: nx.Graph, remote_port=6633):
   )
 
   try:
-    setLogLevel('error')
     net.start()
     yield net
   finally:

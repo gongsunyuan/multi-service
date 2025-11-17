@@ -14,6 +14,7 @@ from mininet.node import OVSKernelSwitch, RemoteController
 from MS.Env.NetworkGenerator import TopologyGenerator
 from MS.Env.FlowGenerator import FlowGenerator, FlowType
 from MS.Env.MininetController import get_a_mininet, get_a_fingerprint
+from MS.Env.TensorLog import append_matrix_to_file
 
 import torch
 import torch.nn as nn
@@ -101,6 +102,7 @@ def run_live_training():
       correct_predictions = 0
       total_loss = 0.0
       best_acc = 0.0
+      epoch = 1
 
       for i in pbar:
         # 生成一个新样本 (数据+标签)
@@ -133,6 +135,12 @@ def run_live_training():
         if predicted_index == label:
           correct_predictions += 1
         
+        append_matrix_to_file(
+          tensor=input_tensor,
+          filename=f"./train-log/Epoch{epoch}/{flow_type.name}-log.log",
+          flow_id=i+1
+          )
+
         if (i+1) % ACCUMULATION_STEPS == 0:
           
           torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -150,7 +158,7 @@ def run_live_training():
           current_lr = optimizer.param_groups[0]['lr']
 
           # 打印当前训练情况
-          pbar.write(f"Loss:{avg_loss:.4f} Acc: {accuracy:.2%} LR: {current_lr:.1e}")
+          pbar.write(f"[Epoch {epoch}] Loss:{avg_loss:.4f} Acc: {accuracy:.2%} LR: {current_lr:.1e}")
 
           # 保存最佳模型
           if best_acc < accuracy:
@@ -160,6 +168,7 @@ def run_live_training():
 
           total_loss = 0.0
           correct_predictions = 0
+          epoch = epoch+1
 
       info(f"====训练完成====\n")
       print(f"best acc: {best_acc}")
