@@ -26,7 +26,7 @@ def run_live_verifying():
   
   # 验证参数
   VERIFIER_SAMPLE = 300
-  LOAD_MODEL_PATH = "./MS/LSTM/Pretrain/Classify-model.pth"
+  LOAD_MODEL_PATH = "./trained_model/trained_classifier.pth"
   
   # --- 模型参数 ---
   INPUT_DIM = 2            # 2个参数 (delay, IAT)
@@ -90,7 +90,7 @@ def run_live_verifying():
         
         # D. 准备 PyTorch 张量
         # --------------------
-        input_tensor = get_a_fingerprint(server, client, flow_type, n_packets_to_capture=50).float() 
+        input_tensor = get_a_fingerprint(server, client, flow_type, n_packets_to_capture=30).float() 
         logits = model(input_tensor)            # 前向传播
 
         # F. 记录统计数据
@@ -108,8 +108,6 @@ def run_live_verifying():
     info(f"{e}\n")
     import traceback
     traceback.print_exc()
-
-
 
 if __name__ == '__main__':
   setLogLevel('info')
