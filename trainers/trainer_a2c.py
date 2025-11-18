@@ -130,38 +130,118 @@ def sample_path_probabilistic(edge_logits, edge_index, s_node, d_node, max_steps
 
 # ================= 辅助函数 2: 流表操作 =================
 
-def install_path_rules(net, path_nodes, cookie=0x1234):
-    """
-    向路径上的交换机下发转发规则。
-    这里仅做逻辑占位，实际部署需根据您的 Mininet 配置调用 ovs-ofctl。
-    path_nodes: 节点 ID 列表 (e.g., [0, 2, 5])
-    """
-    # print(f"[Controller] Installing path rules for: {path_nodes}")
-    # 实际代码示例:
-    # for i in range(len(path_nodes) - 1):
-    #     u, v = path_nodes[i], path_nodes[i+1]
-    #     # 找到 u 连接 v 的端口 port
-    #     # net.get(f's{u}').cmd(f'ovs-ofctl add-flow s{u} cookie={cookie} actions=output:{port}')
-    pass
-
 def clean_flow_rules(net, cookie=0x1234):
-    """清理指定 cookie 的流表规则"""
-    # for sw in net.switches:
-    #     sw.cmd(f'ovs-ofctl del-flows {sw.name} cookie={cookie}/-1')
-    pass
+    """
+    清理指定 cookie 的流表规则，避免上一回合的残留规则干扰。
+    """
+    for sw in net.switches:
+        # 删除带有特定 cookie 的规则 (strict matching)
+        # 格式: ovs-ofctl del-flows <switch> "cookie=0x1234/-1"
+        # /-1 表示掩码，匹配该 cookie 的所有规则
+        sw.cmd(f'ovs-ofctl -O OpenFlow13 del-flows {sw.name} "cookie={cookie}/-1"')
+
+def install_path_rules(net, path_nodes, cookie=0x1234):
+  """
+  将逻辑路径转化为 OpenFlow 流表规则并下发。
+  支持双向联通 (TCP/ARP 需要回路)，或者仅单向 (UDP)。
+  
+  参数:
+    net: Mininet 网络对象
+    path_nodes: 节点 ID 列表，例如 [0, 2, 5] 代表 s0 -> s2 -> s5
+    cookie: 规则标记，用于清理
+  """
+  # 1. 获取源主机和目的主机对象
+  # 根据 GraphTopo 的命名规则: 节点 i -> 主机 hi, 交换机 si
+  src_id = path_nodes[0]
+  dst_id = path_nodes[-1]
+  
+  h_src = net.get(f'h{src_id}')
+  h_dst = net.get(f'h{dst_id}')
+  dst_ip = h_dst.IP()
+  src_ip = h_src.IP()
+  
+  print(f"[Controller] Installing path: h{src_id} -> ... -> h{dst_id}")
+
+  # 2. 遍历路径上的每一跳交换机
+  for i, current_node_id in enumerate(path_nodes):
+    sw_name = f's{current_node_id}'
+    switch = net.get(sw_name)
+    
+    # --- 确定输出端口 (Out Port) ---
+    if i == len(path_nodes) - 1:
+      # Case A: 最后一跳 (s_dst)，要去往主机 h_dst
+      # 获取 switch 连接到 h_dst 的端口
+      # linksBetween 返回 [(intf1, intf2)], 我们需要 switch 侧的 intf
+      links = net.linksBetween(switch, h_dst)
+      if not links: continue
+      link = links[0]
+      # 确定哪个接口属于 switch
+      out_intf = link.intf1 if link.intf1.node == switch else link.intf2
+      out_port = switch.ports[out_intf]
+    else:
+      # Case B: 中间跳，要去往下一跳交换机 s_next
+      next_node_id = path_nodes[i+1]
+      next_switch = net.get(f's{next_node_id}')
+      
+      links = net.linksBetween(switch, next_switch)
+      if not links: continue
+      link = links[0]
+      out_intf = link.intf1 if link.intf1.node == switch else link.intf2
+      out_port = switch.ports[out_intf]
+
+    # --- 下发规则 (Forwarding) ---
+    # 匹配: 目的 IP 是 dst_ip
+    # 动作: 转发到 out_port
+    # 优先级: 100 (高于默认规则)
+    cmd = (
+      f'ovs-ofctl -O OpenFlow13 add-flow {sw_name} '
+      f'"cookie={cookie},priority=100,dl_type=0x0800,nw_dst={dst_ip},actions=output:{out_port}"'
+    )
+    switch.cmd(cmd)
+    
+    # --- [重要] 下发反向规则 (Reverse Path) ---
+    # TCP 握手和 iperf 结束报告需要回包。
+    # 简单起见，我们让反向流量沿原路返回。
+    if i == 0:
+      # 第一跳的反向出口是去往 h_src
+      links_rev = net.linksBetween(switch, h_src)
+      if links_rev:
+        link_rev = links_rev[0]
+        rev_intf = link_rev.intf1 if link_rev.intf1.node == switch else link_rev.intf2
+        rev_port = switch.ports[rev_intf]
+    else:
+      # 中间跳的反向出口是去往上一跳交换机 s_prev
+      prev_node_id = path_nodes[i-1]
+      prev_switch = net.get(f's{prev_node_id}')
+      links_rev = net.linksBetween(switch, prev_switch)
+      if links_rev:
+        link_rev = links_rev[0]
+        rev_intf = link_rev.intf1 if link_rev.intf1.node == switch else link_rev.intf2
+        rev_port = switch.ports[rev_intf]
+    
+    # 反向规则: 匹配目的 IP 是 src_ip (即回包)
+    cmd_rev = (
+      f'ovs-ofctl -O OpenFlow13 add-flow {sw_name} '
+      f'"cookie={cookie},priority=100,dl_type=0x0800,nw_dst={src_ip},actions=output:{rev_port}"'
+    )
+    switch.cmd(cmd_rev)
+
+    # --- [可选] 处理 ARP ---
+    # 如果没有 Controller 处理 ARP，需要广播 ARP 请求
+    # 动作: output:FLOOD (或者 normal 如果有默认学习规则)
+    switch.cmd(f'ovs-ofctl -O OpenFlow13 add-flow {sw_name} "cookie={cookie},priority=100,dl_type=0x0806,actions=FLOOD"')
 
 # ================= 主训练循环 =================
 
 def run_a2c_training():
-    # 1. 初始化模型
+  # 1. 初始化模型
   print(f"[ms] 正在初始化 A2C Agent (Device: {CONFIG.DEVICE})...")
   agent = ActorCritic(
-      lstm_hidden_dim=CONFIG.LSTM_DIM,
-      gnn_hidden_dim=CONFIG.GNN_DIM,
-      gnn_layers=CONFIG.GNN_LAYERS,
-      pretrained_lstm_path=CONFIG.PRETRAINED_LSTM,
-      pretrained_gnn_path=CONFIG.PRETRAINED_GNN
-  ).to(CONFIG.DEVICE)
+    lstm_hidden_dim=CONFIG.LSTM_DIM,
+    gnn_hidden_dim=CONFIG.GNN_DIM,
+    gnn_layers=CONFIG.GNN_LAYERS,
+    pretrained_lstm_path=CONFIG.PRETRAINED_LSTM,
+    pretrained_gnn_path=CONFIG.PRETRAINED_GNN).to(CONFIG.DEVICE)
     
   agent.train() # 开启训练模式 (主要是 Dropout/BatchNorm, 虽然这里用得少)
   
@@ -270,9 +350,9 @@ def run_a2c_training():
 
 if __name__ == '__main__':
     if os.getuid() != 0:
-        print("错误: Mininet 必须以 root 权限运行 (sudo python3 ...)")
-    else:
-        os.makedirs(CONFIG.MODEL_DIR, exist_ok=True)
-        # 确保日志目录存在 (如果 MininetController 需要写日志)
-        os.makedirs("./train-log", exist_ok=True)
-        run_a2c_training()
+    print("错误: Mininet 必须以 root 权限运行 (sudo python3 ...)")
+  else:
+    os.makedirs(CONFIG.MODEL_DIR, exist_ok=True)
+    # 确保日志目录存在 (如果 MininetController 需要写日志)
+    os.makedirs("./train-log", exist_ok=True)
+    run_a2c_training()

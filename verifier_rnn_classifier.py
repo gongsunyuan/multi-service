@@ -21,6 +21,19 @@ from tqdm import tqdm # 用于显示进度条
 # -----------------------------------------------
 # 核心训练逻辑
 # -----------------------------------------------
+class Config:
+  # --- 拓扑生成参数 ---
+  #
+  M_BA = 2
+  MIN_BW = 100.0
+  MAX_BW = 1000.0
+  MIN_DELAY = 1.0
+  MAX_DELAY = 10.0
+  MIN_NODES_NUM = 15
+  MAX_NODES_NUM = 30
+
+CONFIG = Config()
+
 def run_live_verifying():
   """主运行函数"""
   
@@ -67,6 +80,7 @@ def run_live_verifying():
     print("\n==== 启动 Mininet ====")
 
     with get_a_mininet(g) as net:
+      CIL(net)
       # --- 步骤 2.B: 测试 Mininet 连通性 (pingAll) ---
       print("\n==== 测试 Mininet 连通性 (pingAll)====")
       net.pingAll() # 不需要存储返回值

@@ -1,14 +1,15 @@
 import os
 import subprocess
 from time import sleep, time
-import re # 导入正则表达式库
+import re 
 from mininet.net import Mininet
-from enum import Enum # 需要导入 FlowGenerator 中的 Enum
+from enum import Enum 
 from contextlib import contextmanager
 import torch
 import sys
 import signal
 import shlex
+import uuid 
 import networkx as nx
 from mininet.topo import Topo
 from functools import partial
@@ -19,41 +20,66 @@ from .FlowGenerator import FlowType, FLOW_PROFILES
 from mininet.node import OVSKernelSwitch, RemoteController
 from mininet.link import TCLink
 
-def parse_iperf_output(output_str: str, mode: str) -> dict:
+def parse_ditg_output(output_str: str) -> dict:
   """
-  【新增】解析 iperf 的原始字符串输出。
+  解析 ITGDec 的标准输出文本，提取关键 QoS 指标。
+  处理包括正常数值和异常值 (如 nan) 的情况。
   """
-  metrics = {'bandwidth': 0.0, 'jitter': 0.0, 'loss_rate': 1.0}
+  metrics = {
+    'delay': 0.0,      # 单位: ms
+    'jitter': 0.0,     # 单位: ms
+    'bandwidth': 0.0,  # 单位: Mbps
+    'loss_rate': 1.0   # 范围: 0.0 - 1.0 (默认为1.0即全丢，防止无数据时误判为满分)
+  }
   
+  if not output_str:
+    return metrics
+
   try:
-    if mode == 'udp':
-      # UDP 模式: 关注 Jitter 和 Loss
-      # 示例: 9.99 Mbits/sec  0.013 ms    0/ 1429 (0%)
-      udp_regex = re.search(
-        r"(\d+\.?\d*)\s+Mbits/sec\s+(\d+\.?\d*)\s+ms\s+\d+/\s+\d+\s+\((\d+\.?\d*)%\)", 
-        output_str
-      )
-      if udp_regex:
-        metrics['bandwidth'] = float(udp_regex.group(1))
-        metrics['jitter'] = float(udp_regex.group(2))
-        metrics['loss_rate'] = float(udp_regex.group(3)) / 100.0 # 转换为 0.0 - 1.0
-            
-    elif mode == 'tcp':
-      # TCP 模式: 关注 Bandwidth
-      # 示例: 8.99 Mbits/sec
-      tcp_regex = re.search(
-        r"(\d+\.?\d*)\s+Mbits/sec", 
-        output_str
-      )
-      if tcp_regex:
-        # TCP 几乎没有丢包（因为它会重传），Jitter 不作为主要考量
-        metrics['bandwidth'] = float(tcp_regex.group(1))
-        metrics['loss_rate'] = 0.0 
-        metrics['jitter'] = 0.0
-              
-  except Exception as e:
-    print(f"Error parsing iperf output: {e}\nOutput: {output_str}")
+    # --- 1. 提取平均延迟 (Average delay) ---
+    # 示例行: Average delay            =     0.000234 s
+    delay_match = re.search(r"Average delay\s+=\s+([-\d\.nan]+)\s+s", output_str)
+    if delay_match:
+      val = delay_match.group(1)
+      if 'nan' not in val.lower(): # 过滤掉 -nan
+        metrics['delay'] = float(val) * 1000.0 # 秒 -> 毫秒
+
+      # --- 2. 提取平均抖动 (Average jitter) ---
+      # 示例行: Average jitter           =     0.000012 s
+      jitter_match = re.search(r"Average jitter\s+=\s+([-\d\.nan]+)\s+s", output_str)
+      if jitter_match:
+        val = jitter_match.group(1)
+        if 'nan' not in val.lower():
+          metrics['jitter'] = float(val) * 1000.0 # 秒 -> 毫秒
+
+      # --- 3. 提取吞吐量 (Average bitrate) ---
+      # 示例行: Average bitrate          =  4096.000000 Kbit/s
+      bitrate_match = re.search(r"Average bitrate\s+=\s+([-\d\.nan]+)\s+Kbit/s", output_str)
+      if bitrate_match:
+        val = bitrate_match.group(1)
+        if 'nan' not in val.lower():
+          metrics['bandwidth'] = float(val) / 1000.0 # Kbit/s -> Mbps
+
+      # --- 4. 提取丢包率 (Packets dropped) ---
+      # 示例行: Packets dropped          =            5 (0.50 %)
+      # 注意：如果没有发包成功，分母为0可能导致 nan，或者 dropped 为 0 但 total 也为 0
+      loss_match = re.search(r"Packets dropped\s+=\s+\d+\s+\(([-\d\.nan]+)\s+%\)", output_str)
+      if loss_match:
+        val = loss_match.group(1)
+        if 'nan' not in val.lower():
+          metrics['loss_rate'] = float(val) / 100.0 # 0.50% -> 0.005
       
+      # --- 特殊检查：是否有效传输 ---
+      # 如果总包数 (Total packets) 为 0，说明完全没通，强制设置最差指标
+      total_pkts_match = re.search(r"Total packets\s+=\s+(\d+)", output_str)
+      if total_pkts_match and int(total_pkts_match.group(1)) == 0:
+        metrics['loss_rate'] = 1.0
+        metrics['bandwidth'] = 0.0
+
+  except Exception as e:
+    print(f"[Parser] 解析 D-ITG 输出时出错: {e}")
+    # print(f"原始输出片段:\n{output_str[:200]}") # 调试用
+
   return metrics
 
 def measure_latency_ping(S_host, D_host, num_packets=10) -> float:
@@ -118,68 +144,61 @@ def calculate_qoe_reward(qos_metrics: dict, flow_profile: dict) -> float:
   # TODO
   return reward
 
-def measure_path_qos(S_host, D_host, path_route, flow_profile):
+def measure_path_qos(server, client, path_route, flow_type):
   """
-  【已完善】测量给定路径和流量的 QoS 并计算奖励。
-  这是 RL Env 的核心 step() 函数。
+  使用 D-ITG 测量路径 QoS (基于内存文件系统 /dev/shm)
   """
-  
-  # 1. 配置 OpenFlow 规则 (将流量强制导向 path_route)
-  # ---------------------------------------------------------------
-  # TODO: 这是你的“动作”应用点
-  # 你的 RL Agent (Actor) 需要输出一个 'path_route'
-  # 你需要在这里实现一个函数，根据 'path_route' 列表（例如 [s1, s3, s4, d1]）
-  # 来安装 OpenFlow 规则，强制 S_host 和 D_host 之间的流量
-  # 必须经过这条路径。
-  # 
-  # e.g., setup_flow_rules(ovs_switches, path_route)
-  # ---------------------------------------------------------------
-  print(f"INFO: Simulating path (TODO: implement OVS rules)...")
 
-  # 2. 【改进】并行测量延迟 (Ping) 和 吞吐/抖动 (iperf)
+  # 1. 准备内存日志路径 (使用 /dev/shm 实现“伪管道”)
+  # 使用 uuid 防止文件名冲突
+  random_id = uuid.uuid4().hex[:8]
+  log_prefix = f"/dev/shm/itg_{client.name}_{server.name}_{random_id}"
+  recv_log = f"{log_prefix}.recv"  # D-ITG 会自动加上后缀，但我们在命令里显式指定更安全
   
-  # 2.A 启动 iperf server
-  mode = flow_profile['iperf_mode']
-  D_host.cmd(f'iperf -s -p 5002 -i 1 -m &') # -m: 打印 MTU 和头部信息
-
-  # 2.B 启动 ping 测量延迟
-  # 注意：我们在 iperf 运行时测量 ping，以捕获“负载下”的延迟
-  print("INFO: Starting parallel Ping measurement...")
-  ping_result_future = S_host.popen(f'ping -c 5 -i 0.2 {D_host.IP()}', shell=True)
+  # 构建命令
+  cmd = get_flow_command(
+    flow_type=flow_type,
+    target_ip=server.IP(),
+    duration_sec=3)
   
-  # 3. 运行 iperf client
-  rate = flow_profile['target_rate']
-  duration = 5 # 模拟持续 5 秒
+  cmd += f" -x {recv_log}"
   
-  client_cmd = f'iperf -c {D_host.IP()} -p 5002 -{mode[0]} -b {rate} -t {duration} -f M' # -f M: 统一单位为 Mbits/sec
-  if mode == 'udp':
-      client_cmd += " -l 160" # VoIP 模拟: 160B 负载 (G.711 20ms 帧)
+  try:
+    # 启动接听命令
+    server_proc = client.popen("ITGRecv")
+    sleep(0.2)
+    # 执行发送 (阻塞)
+    client_proc = client.popen(cmd)
+    sleep(0.5)
+  except Exception as e:
+    print(f"[Error] 实验执行出错: {e}")
+  finally:
+    if client_proc:
+      client_proc.kill() # 确保杀死
+    # 清理服务端
+    if server_proc:
+      server_proc.kill()
+  
+  # 检查文件是否存在 (防止传输完全失败导致无日志)
+  check_log = S_host.cmd(f"ls {recv_log}")
+  if "No such file" in check_log:
+    print("[ERROR] No log generated. Link might be down.")
+    return -100.0 # 惩罚
       
-  print(f"INFO: Starting iperf client ({mode})...")
-  iperf_result_str = S_host.cmd(client_cmd)
+  # 运行解码器拿到文本结果 
+  dec_output = client.cmd(f"ITGDec {recv_log}")
   
-  # 4. 清理 server 进程
-  D_host.cmd('kill %iperf')
+  # 解析结果 
+  qos_metrics = parse_ditg_output(dec_output)
   
-  # 5. 解析结果
-  
-  # 5.A 解析 iperf (带宽, 抖动, 丢包)
-  print("INFO: Parsing iperf results...")
-  qos_metrics = parse_iperf_output(iperf_result_str, mode)
-  
-  # 5.B 解析 ping (延迟)
-  print("INFO: Parsing ping results...")
-  ping_output = ping_result_future.communicate()[0].decode()
-  qos_metrics['delay'] = measure_latency_ping_from_output(ping_output) # (见下方辅助函数)
-  
-  print(f"--- QOS METRICS ---")
-  print(qos_metrics)
-  print(f"-------------------")
-  
-  # 6. 计算 Reward
-  reward = calculate_qoe_reward(qos_metrics, flow_profile)
-  
-  print(f"=== REWARD ===: {reward}")
+  # print(f"--- QoS: {qos_metrics} ---")
+
+  # 立即删除内存文件 
+  # 虽然是在内存里，但也要清理以防占满 RAM
+  client.cmd(f"rm -f {recv_log}")
+
+  # 计算 Reward
+  reward = calculate_qoe_reward(qos_metrics, FLOW_PROFILES[flow_type])
   
   return reward
 
@@ -209,13 +228,13 @@ class GraphTopo(Topo):
     for node_id in blueprint_g.nodes():
       self.addSwitch(f's{node_id}', protocols='OpenFlow13')
       self.addHost(f'h{node_id}')
-      self.addLink(f'h{node_id}', f's{node_id}', delay='0.1ms')
+      self.addLink(f'h{node_id}', f's{node_id}', delay='0ms')
 
     for u, v, data in blueprint_g.edges(data=True):
       bw = data.get('bandwidth', 1000)
       delay = f"{data.get('delay', 1)}ms"
       # 这里沿用 Mininet 构造函数中设置的 r2q
-      self.addLink(f's{u}', f's{v}', delay=delay) 
+      self.addLink(f's{u}', f's{v}', delay=delay, use_htb=True) 
 
 # mininet 启动
 @contextmanager
