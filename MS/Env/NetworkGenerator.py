@@ -3,14 +3,26 @@ import random
 import torch
 from torch_geometric.data import Data
 
+class Default_config:
+  # 默认拓扑生成参数
+  M_BA = 2
+  MIN_BW = 100.0
+  MAX_BW = 1000.0
+  MIN_DELAY = 1.0
+  MAX_DELAY = 10.0
+  MIN_NODES_NUM = 15
+  MAX_NODES_NUM = 30
+
+DEFAULT_CONFIG = Default_config()
+
 class TopologyGenerator:
-  def __init__(self, config):
+  def __init__(self, config=DEFAULT_CONFIG):
     """
     初始化拓扑生成器。
     :param num_nodes_range: 节点数量的范围 (e.g., 10-20个节点)
     :param m_ba: BA模型的附着参数 (每个新节点连接到 m_ba 个现有节点)
     """
-    self.num_nodes_range = range(config.MIN_NODES_NUM, config.MAX_NODES_NUM)
+    self.num_nodes_range = (config.MIN_NODES_NUM, config.MAX_NODES_NUM)
     self.m_ba = config.M_BA 
     self.min_bw = config.MIN_BW  # Mbps
     self.max_bw = config.MAX_BW  # Mbps

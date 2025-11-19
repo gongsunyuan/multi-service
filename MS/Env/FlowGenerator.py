@@ -11,7 +11,7 @@ FLOW_PROFILES = {
   FlowType.VOIP: {
     'protocol': 'UDP',       # 改名为 protocol 更通用
     'ditg_preset': 'VoIP -x G.711.2', # D-ITG 专用参数
-    'qoe_critical': {'max_delay': 150, 'max_jitter': 50}, # ms
+    'qoe_critical': {'max_delay': 150, 'max_jitter': 50}, # 设置悬崖奖励
     'reward_fn': 'E-Model'
   },
   FlowType.STREAMING: {

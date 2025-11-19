@@ -222,32 +222,37 @@ def measure_latency_ping_from_output(result: str) -> float:
 
 # mininet 定义
 class GraphTopo(Topo):
-  def __init__(self, blueprint_g: nx.Graph, **opts):
+  def __init__(self, blueprint_g: nx.Graph, is_test=False, **opts):
     Topo.__init__(self, **opts)
+    test_str = "T" if is_test else ""
 
     for node_id in blueprint_g.nodes():
-      self.addSwitch(f's{node_id}', protocols='OpenFlow13')
-      self.addHost(f'h{node_id}')
-      self.addLink(f'h{node_id}', f's{node_id}', delay='0ms')
+      self.addSwitch(f'{test_str}s{node_id}', protocols='OpenFlow13')
+      self.addHost(f'{test_str}h{node_id}')
+      self.addLink(f'{test_str}h{node_id}', f'{test_str}s{node_id}', delay='0ms')
 
     for u, v, data in blueprint_g.edges(data=True):
       bw = data.get('bandwidth', 1000)
       delay = f"{data.get('delay', 1)}ms"
       # 这里沿用 Mininet 构造函数中设置的 r2q
-      self.addLink(f's{u}', f's{v}', delay=delay, use_htb=True) 
+      self.addLink(f'{test_str}s{u}', f'{test_str}s{v}', delay=delay, use_htb=True) 
 
 # mininet 启动
 @contextmanager
-def get_a_mininet(g: nx.Graph, remote_port=6633):
-  RemoteCtrl = partial(RemoteController, ip='127.0.0.1', port=remote_port)
+def get_a_mininet(g: nx.Graph, is_test=False, remote_port=None):
+  if remote_port:
+    controller = partial(RemoteController, ip='127.0.0.1', port=remote_port)
+  else:
+    print("[ms] 没有输入远程控制器，请自己配置流表规则！")
+    controller = None
 
   # setLogLevel('error')
 
   net = Mininet(
-    topo=GraphTopo(g),
+    topo=GraphTopo(g, is_test),
     switch=OVSKernelSwitch,
     link=TCLink,
-    controller=RemoteCtrl
+    controller=controller
   )
 
   try:
