@@ -234,8 +234,9 @@ class GraphTopo(Topo):
     for u, v, data in blueprint_g.edges(data=True):
       bw = data.get('bandwidth', 1000)
       delay = f"{data.get('delay', 1)}ms"
+      loss = f"{data.get('loss', 0)}ms"
       # 这里沿用 Mininet 构造函数中设置的 r2q
-      self.addLink(f'{test_str}s{u}', f'{test_str}s{v}', delay=delay, use_htb=True) 
+      self.addLink(f'{test_str}s{u}', f'{test_str}s{v}', delay=delay, loss=loss, use_htb=True) 
 
 # mininet 启动
 @contextmanager
@@ -431,8 +432,7 @@ def get_flow_command(
   flow_type: str, 
   target_ip: str, 
   duration_sec: int, 
-  **kwargs
-  ) -> str:
+  **kwargs) -> str:
     """
     根据流量模式和参数, 生成一个 D-ITG (ITGSend) 命令字符串。
     所有命令均使用 D-ITG (ITGSend) 工具。
