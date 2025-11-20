@@ -19,9 +19,9 @@ class ActorCritic(nn.Module):
     lstm_layers=2,
     
     # GNN (路径选择模块) 参数
-    gnn_node_dim=5,     # 节点特征数
+    gnn_node_dim=8,     # 节点特征数
     gnn_hidden_dim=256, # gnn 隐藏特征数
-    gnn_edge_dim=2,     # 边 特征数
+    gnn_edge_dim=4,     # 边 特征数
     gnn_layers=6,       # gnn 层数
     
     # 预训练权重路径

@@ -7,6 +7,7 @@ import math
 import numpy as np
 import random
 from torch.utils.data import IterableDataset
+from MS.Env.NetworkGenerator import TopologyGenerator, get_pyg_data_from_nx
 
 # === 专家标签生成 ===
 def generate_expert_label(G: nx.Graph, S_node: int, D_node: int, edge_index: torch.Tensor):

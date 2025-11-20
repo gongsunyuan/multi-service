@@ -36,6 +36,7 @@ class FocalLoss(nn.Module):
       return F_loss
 
 if __name__ == "__main__":
+  
   try:
     torch.multiprocessing.set_start_method('spawn', force=True)
   except RuntimeError: pass
