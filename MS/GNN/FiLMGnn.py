@@ -16,15 +16,14 @@ class FiLMGnn(nn.Module):
     self.layer_norms = nn.ModuleList()
     for _ in range(num_layers):
       self.layer_norms.append(nn.LayerNorm(gnn_dim))
-      # 增加 heads 到 4，提升模型表达能力
+
       self.convs.append(
-        pyg_nn.GATConv(gnn_dim, gnn_dim, heads=4, concat=False, edge_dim=edge_feat_dim)
-      )
+        pyg_nn.GATConv(gnn_dim, gnn_dim, heads=4, concat=False, edge_dim=edge_feat_dim))
+
     self.edge_output_head = nn.Sequential(
       nn.Linear(gnn_dim * 2 + edge_feat_dim, gnn_dim),
       nn.ReLU(),
-      nn.Linear(gnn_dim, 1)
-    )
+      nn.Linear(gnn_dim, 1))
     
     self.register_buffer('gamma_neutral', torch.ones(num_layers, gnn_dim))
     self.register_buffer('beta_neutral', torch.zeros(num_layers, gnn_dim))

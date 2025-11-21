@@ -232,7 +232,7 @@ def run_a2c_training():
           # 7. 记录与保存
           stats_reward.append(reward)
           avg_r = np.mean(stats_reward[-50:])
-          pbar.set_postfix({"R": f"{reward:.1f}", "Avg": f"{avg_r:.1f}", "L": f"{total_loss.item():.2f}"})
+          if rank == 0: pbar.set_postfix({"R": f"{reward:.1f}", "Avg": f"{avg_r:.1f}", "L": f"{total_loss.item():.2f}"})
           
           if total_episodes % 100 == 0:
             torch.save(agent.state_dict(), CONFIG.SAVE_PATH)

@@ -61,7 +61,7 @@ class ActorCritic(nn.Module):
       gnn_state = torch.load(pretrained_gnn_path, map_location='cpu')
       
       # [关键] 移除多卡训练时 DataParallel 自动添加的 'module.' 前缀
-      gnn_state_cleaned = {k.replace('module.', ''): v for k, v in gn_state.items()}
+      gnn_state_cleaned = {k.replace('module.', ''): v for k, v in gnn_state.items()}
       
       # 加载权重，strict=False 允许我们稍后覆盖 GNN 头
       self.gnn_model.load_state_dict(gnn_state_cleaned, strict=False)

@@ -6,6 +6,7 @@ from torch_geometric.data import Data
 class Default_config:
   # 默认拓扑生成参数
   M_BA = 2
+  MIN_BW = 5.0
   MAX_BW = 20.0
   MIN_LOSS = 0.0 
   MAX_LOSS = 3.0
@@ -39,12 +40,6 @@ class TopologyGenerator:
     
     # 1. 生成 BA 无标度网络
     G = nx.barabasi_albert_graph(n=num_nodes, m=self.m_ba)
-    # 2. 为节点和边添加属性
-    for n in G.nodes():
-      # Buffer Occupancy: 0.0~1.0
-      G.nodes[n]['buffer_occupancy'] = random.uniform(0.0, 0.1) 
-      # Processing Delay: ms
-      G.nodes[n]['proc_delay'] = random.uniform(0.01, 0.05)
 
     for u, v in G.edges():
       # 随机但合理的链路属性
@@ -79,8 +74,8 @@ def get_pyg_data_from_nx(G: nx.Graph, S_node: int, D_node: int, config):
   try:
     # 对于小图(10-30节点)，这些计算非常快
     betweenness = nx.betweenness_centrality(G)
-    clustering = nx.clustering(G)
     pagerank = nx.pagerank(G, alpha=0.85)
+    clustering = nx.clustering(G)
   except:
     # 容错处理
     betweenness = {n: 0.0 for n in G.nodes()}
@@ -99,8 +94,9 @@ def get_pyg_data_from_nx(G: nx.Graph, S_node: int, D_node: int, config):
     l = data.get('loss', 0.0)       # 丢包率
     b = data.get('bandwidth', 1000.0)
     u_load = data.get('utilization', 0.0) # 利用率 (预训练默认为0)
+    avail_bw = b * (1.0 - u_load)
 
-    attr = [d, b, l, u_load]
+    attr = [d, b, l, u_load, avail_bw]
     edge_attrs_raw.extend([attr, attr])
 
   edge_index = torch.tensor([source_nodes, target_nodes], dtype=torch.long) 
@@ -110,8 +106,11 @@ def get_pyg_data_from_nx(G: nx.Graph, S_node: int, D_node: int, config):
   edge_attr = torch.zeros_like(edge_attr_tensor)
   # Delay
   edge_attr[:, 0] = (edge_attr_tensor[:, 0] - config.MIN_DELAY) / (config.MAX_DELAY - config.MIN_DELAY + 1e-6)
-  # Bandwidth
+
+  # Bandwidth & Available_Bandwidth
   edge_attr[:, 1] = (edge_attr_tensor[:, 1] - config.MIN_BW) / (config.MAX_BW - config.MIN_BW + 1e-6)
+  edge_attr[:, 4] = (edge_attr_tensor[:, 4] - config.MIN_BW) / (config.MAX_BW - config.MIN_BW + 1e-6)
+
   # Loss & Utilization (本身就是 0-1)
   edge_attr[:, 2] = edge_attr_tensor[:, 2]
   edge_attr[:, 3] = edge_attr_tensor[:, 3]
@@ -145,8 +144,11 @@ def get_pyg_data_from_nx(G: nx.Graph, S_node: int, D_node: int, config):
     betw = betweenness.get(i, 0.0)
     clus = clustering.get(i, 0.0)
     pr = pagerank.get(i, 0.0) * 10.0 # 适当放大 PageRank
+    
+    bo= data.get('buffer_occupancy', 0)
+    pd= data.get('proc_delay', 0)
 
-    node_features_list.append([deg, is_s, is_d, ds, dd, betw, clus, pr])
+    node_features_list.append([deg, is_s, is_d, ds, dd, betw, clus, pr, bo, pd])
 
   x = torch.tensor(node_features_list, dtype=torch.float)
   return Data(x=x, edge_index=edge_index, edge_attr=edge_attr), G

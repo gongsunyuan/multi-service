@@ -497,6 +497,7 @@ def clean_flow_rules(net, cookie=0x1234):
   for sw in net.switches:
     sw.cmd(f'ovs-ofctl -O OpenFlow13 del-flows {sw.name} "cookie={cookie}/-1"')
 
+# 下发流表规则
 def install_path_rules(net, path_nodes, cookie=0x1234):
   """
   将逻辑路径转化为 OpenFlow 流表规则并下发。
@@ -588,5 +589,59 @@ def install_path_rules(net, path_nodes, cookie=0x1234):
     # 动作: output:FLOOD (或者 normal 如果有默认学习规则)
     switch.cmd(f'ovs-ofctl -O OpenFlow13 add-flow {sw_name} "cookie={cookie},priority=100,dl_type=0x0806,actions=FLOOD"')
 
+# 根据gnn输出的 logits来生成路径--贪婪/概率选择：
 
+def sample_path(edge_logits, edge_index, s_node, d_node, max_steps=30, greedy=False):
+  """
+  通用路径采样函数。
+  :param greedy: True=验证模式(只选概率最大的), False=RL模式(按概率采样)
+  """
+  # 1. 构建邻接表
+  adj = {}
+  num_edges = edge_index.shape[1]
+  for i in range(num_edges):
+    u = edge_index[0, i].item()
+    v = edge_index[1, i].item()
+    if u not in adj: adj[u] = []
+    adj[u].append((v, i)) # (邻居节点, 边索引)
 
+  current = s_node
+  path = [current]
+  visited = {current}
+  
+  for _ in range(max_steps):
+    if current == d_node: break
+    if current not in adj: break
+    
+    # 获取合法邻居
+    neighbors = adj[current]
+    valid_options = [n for n in neighbors if n[0] not in visited]
+    if not valid_options: break
+    
+    # 提取候选边的 Logits
+    candidate_logits = []
+    candidate_nodes = []
+    for next_node, edge_idx in valid_options:
+      candidate_logits.append(edge_logits[edge_idx])
+      candidate_nodes.append(next_node)
+        
+    # --- 核心决策逻辑 ---
+    logits_tensor = torch.stack(candidate_logits)
+    
+    if greedy:
+      # [预训练验证] 贪婪模式：直接选分数最高的
+      action_idx = torch.argmax(logits_tensor).item()
+    else:
+      # [RL 训练] 随机模式：按概率采样
+      probs = torch.softmax(logits_tensor, dim=0)
+      dist = torch.distributions.Categorical(probs)
+      action_idx = dist.sample().item()
+    # -------------------
+    
+    next_hop = candidate_nodes[action_idx]
+    path.append(next_hop)
+    visited.add(next_hop)
+    current = next_hop
+      
+  is_success = (path[-1] == d_node)
+  return path, is_success
