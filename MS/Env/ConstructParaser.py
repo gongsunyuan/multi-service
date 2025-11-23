@@ -13,7 +13,12 @@ class TopoParaser(ArgumentParser):
       default=None,
       help="远程流表控制器的端口"
     )
-
+    self.add_argument(
+      "-dv","--device",
+      type=str,
+      default="",
+      help="指定使用gpu-'0,1,2,3'"
+    )
     
 
 

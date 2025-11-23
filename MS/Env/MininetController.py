@@ -217,7 +217,6 @@ def measure_latency_ping_from_output(result: str) -> float:
 
 
 # Generator :
-
 # 生成一个mininet网络
 
 # mininet 定义
@@ -234,9 +233,10 @@ class GraphTopo(Topo):
     for u, v, data in blueprint_g.edges(data=True):
       bw = data.get('bandwidth', 1000)
       delay = f"{data.get('delay', 1)}ms"
-      loss = f"{data.get('loss', 0)}ms"
+      loss = data.get('loss', 0)
+      
       # 这里沿用 Mininet 构造函数中设置的 r2q
-      self.addLink(f'{test_str}s{u}', f'{test_str}s{v}', delay=delay, loss=loss, use_htb=True) 
+      self.addLink(f'{test_str}s{u}', f'{test_str}s{v}', delay=delay, loss=loss, use_tbf=True, latency_ms=20) 
 
 # mininet 启动
 @contextmanager
@@ -491,8 +491,9 @@ def normalize_fingerprint(tensor: torch.Tensor) -> torch.Tensor:
 
 
 # Editor :
-
 # 管理流表规则
+
+# 清除流表规则
 def clean_flow_rules(net, cookie=0x1234):
   for sw in net.switches:
     sw.cmd(f'ovs-ofctl -O OpenFlow13 del-flows {sw.name} "cookie={cookie}/-1"')
@@ -590,7 +591,6 @@ def install_path_rules(net, path_nodes, cookie=0x1234):
     switch.cmd(f'ovs-ofctl -O OpenFlow13 add-flow {sw_name} "cookie={cookie},priority=100,dl_type=0x0806,actions=FLOOD"')
 
 # 根据gnn输出的 logits来生成路径--贪婪/概率选择：
-
 def sample_path(edge_logits, edge_index, s_node, d_node, max_steps=30, greedy=False):
   """
   通用路径采样函数。
@@ -645,3 +645,152 @@ def sample_path(edge_logits, edge_index, s_node, d_node, max_steps=30, greedy=Fa
       
   is_success = (path[-1] == d_node)
   return path, is_success
+
+# 监视器，负责动态提取mininet拓扑状态
+class NetworkMonitor:
+  def __init__(self, net):
+    self.net = net
+
+  def _read_sys_file(self, path):
+    """快速读取系统文件"""
+    try:
+      with open(path, 'r') as f:
+        return int(f.read().strip())
+    except:
+      return 0
+
+  def _get_queue_limit(self, node_name, intf_name):
+    """
+    动态读取接口的队列上限 (Capacity)
+    返回: limit (int, 单位: packets)
+    """
+    try:
+      node = self.net.get(node_name)
+      # -d 参数用于显示详细配置 (details)，包含 limit
+      cmd = f"tc -d qdisc show dev {intf_name}"
+      output = node.cmd(cmd)
+      
+      # 1. 尝试匹配 'limit 100p' (pfifo/bfifo_fast 等)
+      # 这里的 p 代表 packets
+      match_p = re.search(r'limit\s+(\d+)p', output)
+      if match_p:
+        return int(match_p.group(1))
+      
+      # 2. 尝试匹配 'limit 10000b' (bfifo，基于字节)
+      # 如果是字节，我们需要估算包数。假设平均包大小 1500B
+      match_b = re.search(r'limit\s+(\d+)b', output)
+      if match_b:
+        bytes_limit = int(match_b.group(1))
+        return max(1, bytes_limit // 1500)
+      
+      # 3. 如果没找到 limit，通常是默认的 txqueuelen (通常是 1000)
+      # 可以读取 /sys/class/net/.../tx_queue_len
+      cmd_tx = f"cat /sys/class/net/{intf_name}/tx_queue_len"
+      tx_len = int(node.cmd(cmd_tx).strip())
+      return tx_len
+        
+    except Exception as e:
+      print(f"Error reading queue limit: {e}")
+      return 100 # 兜底默认值
+
+  def _get_all_interfaces_stats(self, G):
+    """
+    获取图中所有涉及接口的 tx_bytes 和 backlog
+    返回: dict { (u, v): {'bytes': int, 'qlen': int} }
+    """
+    stats = {}
+    for u, v in G.edges():
+      # 映射节点名
+      s_u_name = f"Ts{u}" if f"Ts{u}" in self.net else f"s{u}"
+      s_v_name = f"Ts{v}" if f"Ts{v}" in self.net else f"s{v}"
+      
+      if s_u_name not in self.net: continue
+      s_u = self.net.get(s_u_name)
+      s_v = self.net.get(s_v_name)
+      
+      # 查找接口
+      links = self.net.linksBetween(s_u, s_v)
+      if not links: continue
+      link = links[0]
+      intf = link.intf1 if link.intf1.node == s_u else link.intf2
+      
+      # 1. 读取 Bytes (直接读宿主机文件，假设是在 Root Namespace 或路径正确)
+      # 注意: Mininet 的虚拟接口通常在 Root NS 可见 (/sys/class/net/s1-eth2/...)
+      # 如果读不到，可能需要用 node.cmd('cat ...')，但那样太慢。
+      # 这里假设是标准 Mininet OVS 环境，接口都在 Root NS。
+      tx_bytes = self._read_sys_file(f"/sys/class/net/{intf.name}/statistics/tx_bytes")
+      
+      # 2. 读取队列 (只能通过 tc 命令，较慢，但在 sampling 期间只读一次也行)
+      # 为了速度，这里我们可以只在采样结束时读一次队列
+      # 这里先存名字，稍后处理
+      stats[(u, v)] = {'bytes': tx_bytes, 'intf': intf.name, 'node': s_u}
+        
+    return stats
+
+  def sync_state_to_graph(self, G: nx.Graph):
+    """
+    [主动采样模式]
+    休眠一小段时间，计算精确的瞬时速率。
+    """
+    SAMPLE_WINDOW = 0.05 # 采样窗口 50ms
+    
+    # 1. 第一次快照
+    snapshot1 = self._get_all_interfaces_stats(G)
+    t1 = time()
+    # 2. 等待
+    sleep(SAMPLE_WINDOW)
+    # 3. 第二次快照
+    snapshot2 = self._get_all_interfaces_stats(G)
+    t2 = time()
+    
+    delta_t = t2 - t1
+    if delta_t <= 0: delta_t = 1e-6
+
+    # 4. 计算并更新
+    for u, v, data in G.edges(data=True):
+      key = (u, v)
+      if key not in snapshot1 or key not in snapshot2:
+        continue
+          
+      # --- A. 计算瞬时利用率 ---
+      b1 = snapshot1[key]['bytes']
+      b2 = snapshot2[key]['bytes']
+      
+      # 速率 (Mbps)
+      speed_mbps = ((b2 - b1) * 8) / (delta_t * 1_000_000)
+      
+      capacity = data.get('bandwidth', 10.0)
+      util = min(speed_mbps / (capacity + 1e-6), 1.0)
+      
+      # 写入图
+      data['utilization'] = util
+      
+      # --- B. 获取瞬时队列 (Buffer) ---
+      # 队列长度只需要读一次（取最新状态）
+      # 解析 tc 输出
+      node = snapshot2[key]['node']
+      intf_name = snapshot2[key]['intf']
+      try:
+        # 这是一个 shell 调用，稍微耗时，但比读文件快
+        tc_out = node.cmd(f"tc -s qdisc show dev {intf_name}")
+        match = re.search(r'backlog\s+\d+b\s+(\d+)p', tc_out)
+        q_len = int(match.group(1)) if match else 0
+      except:
+        q_len = 0
+      
+      # 写入节点特征 (源节点 Buffer)
+      # 更新源节点 u 的状态
+      node_u = G.nodes[u]
+      max_q = 50.0
+      buf_occ = min(q_len / max_q, 1.0)
+      
+      # 简单估算 Proc Delay
+      proc_delay = 0.01 * (1 + 5 * util**2) # 拥塞时 CPU 处理变慢
+      
+      # 更新 (平滑一点)
+      node_u['buffer_occupancy'] = 0.3 * node_u.get('buffer_occupancy', 0) + 0.7 * buf_occ
+      node_u['proc_delay'] = 0.3 * node_u.get('proc_delay', 0) + 0.7 * proc_delay
+
+    return G
+
+

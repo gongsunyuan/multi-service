@@ -45,7 +45,7 @@ class TopologyGenerator:
       # 随机但合理的链路属性
       bw = random.uniform(self.min_bw, self.max_bw)
       delay = random.uniform(self.min_delay, self.max_delay)
-      loss = random.uniform(self.min_loss, self.min_loss)
+      loss = random.uniform(self.min_loss, self.max_loss)
       # 存储属性
       G[u][v]['loss'] = loss
       G[u][v]['delay'] = delay
