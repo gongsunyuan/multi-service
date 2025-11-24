@@ -105,7 +105,7 @@ def run_a2c_training():
         hosts = {i: net.get(f'h{i}') for i in G_nx.nodes()}
         
         # 内层循环：流训练 (Mininet 复用) 
-        pbar = tqdm(range(CONFIG.EPISODES_PER_TOPO), desc=f"Topo {topo_idx+1}", leave=False)
+        pbar = tqdm(range(CONFIG.EPISODES_PER_TOPO), desc=f"Topo {topo_idx+1}", leave=False, disable=True)
         
         for i_step, _ in enumerate(pbar):
           # print("="*50)

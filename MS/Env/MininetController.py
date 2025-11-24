@@ -20,6 +20,8 @@ from .FlowGenerator import FlowType, FLOW_PROFILES
 from mininet.node import OVSKernelSwitch, RemoteController
 from mininet.link import TCLink
 
+MININET_VERBOSE = False
+
 def parse_ditg_output(output_str: str) -> dict:
   """
   解析 ITGDec 的标准输出文本，提取关键 QoS 指标。
@@ -166,11 +168,10 @@ def measure_path_qos(server, client, path_route, flow_type):
   try:
     # 启动接听命令
     server_proc = server.popen("ITGRecv")
-    sleep(0.2)
     # 执行发送 (阻塞)
     client_proc = client.popen(cmd)
     try:
-      client_proc.wait(timeout=5) 
+      client_proc.wait(timeout=10) 
     except Exception:
       # 如果超时还没停，说明可能卡死了，再强制杀
       pass
@@ -178,10 +179,18 @@ def measure_path_qos(server, client, path_route, flow_type):
     print(f"[Error] 实验执行出错: {e}")
   finally:
     if client_proc:
-      client_proc.kill() # 确保杀死
+      try:
+        client_proc.terminate()
+        client_proc.wait(timeout=1)
+      except:
+        client_proc.kill() # 确保杀死
     # 清理服务端
     if server_proc:
-      server_proc.kill()
+      try:
+        server_proc.terminate()
+        server_proc.wait(timeout=1)
+      except:
+        server_proc.kill()
   
   # 检查文件是否存在 (防止传输完全失败导致无日志)
   check_log = server.cmd(f"ls {recv_log}")
@@ -251,7 +260,7 @@ def get_a_mininet(g: nx.Graph, is_test=False, remote_port=None):
     print("[ms] 没有输入远程控制器，请自己配置流表规则！")
     controller = None
 
-  # setLogLevel('error')
+  setLogLevel('error')
 
   net = Mininet(
     topo=GraphTopo(g, is_test),
@@ -594,6 +603,11 @@ def install_path_rules(net, path_nodes, cookie=0x1234):
     # 动作: output:FLOOD (或者 normal 如果有默认学习规则)
     switch.cmd(f'ovs-ofctl -O OpenFlow13 add-flow {sw_name} "cookie={cookie},priority=100,dl_type=0x0806,actions=FLOOD"')
     sleep(0.5)
+    # After install_path_rules()
+  loss = net.ping([h_src, h_dst], timeout=1)
+  if loss > 50:
+    print(f"[Warning] High ping loss ({loss}%) - path might be broken")
+    return -100.0
 
 # 根据gnn输出的 logits来生成路径--贪婪/概率选择：
 # 替换 MS/Env/MininetController.py 中的 sample_path 函数
