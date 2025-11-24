@@ -13,9 +13,9 @@ from torch_geometric.nn.glob import global_mean_pool
 # === 导入自定义模块 ===
 # 请确保项目结构正确，并且 __init__.py 文件存在
 from MS.Agent.ActorCritic import ActorCritic
-from MS.Env.MininetController import get_a_mininet, get_a_fingerprint, measure_path_qos
+from MS.Env.MininetController import get_a_mininet, get_a_fingerprint, measure_path_qos, sample_path
 from MS.Env.FlowGenerator import FlowGenerator
-from MS.Env.NetworkGenerator import TopologyGenerator, get_pyg_data_from_nx, sample_path
+from MS.Env.NetworkGenerator import TopologyGenerator, get_pyg_data_from_nx
 
 # ================= 配置参数 =================
 class Config:
@@ -156,7 +156,6 @@ def run_a2c_training():
           critic_loss = nn.MSELoss()(value_est, reward_tanh)
           
           total_loss = actor_loss + CONFIG.CRITIC_LOSS_COEF * critic_loss
-
           (total_loss / CONFIG.BATCH_SIZE).backward()     # grad accumulate
 
           if (i_step + 1) % CONFIG.BATCH_SIZE == 0:

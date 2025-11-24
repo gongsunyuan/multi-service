@@ -590,10 +590,12 @@ def install_path_rules(net, path_nodes, cookie=0x1234):
     switch.cmd(f'ovs-ofctl -O OpenFlow13 add-flow {sw_name} "cookie={cookie},priority=100,dl_type=0x0806,actions=FLOOD"')
 
 # 根据gnn输出的 logits来生成路径--贪婪/概率选择：
-def sample_path(edge_logits, edge_index, s_node, d_node, max_steps=30, greedy=False):
+# 替换 MS/Env/MininetController.py 中的 sample_path 函数
+
+def sample_path(edge_logits, edge_index, s_node, d_node, max_steps=100, greedy=False):
   """
-  通用路径采样函数。
-  :param greedy: True=验证模式(只选概率最大的), False=RL模式(按概率采样)
+  通用路径采样函数 (支持 RL 梯度计算)。
+  返回: path (list), log_prob_sum (tensor), is_success (bool)
   """
   # 1. 构建邻接表
   adj = {}
@@ -607,6 +609,7 @@ def sample_path(edge_logits, edge_index, s_node, d_node, max_steps=30, greedy=Fa
   current = s_node
   path = [current]
   visited = {current}
+  log_probs = [] # [新增] 用于存储每一步的 log_prob
   
   for _ in range(max_steps):
     if current == d_node: break
@@ -628,14 +631,22 @@ def sample_path(edge_logits, edge_index, s_node, d_node, max_steps=30, greedy=Fa
     logits_tensor = torch.stack(candidate_logits)
     
     if greedy:
-      # [预训练验证] 贪婪模式：直接选分数最高的
+      # [验证模式]
       action_idx = torch.argmax(logits_tensor).item()
+      # greedy 模式下 log_prob 通常设为 0 或不计算，因为不进行梯度更新
+      log_prob = torch.tensor(0.0).to(logits_tensor.device)
     else:
-      # [RL 训练] 随机模式：按概率采样
+      # [RL 训练模式]
       probs = torch.softmax(logits_tensor, dim=0)
       dist = torch.distributions.Categorical(probs)
-      action_idx = dist.sample().item()
-    # -------------------
+      action_tensor = dist.sample()
+      action_idx = action_tensor.item()
+      
+      # [关键] 计算这一步的对数概率，保留梯度图
+      log_prob = dist.log_prob(action_tensor)
+    
+    # 记录
+    log_probs.append(log_prob)
     
     next_hop = candidate_nodes[action_idx]
     path.append(next_hop)
@@ -643,7 +654,15 @@ def sample_path(edge_logits, edge_index, s_node, d_node, max_steps=30, greedy=Fa
     current = next_hop
       
   is_success = (path[-1] == d_node)
-  return path, is_success
+  
+  # [新增] 汇总整条路径的 log_prob (加法)
+  if log_probs:
+    log_prob_sum = torch.stack(log_probs).sum()
+  else:
+    log_prob_sum = torch.tensor(0.0).to(edge_logits.device)
+
+  # 返回 3 个值
+  return path, log_prob_sum, is_success
 
 # 监视器，负责动态提取mininet拓扑状态
 class NetworkMonitor:
