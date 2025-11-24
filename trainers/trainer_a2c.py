@@ -12,7 +12,7 @@ from torch_geometric.nn.glob import global_mean_pool
 
 # === 导入自定义模块 ===
 # 请确保项目结构正确，并且 __init__.py 文件存在
-from MS.A2C.ActorCritic import ActorCritic
+from MS.Agent.ActorCritic import ActorCritic
 from MS.Env.MininetController import get_a_mininet, get_a_fingerprint, measure_path_qos
 from MS.Env.FlowGenerator import FlowGenerator
 from MS.Env.NetworkGenerator import TopologyGenerator, get_pyg_data_from_nx, sample_path
@@ -30,7 +30,8 @@ class Config:
   MAX_NODES_NUM = 100
 
   # --- 训练控制 ---
-  MAX_EPISODES = 2000      # 总回合数
+  BATCH_SIZE = 16
+  MAX_EPISODES = 10      # 总回合数
   EPISODES_PER_TOPO = 64   # 每套拓扑训练多少个流 (复用次数)
   
   # --- 优化器参数 ---
@@ -105,7 +106,8 @@ def run_a2c_training():
         # --- 内层循环：流训练 (Mininet 复用) ---
         pbar = tqdm(range(CONFIG.EPISODES_PER_TOPO), desc=f"Topo {topo_idx+1}")
         
-        for _ in pbar:
+
+        for i_step, _ in enumerate(pbar):
           total_episodes += 1
           
           # 1. 环境准备
@@ -143,7 +145,7 @@ def run_a2c_training():
           # 归一化奖励 (简单除以常数，防止梯度过大)
           # reward_norm = reward / 10.0 
           reward_tensor = torch.tensor([reward], device=CONFIG.DEVICE)
-          reward_tanh = torch.tanh(raw_reward_tensor / 10.0)
+          reward_tanh = torch.tanh(reward_tensor / 10.0)
           
           # 6. 反向传播 (Update)
           # Advantage
@@ -154,16 +156,18 @@ def run_a2c_training():
           critic_loss = nn.MSELoss()(value_est, reward_tanh)
           
           total_loss = actor_loss + CONFIG.CRITIC_LOSS_COEF * critic_loss
-          
-          optimizer.zero_grad()
-          total_loss.backward()
-          torch.nn.utils.clip_grad_norm_(agent.parameters(), CONFIG.MAX_GRAD_NORM)
-          optimizer.step()
+
+          (total_loss / CONFIG.BATCH_SIZE).backward()     # grad accumulate
+
+          if (i_step + 1) % CONFIG.BATCH_SIZE == 0:
+            torch.nn.utils.clip_grad_norm_(agent.parameters(), CONFIG.MAX_GRAD_NORM)
+            optimizer.step()
+            optimizer.zero_grad() # 更新完清空梯度
           
           # 7. 记录与保存
           stats_reward.append(reward)
           avg_r = np.mean(stats_reward[-50:])
-          if rank == 0: pbar.set_postfix({"R": f"{reward:.1f}", "Avg": f"{avg_r:.1f}", "L": f"{total_loss.item():.2f}"})
+          pbar.set_postfix({"R": f"{reward:.1f}", "Avg": f"{avg_r:.1f}", "L": f"{total_loss.item():.2f}"})
           
           if total_episodes % 100 == 0:
             torch.save(agent.state_dict(), CONFIG.SAVE_PATH)
