@@ -13,9 +13,10 @@ from torch_geometric.nn.glob import global_mean_pool
 # === 导入自定义模块 ===
 # 请确保项目结构正确，并且 __init__.py 文件存在
 from MS.Agent.ActorCritic import ActorCritic
-from MS.Env.MininetController import get_a_mininet, get_a_fingerprint, measure_path_qos, sample_path
 from MS.Env.FlowGenerator import FlowGenerator
+from MS.Env.TensorLog import append_matrix_to_file
 from MS.Env.NetworkGenerator import TopologyGenerator, get_pyg_data_from_nx
+from MS.Env.MininetController import get_a_mininet, get_a_fingerprint, measure_path_qos, sample_path, clean_flow_rules, NetworkMonitor, install_path_rules
 
 # ================= 配置参数 =================
 class Config:
@@ -24,14 +25,16 @@ class Config:
   M_BA = 2
   MIN_BW = 20.0
   MAX_BW = 200.0
+  MIN_LOSS = 0.0
+  MAX_LOSS = 3.0
   MIN_DELAY = 1.0
-  MAX_DELAY = 100.0
-  MIN_NODES_NUM = 50
-  MAX_NODES_NUM = 100
+  MAX_DELAY = 50.0
+  MIN_NODES_NUM = 10
+  MAX_NODES_NUM = 20
 
   # --- 训练控制 ---
+  EPOCH = 10 
   BATCH_SIZE = 16
-  MAX_EPISODES = 10      # 总回合数
   EPISODES_PER_TOPO = 64   # 每套拓扑训练多少个流 (复用次数)
   
   # --- 优化器参数 ---
@@ -46,7 +49,7 @@ class Config:
   SAVE_PATH = os.path.join(MODEL_DIR, "a2c_final.pth")
   # 确保这些预训练模型文件存在
   PRETRAINED_LSTM = os.path.join(MODEL_DIR, "trained_lstm.pth") 
-  PRETRAINED_GNN = os.path.join(MODEL_DIR, "trained_gnn_recall.pth") # 注意文件名拼写是否与您实际一致
+  PRETRAINED_GNN = os.path.join(MODEL_DIR, "trained_gnn_recall_ospf.pth") # 注意文件名拼写是否与您实际一致
 
   # --- 模型结构 (需与定义保持一致) ---
   GNN_DIM = 256
@@ -81,55 +84,72 @@ def run_a2c_training():
   flow_gen = FlowGenerator()
   
   # 计算循环次数
-  num_topo_updates = CONFIG.MAX_EPISODES // CONFIG.EPISODES_PER_TOPO
+  
   total_episodes = 0
   stats_reward = []
 
-  print(f"[ms] 开始训练: 共 {num_topo_updates} 次拓扑变更, 总计 {CONFIG.MAX_EPISODES} 回合")
+  print(f"[ms] 开始训练: 共 {CONFIG.EPOCH-1} 次拓扑变更, 总计 {CONFIG.EPOCH} 回合")
   
   # --- 外层循环：拓扑生命周期 ---
-  for topo_idx in range(num_topo_updates):
+  for topo_idx in range(CONFIG.EPOCH):
       
     # A. 生成新拓扑
     G_nx = topo_gen.generate_topology()
-    print(f"[Topo {topo_idx+1}/{num_topo_updates}] 启动 Mininet (Nodes: {len(G_nx.nodes())})...")
     
     try:
       # B. 启动 Mininet (Context Manager)
       with get_a_mininet(G_nx) as net:
+        print(f"[Topo {topo_idx+1}] 启动 Mininet success (Nodes: {len(G_nx.nodes())})...")
+        monitor = NetworkMonitor(net)
         # 预取节点对象
         hosts = {i: net.get(f'h{i}') for i in G_nx.nodes()}
         
-        # 等待网络稳定
-        # net.pingAll() # 可选，确保连通性
+        # 内层循环：流训练 (Mininet 复用) 
+        pbar = tqdm(range(CONFIG.EPISODES_PER_TOPO), desc=f"Topo {topo_idx+1}", leave=False)
         
-        # --- 内层循环：流训练 (Mininet 复用) ---
-        pbar = tqdm(range(CONFIG.EPISODES_PER_TOPO), desc=f"Topo {topo_idx+1}")
-        
-
         for i_step, _ in enumerate(pbar):
-          total_episodes += 1
-          
+          # print("="*50)
+          # print(f"flow {i_step}, {_}")
           # 1. 环境准备
           clean_flow_rules(net) # 清理上一回合规则
           s_node, d_node = topo_gen.select_source_destination()
           h_src, h_dst = hosts[s_node], hosts[d_node]
-          
+          # print(f"[ms] env ready !")
           # 2. 获取状态 (State)
+
           # 2.1 采集指纹 (耗时操作)
+          TEMP_COOKIE = 0x8888
+          try:
+            # 计算物理最短路作为临时通路
+            temp_path = nx.shortest_path(G_nx, source=s_node, target=d_node)
+            install_path_rules(net, temp_path, cookie=TEMP_COOKIE)
+            time.sleep(0.05) # 给 OVS 一点时间生效
+          except nx.NetworkXNoPath:
+            print(f"[Error]: No path between {s_node} and {d_node}")
+            continue
+          
           flow_type, flow_profile = flow_gen.get_random_flow()
           fingerprint = get_a_fingerprint(
             server=h_dst, client=h_src, 
             flow_type=flow_type, 
             n_packets_to_capture=CONFIG.N_PACKETS).float().to(CONFIG.DEVICE) # Shape: (1, N, 2)
           
+          # append_matrix_to_file(fingerprint.detach().cpu(), "test.log", i_step)
           # 2.2 获取图特征
+          monitor.sync_state_to_graph(G_nx)
+
+          for u, v in G_nx.edges():
+            if G_nx.has_edge(u, v):
+              # print(f"     链路 {u}->{v} 利用率: {G_nx[u][v]['utilization']:.2%}")
+              break
+
           pyg_data, _ = get_pyg_data_from_nx(G_nx, s_node, d_node, CONFIG)
           pyg_data = pyg_data.to(CONFIG.DEVICE)
-            
+          
           # 3. 模型推理 (Manual Forward 以获取中间变量)
+          # print("[ms] agent forwarding")
           dist, value_est, edge_logits = agent(fingerprint, pyg_data)
-
+          # print("[ms] agent forward success")
           # 4. 动作采样 (Action)
           path, log_prob_sum, success = sample_path(
             edge_logits, pyg_data.edge_index, s_node, d_node, max_steps=30)
@@ -140,7 +160,7 @@ def run_a2c_training():
           else:
             install_path_rules(net, path)
             # 测量真实 QoS
-            reward = measure_path_qos(h_src, h_dst, path, flow_profile)
+            reward = measure_path_qos(h_src, h_dst, path, flow_type)
           
           # 归一化奖励 (简单除以常数，防止梯度过大)
           # reward_norm = reward / 10.0 

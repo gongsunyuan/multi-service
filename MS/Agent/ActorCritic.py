@@ -42,7 +42,7 @@ class ActorCritic(nn.Module):
     self.lstm_body = LstmLayer(lstm_input_dim, lstm_hidden_dim, lstm_layers)
     
     # 路径选择模块 (GNN Model) - 我们先加载整个模型，包括预训练的头
-    self.gnn_model = FiLMGnnModel(
+    self.gnn_model = FiLMGnn(
       gnn_node_dim, gnn_hidden_dim, gnn_edge_dim, gnn_layers)
 
     # ======================================================================
@@ -96,10 +96,10 @@ class ActorCritic(nn.Module):
     # 路径输出头 (GNN 头 / Actor Head)
     # 按照项目要求，重新随机初始化 GNN 头
     # 它将取代 gnn_model 中预训练好的那个头
-    self.gnn_model.edge_output_head = nn.Sequential(
-      nn.Linear(gnn_hidden_dim * 2 + gnn_edge_dim, gnn_hidden_dim),
-      nn.ReLU(),
-      nn.Linear(gnn_hidden_dim, 1))
+    # self.gnn_model.edge_output_head = nn.Sequential(
+    #   nn.Linear(gnn_hidden_dim * 2 + gnn_edge_dim, gnn_hidden_dim),
+    #   nn.ReLU(),
+    #   nn.Linear(gnn_hidden_dim, 1))
     # print("✅ GNN 预训练头已替换为随机初始化的 Actor 头。")
 
     # [新头 3] 价值评估头 (Critic Head)
@@ -190,4 +190,4 @@ class ActorCritic(nn.Module):
     # [Critic 输出]: 评估当前状态的价值 V(s)
     value = self.critic_head(state_embedding) # (B, 1)
     
-    return dist, value.squeeze(1) # 返回分布和标量价值
+    return dist, value.squeeze(1), edge_logits # 返回分布和标量价值

@@ -117,25 +117,25 @@ def calculate_qoe_reward(qos_metrics: dict, flow_profile: dict) -> float:
   # 1. 检查延迟 (来自 Ping)
   max_delay = qoe_reqs.get('max_delay')
   if max_delay is not None and qos_metrics.get('delay', 1000.0) > max_delay:
-    print(f"REWARD PENALTY: Delay cliff! {qos_metrics.get('delay')} > {max_delay}")
+    # print(f"REWARD PENALTY: Delay cliff! {qos_metrics.get('delay')} > {max_delay}")
     return -100.0 # 巨大的惩罚
       
   # 2. 检查抖动 (来自 iperf -u)
   max_jitter = qoe_reqs.get('max_jitter')
   if max_jitter is not None and qos_metrics.get('jitter', 1000.0) > max_jitter:
-    print(f"REWARD PENALTY: Jitter cliff! {qos_metrics.get('jitter')} > {max_jitter}")
+    # print(f"REWARD PENALTY: Jitter cliff! {qos_metrics.get('jitter')} > {max_jitter}")
     return -100.0 # 巨大的惩罚
 
   # 3. 检查带宽 (来自 iperf -c 或 -u)
   min_bw = qoe_reqs.get('min_bandwidth')
   if min_bw is not None and qos_metrics.get('bandwidth', 0.0) < min_bw:
-    print(f"REWARD PENALTY: Bandwidth cliff! {qos_metrics.get('bandwidth')} < {min_bw}")
+    # print(f"REWARD PENALTY: Bandwidth cliff! {qos_metrics.get('bandwidth')} < {min_bw}")
     return -100.0 # 巨大的惩罚
       
   # 4. 检查丢包率 (来自 iperf -u)
   max_loss = qoe_reqs.get('max_loss_rate')
   if max_loss is not None and qos_metrics.get('loss_rate', 1.0) > max_loss:
-    print(f"REWARD PENALTY: Loss cliff! {qos_metrics.get('loss_rate')} > {max_loss}")
+    # print(f"REWARD PENALTY: Loss cliff! {qos_metrics.get('loss_rate')} > {max_loss}")
     return -100.0 # 巨大的惩罚
 
   # 如果通过了所有悬崖测试，可以返回一个更精细的奖励
@@ -169,7 +169,11 @@ def measure_path_qos(server, client, path_route, flow_type):
     sleep(0.2)
     # 执行发送 (阻塞)
     client_proc = client.popen(cmd)
-    sleep(0.5)
+    try:
+      client_proc.wait(timeout=5) 
+    except Exception:
+      # 如果超时还没停，说明可能卡死了，再强制杀
+      pass
   except Exception as e:
     print(f"[Error] 实验执行出错: {e}")
   finally:
@@ -234,9 +238,9 @@ class GraphTopo(Topo):
       bw = data.get('bandwidth', 1000)
       delay = f"{data.get('delay', 1)}ms"
       loss = data.get('loss', 0)
-      
+      q_limit = data.get('queue_size', 100)
       # 这里沿用 Mininet 构造函数中设置的 r2q
-      self.addLink(f'{test_str}s{u}', f'{test_str}s{v}', delay=delay, loss=loss, use_tbf=True, latency_ms=20) 
+      self.addLink(f'{test_str}s{u}', f'{test_str}s{v}', delay=delay, loss=loss, use_htb=True, max_queue_size=q_limit) 
 
 # mininet 启动
 @contextmanager
@@ -496,6 +500,7 @@ def normalize_fingerprint(tensor: torch.Tensor) -> torch.Tensor:
 def clean_flow_rules(net, cookie=0x1234):
   for sw in net.switches:
     sw.cmd(f'ovs-ofctl -O OpenFlow13 del-flows {sw.name} "cookie={cookie}/-1"')
+  sleep(0.5)
 
 # 下发流表规则
 def install_path_rules(net, path_nodes, cookie=0x1234):
@@ -518,7 +523,7 @@ def install_path_rules(net, path_nodes, cookie=0x1234):
   dst_ip = h_dst.IP()
   src_ip = h_src.IP()
   
-  print(f"[Controller] Installing path: h{src_id} -> ... -> h{dst_id}")
+  # print(f"[Controller] Installing path: h{src_id} -> ... -> h{dst_id}")
 
   # 2. 遍历路径上的每一跳交换机
   for i, current_node_id in enumerate(path_nodes):
@@ -588,10 +593,10 @@ def install_path_rules(net, path_nodes, cookie=0x1234):
     # 如果没有 Controller 处理 ARP，需要广播 ARP 请求
     # 动作: output:FLOOD (或者 normal 如果有默认学习规则)
     switch.cmd(f'ovs-ofctl -O OpenFlow13 add-flow {sw_name} "cookie={cookie},priority=100,dl_type=0x0806,actions=FLOOD"')
+    sleep(0.5)
 
 # 根据gnn输出的 logits来生成路径--贪婪/概率选择：
 # 替换 MS/Env/MininetController.py 中的 sample_path 函数
-
 def sample_path(edge_logits, edge_index, s_node, d_node, max_steps=100, greedy=False):
   """
   通用路径采样函数 (支持 RL 梯度计算)。

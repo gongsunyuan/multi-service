@@ -6,14 +6,14 @@ from torch_geometric.data import Data
 class Default_config:
   # 默认拓扑生成参数
   M_BA = 2
-  MIN_BW = 5.0
-  MAX_BW = 20.0
+  MIN_BW = 20.0
+  MAX_BW = 200.0
   MIN_LOSS = 0.0 
   MAX_LOSS = 3.0
   MIN_DELAY = 1.0 
   MAX_DELAY = 200.0
-  MIN_NODES_NUM = 15
-  MAX_NODES_NUM = 30
+  MIN_NODES_NUM = 50
+  MAX_NODES_NUM = 100
 
 DEFAULT_CONFIG = Default_config()
 
@@ -46,12 +46,15 @@ class TopologyGenerator:
       bw = random.uniform(self.min_bw, self.max_bw)
       delay = random.uniform(self.min_delay, self.max_delay)
       loss = random.uniform(self.min_loss, self.max_loss)
+      rtt = 2*(delay+1500*8/(bw*1000))
+
       # 存储属性
       G[u][v]['loss'] = loss
       G[u][v]['delay'] = delay
       G[u][v]['bandwidth'] = bw
       G[u][v]['utilization'] = 0.0    # 假设可用容量是带宽的80%
       G[u][v]['capacity'] = bw * 0.8  # 存储容量（例如，基于带宽或QCI等级）
+      G[u][v]['queue_size'] = rtt*bw*1000//(1500*8)
       
     self.G = G
     return G
