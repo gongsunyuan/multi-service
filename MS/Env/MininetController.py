@@ -10,17 +10,17 @@ import sys
 import signal
 import shlex
 import uuid 
+from datetime import datetime
 import networkx as nx
 from mininet.topo import Topo
 from functools import partial
 from mininet.log import setLogLevel, info
 from scapy.all import rdpcap
 from scapy.layers.inet import IP
+from MS.Env.VebosePrint import vprint
 from .FlowGenerator import FlowType, FLOW_PROFILES
 from mininet.node import OVSKernelSwitch, RemoteController
 from mininet.link import TCLink
-
-MININET_VERBOSE = False
 
 def parse_ditg_output(output_str: str) -> dict:
   """
@@ -31,10 +31,11 @@ def parse_ditg_output(output_str: str) -> dict:
     'delay': 0.0,      # 单位: ms
     'jitter': 0.0,     # 单位: ms
     'bandwidth': 0.0,  # 单位: Mbps
-    'loss_rate': 1.0   # 范围: 0.0 - 1.0 (默认为1.0即全丢，防止无数据时误判为满分)
-  }
+    'loss_rate': 1.0}  # 范围: 0.0 - 1.0 (默认为1.0即全丢，防止无数据时误判为满分)
+  
   
   if not output_str:
+    vprint("[Error] can't catch output str -- the str is None")
     return metrics
 
   try:
@@ -45,22 +46,27 @@ def parse_ditg_output(output_str: str) -> dict:
       val = delay_match.group(1)
       if 'nan' not in val.lower(): # 过滤掉 -nan
         metrics['delay'] = float(val) * 1000.0 # 秒 -> 毫秒
-
+    else:
+      vprint("[Error] no delay found")
       # --- 2. 提取平均抖动 (Average jitter) ---
       # 示例行: Average jitter           =     0.000012 s
-      jitter_match = re.search(r"Average jitter\s+=\s+([-\d\.nan]+)\s+s", output_str)
-      if jitter_match:
-        val = jitter_match.group(1)
-        if 'nan' not in val.lower():
-          metrics['jitter'] = float(val) * 1000.0 # 秒 -> 毫秒
+    jitter_match = re.search(r"Average jitter\s+=\s+([-\d\.nan]+)\s+s", output_str)
+    if jitter_match:
+      val = jitter_match.group(1)
+      if 'nan' not in val.lower():
+        metrics['jitter'] = float(val) * 1000.0 # 秒 -> 毫秒
+    else:
+      vprint("[Error] no jitter found")
 
-      # --- 3. 提取吞吐量 (Average bitrate) ---
-      # 示例行: Average bitrate          =  4096.000000 Kbit/s
-      bitrate_match = re.search(r"Average bitrate\s+=\s+([-\d\.nan]+)\s+Kbit/s", output_str)
-      if bitrate_match:
-        val = bitrate_match.group(1)
-        if 'nan' not in val.lower():
-          metrics['bandwidth'] = float(val) / 1000.0 # Kbit/s -> Mbps
+    # --- 3. 提取吞吐量 (Average bitrate) ---
+    # 示例行: Average bitrate          =  4096.000000 Kbit/s
+    bitrate_match = re.search(r"Average bitrate\s+=\s+([-\d\.nan]+)\s+Kbit/s", output_str)
+    if bitrate_match:
+      val = bitrate_match.group(1)
+      if 'nan' not in val.lower():
+        metrics['bandwidth'] = float(val) / 1000.0 # Kbit/s -> Mbps
+    else:
+      vprint("[Error] no bitrate found")
 
       # --- 4. 提取丢包率 (Packets dropped) ---
       # 示例行: Packets dropped          =            5 (0.50 %)
@@ -70,39 +76,23 @@ def parse_ditg_output(output_str: str) -> dict:
         val = loss_match.group(1)
         if 'nan' not in val.lower():
           metrics['loss_rate'] = float(val) / 100.0 # 0.50% -> 0.005
+      else: 
+        vprint("[Error] no loss found")
       
-      # --- 特殊检查：是否有效传输 ---
       # 如果总包数 (Total packets) 为 0，说明完全没通，强制设置最差指标
       total_pkts_match = re.search(r"Total packets\s+=\s+(\d+)", output_str)
       if total_pkts_match and int(total_pkts_match.group(1)) == 0:
+        vprint("[Error] no packets arrive !!")
         metrics['loss_rate'] = 1.0
         metrics['bandwidth'] = 0.0
+      else:
+        vprint(f"[get QoS] successfully get Qoe: {metrics}")
 
   except Exception as e:
-    print(f"[Parser] 解析 D-ITG 输出时出错: {e}")
-    # print(f"原始输出片段:\n{output_str[:200]}") # 调试用
+    vprint(f"[Parser] 解析 D-ITG 输出时出错: {e}")
+    if MININET_VERBOSE: vprint(f"原始输出片段:\n{output_str[:200]}") # 调试用
 
   return metrics
-
-def measure_latency_ping(S_host, D_host, num_packets=10) -> float:
-    """
-    【新增】使用 ping 测量平均延迟 (RTT/2)。
-    iperf 不擅长测量延迟，因此我们独立测量。
-    """
-    try:
-      result = S_host.cmd(f'ping -c {num_packets} {D_host.IP()}')
-      # 解析 ping 的统计摘要
-      # 示例: rtt min/avg/max/mdev = 0.050/0.065/0.081/0.012 ms
-      ping_regex = re.search(r"rtt min/avg/max/mdev = [\d\.]+/([\d\.]+)/", result)
-      
-      if ping_regex:
-        avg_rtt = float(ping_regex.group(1))
-        return avg_rtt / 2.0 # 单向延迟估计
-            
-    except Exception as e:
-      print(f"Error measuring ping: {e}\nOutput: {result}")
-        
-    return 1000.0 # 返回一个惩罚性的高延迟
 
 def calculate_qoe_reward(qos_metrics: dict, flow_profile: dict) -> float:
   """
@@ -119,25 +109,25 @@ def calculate_qoe_reward(qos_metrics: dict, flow_profile: dict) -> float:
   # 1. 检查延迟 (来自 Ping)
   max_delay = qoe_reqs.get('max_delay')
   if max_delay is not None and qos_metrics.get('delay', 1000.0) > max_delay:
-    # print(f"REWARD PENALTY: Delay cliff! {qos_metrics.get('delay')} > {max_delay}")
+    vprint(f"REWARD PENALTY: Delay cliff! {qos_metrics.get('delay')} > {max_delay}")
     return -100.0 # 巨大的惩罚
       
   # 2. 检查抖动 (来自 iperf -u)
   max_jitter = qoe_reqs.get('max_jitter')
   if max_jitter is not None and qos_metrics.get('jitter', 1000.0) > max_jitter:
-    # print(f"REWARD PENALTY: Jitter cliff! {qos_metrics.get('jitter')} > {max_jitter}")
+    vprint(f"REWARD PENALTY: Jitter cliff! {qos_metrics.get('jitter')} > {max_jitter}")
     return -100.0 # 巨大的惩罚
 
-  # 3. 检查带宽 (来自 iperf -c 或 -u)
+  # 3. 检查带宽 
   min_bw = qoe_reqs.get('min_bandwidth')
   if min_bw is not None and qos_metrics.get('bandwidth', 0.0) < min_bw:
-    # print(f"REWARD PENALTY: Bandwidth cliff! {qos_metrics.get('bandwidth')} < {min_bw}")
+    vprint(f"REWARD PENALTY: Bandwidth cliff! {qos_metrics.get('bandwidth')} < {min_bw}")
     return -100.0 # 巨大的惩罚
       
   # 4. 检查丢包率 (来自 iperf -u)
   max_loss = qoe_reqs.get('max_loss_rate')
   if max_loss is not None and qos_metrics.get('loss_rate', 1.0) > max_loss:
-    # print(f"REWARD PENALTY: Loss cliff! {qos_metrics.get('loss_rate')} > {max_loss}")
+    vprint(f"REWARD PENALTY: Loss cliff! {qos_metrics.get('loss_rate')} > {max_loss}")
     return -100.0 # 巨大的惩罚
 
   # 如果通过了所有悬崖测试，可以返回一个更精细的奖励
@@ -174,9 +164,9 @@ def measure_path_qos(server, client, path_route, flow_type):
       client_proc.wait(timeout=10) 
     except Exception:
       # 如果超时还没停，说明可能卡死了，再强制杀
-      pass
+      vprint("[Error] client send flow timeout")
   except Exception as e:
-    print(f"[Error] 实验执行出错: {e}")
+    vprint(f"[Error] 实验执行出错: {e}")
   finally:
     if client_proc:
       try:
@@ -195,15 +185,45 @@ def measure_path_qos(server, client, path_route, flow_type):
   # 检查文件是否存在 (防止传输完全失败导致无日志)
   check_log = server.cmd(f"ls {recv_log}")
   if "No such file" in check_log:
-    print("[ERROR] No log generated. Link might be down.")
+    vprint("[ERROR] No log generated. Link might be down.")
     return -100.0 # 惩罚
       
   # 运行解码器拿到文本结果 
-  dec_output = client.cmd(f"ITGDec {recv_log}")
-  
+
+
   # 解析结果 
-  qos_metrics = parse_ditg_output(dec_output)
   
+  
+  try:
+    vprint(f"[Decoder] Running ITGDec on {recv_log}...")
+
+    # 1. 启动进程
+    with client.popen(
+      f"ITGDec {recv_log}", 
+      shell=True,
+      stdout=subprocess.PIPE, 
+      stderr=subprocess.PIPE,
+      text=True 
+    ) as dec_proc:
+
+      # 2. 等待进程结束并获取输出 (Block until finished)
+      # communicate 会读取 stdout 直到 EOF，确保拿到了所有输出
+      stdout, stderr = dec_proc.communicate(timeout=10) # 设置个超时防止卡死
+
+      if dec_proc.returncode != 0:
+        vprint(f"   [Decoder Error] ITGDec failed with code {dec_proc.returncode}: {stderr}")
+        dec_output = "" # 失败则为空
+      else:
+        dec_output = stdout
+        vprint("    [Decoder] success dec recieve file")
+        
+    qos_metrics = parse_ditg_output(dec_output)
+
+  except subprocess.TimeoutExpired:
+    vprint("    [Decoder Error] ITGDec Timed out!")
+    dec_proc.kill()
+    dec_output = ""
+
   # print(f"--- QoS: {qos_metrics} ---")
 
   # 立即删除内存文件 
@@ -214,20 +234,6 @@ def measure_path_qos(server, client, path_route, flow_type):
   reward = calculate_qoe_reward(qos_metrics, FLOW_PROFILES[flow_type])
   
   return reward
-
-def measure_latency_ping_from_output(result: str) -> float:
-  """
-  【辅助】从 ping 字符串中解析平均延迟。
-  """
-  try:
-    ping_regex = re.search(r"rtt min/avg/max/mdev = [\d\.]+/([\d\.]+)/", result)
-    if ping_regex:
-      avg_rtt = float(ping_regex.group(1))
-      return avg_rtt / 2.0 # 单向延迟
-  except Exception as e:
-    print(f"Error parsing ping output: {e}")
-  return 1000.0 # 惩罚值
-
 
 # Generator :
 # 生成一个mininet网络
@@ -295,7 +301,7 @@ def get_a_fingerprint(
     n_packets_to_capture=n_packets_to_capture)
   
   while final_tensor.size(0) < 30:
-    # print(f"{flow_type.name}----{final_tensor.size(0)}")
+    vprint(f"{flow_type.name}----{final_tensor.size(0)}")
     sleep(1)
     final_tensor = send_packet_and_capture(
       server=server,
@@ -511,6 +517,29 @@ def clean_flow_rules(net, cookie=0x1234):
     sw.cmd(f'ovs-ofctl -O OpenFlow13 del-flows {sw.name} "cookie={cookie}/-1"')
   sleep(0.5)
 
+def verify_cleanup(net, cookie=0x1234):
+  """
+  检查网络中是否还有残留的指定 cookie 的流表。
+  返回: True (清理干净了), False (还有残留)
+  """
+  has_residue = False
+  
+  for sw in net.switches:
+    # 获取该交换机的所有流表
+    # 注意: grep 是 shell 命令，通过 sw.cmd 调用
+    # result 包含查询结果字符串
+    result = sw.cmd(f'ovs-ofctl -O OpenFlow13 dump-flows {sw.name} | grep "cookie={hex(cookie)}"')
+    
+    # 如果 result 不为空，说明找到了残留
+    if result.strip():
+      vprint(f"[Warning] Residue flows found on {sw.name}:\n{result.strip()}")
+      has_residue = True
+        
+  if not has_residue:
+    vprint(f"[Check] Flow cleanup verified. No rules with cookie={hex(cookie)} found.")
+    return True
+  else:
+    return False
 # 下发流表规则
 def install_path_rules(net, path_nodes, cookie=0x1234):
   """
@@ -594,20 +623,20 @@ def install_path_rules(net, path_nodes, cookie=0x1234):
     # 反向规则: 匹配目的 IP 是 src_ip (即回包)
     cmd_rev = (
       f'ovs-ofctl -O OpenFlow13 add-flow {sw_name} '
-      f'"cookie={cookie},priority=100,dl_type=0x0800,nw_dst={src_ip},actions=output:{rev_port}"'
-    )
+      f'"cookie={cookie},priority=100,dl_type=0x0800,nw_dst={src_ip},actions=output:{rev_port}"')
     switch.cmd(cmd_rev)
 
     # --- [可选] 处理 ARP ---
     # 如果没有 Controller 处理 ARP，需要广播 ARP 请求
     # 动作: output:FLOOD (或者 normal 如果有默认学习规则)
     switch.cmd(f'ovs-ofctl -O OpenFlow13 add-flow {sw_name} "cookie={cookie},priority=100,dl_type=0x0806,actions=FLOOD"')
-    sleep(0.5)
+    sleep(1)
     # After install_path_rules()
-  loss = net.ping([h_src, h_dst], timeout=1)
+  loss = net.ping([h_src, h_dst], timeout=4)
   if loss > 50:
-    print(f"[Warning] High ping loss ({loss}%) - path might be broken")
-    return -100.0
+    vprint(f"[Warning] High ping loss ({loss}%) - path might be broken")
+  else:
+    vprint(f"[ms] install path success !")
 
 # 根据gnn输出的 logits来生成路径--贪婪/概率选择：
 # 替换 MS/Env/MininetController.py 中的 sample_path 函数

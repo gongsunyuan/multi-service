@@ -12,6 +12,7 @@ from torch_geometric.nn.glob import global_mean_pool
 
 # === 导入自定义模块 ===
 # 请确保项目结构正确，并且 __init__.py 文件存在
+from MS.Env.VebosePrint import vprint, MININET_VERBOSE, CURRENT_PBAR, LOG_TO_CONSOLE, LOG_FILE_PATH
 from MS.Agent.ActorCritic import ActorCritic
 from MS.Env.FlowGenerator import FlowGenerator
 from MS.Env.TensorLog import append_matrix_to_file
@@ -95,26 +96,31 @@ def run_a2c_training():
       
     # A. 生成新拓扑
     G_nx = topo_gen.generate_topology()
-    
+
+    MININET_VERBOSE = True   # 开启日志
+    LOG_TO_CONSOLE = False   # 开启控制台输出
+    LOG_FILE_PATH = None
+
     try:
       # B. 启动 Mininet (Context Manager)
       with get_a_mininet(G_nx) as net:
-        print(f"[Topo {topo_idx+1}] 启动 Mininet success (Nodes: {len(G_nx.nodes())})...")
+        vprint(f"[Topo {topo_idx+1}] 启动 Mininet success (Nodes: {len(G_nx.nodes())})...")
         monitor = NetworkMonitor(net)
         # 预取节点对象
         hosts = {i: net.get(f'h{i}') for i in G_nx.nodes()}
         
         # 内层循环：流训练 (Mininet 复用) 
         pbar = tqdm(range(CONFIG.EPISODES_PER_TOPO), desc=f"Topo {topo_idx+1}", leave=False, disable=True)
-        
+        CURRENT_PBAR = pbar
+
         for i_step, _ in enumerate(pbar):
-          # print("="*50)
-          # print(f"flow {i_step}, {_}")
+          vprint("="*50)
+          vprint(f"flow {i_step}, {_}")
           # 1. 环境准备
           clean_flow_rules(net) # 清理上一回合规则
           s_node, d_node = topo_gen.select_source_destination()
           h_src, h_dst = hosts[s_node], hosts[d_node]
-          # print(f"[ms] env ready !")
+          vprint(f"[ms] env ready !")
           # 2. 获取状态 (State)
 
           # 2.1 采集指纹 (耗时操作)
@@ -125,7 +131,7 @@ def run_a2c_training():
             install_path_rules(net, temp_path, cookie=TEMP_COOKIE)
             time.sleep(0.05) # 给 OVS 一点时间生效
           except nx.NetworkXNoPath:
-            print(f"[Error]: No path between {s_node} and {d_node}")
+            vprint(f"[Error]: No path between {s_node} and {d_node}")
             continue
           
           flow_type, flow_profile = flow_gen.get_random_flow()
@@ -192,11 +198,17 @@ def run_a2c_training():
             torch.save(agent.state_dict(), CONFIG.SAVE_PATH)
 
     except Exception as e:
+      CURRENT_PBAR = None
+      if pbar: pbar.close()
       print(f"\n[Error] Topo {topo_idx} 异常中断: {e}")
       import traceback
       traceback.print_exc()
       continue # 尝试下一个拓扑，而不是直接退出
 
+    finally:
+      # [关键] 循环结束后，注销 pbar，防止内存泄漏或逻辑混乱
+      CURRENT_PBAR = None
+      if pbar: pbar.close()
   print(f"训练结束。最终模型已保存至 {CONFIG.SAVE_PATH}")
 
 if __name__ == '__main__':

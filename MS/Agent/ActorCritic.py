@@ -7,6 +7,7 @@ from torch_geometric.nn.glob import global_mean_pool
 # 导入我们已经训练好的两个模型
 from MS.Lstm.LstmLayer import LstmLayer
 from MS.GNN.FiLMGnn import FiLMGnn
+from MS.Env.VebosePrint import vprint, MININET_VERBOSE, CURRENT_PBAR, LOG_TO_CONSOLE, LOG_FILE_PATH
 
 class ActorCritic(nn.Module):
   """
@@ -50,13 +51,13 @@ class ActorCritic(nn.Module):
     # ======================================================================
     
     if pretrained_lstm_path:
-      print(f"[ms] 正在加载 [LSTM Body] 权重来源: {pretrained_lstm_path}")
+      vprint(f"[ms] 正在加载 [LSTM Body] 权重来源: {pretrained_lstm_path}")
       # 加载 jstm 模型
       lstm_state = torch.load(pretrained_lstm_path, map_location='cpu')
       self.lstm_body.load_state_dict(lstm_state)
         
     if pretrained_gnn_path:
-      print(f"[ms] 正在加载 [GNN Body] 权重来源: {pretrained_gnn_path}")
+      vprint(f"[ms] 正在加载 [GNN Body] 权重来源: {pretrained_gnn_path}")
       gnn_state = torch.load(pretrained_gnn_path, map_location='cpu')
       
       # 移除多卡训练时 DataParallel 自动添加的 'module.' 前缀
@@ -100,7 +101,7 @@ class ActorCritic(nn.Module):
     #   nn.Linear(gnn_hidden_dim * 2 + gnn_edge_dim, gnn_hidden_dim),
     #   nn.ReLU(),
     #   nn.Linear(gnn_hidden_dim, 1))
-    # print("✅ GNN 预训练头已替换为随机初始化的 Actor 头。")
+    # vprint("✅ GNN 预训练头已替换为随机初始化的 Actor 头。")
 
     # [新头 3] 价值评估头 (Critic Head)
     # 评估 V(s)，输入是流摘要和图摘要的拼接
@@ -127,8 +128,8 @@ class ActorCritic(nn.Module):
         
     # 注意：self.gnn_model.edge_output_head (Actor头) 仍然是可训练的
     
-    print("🔒 [主体] LSTM Body 和 GNN Body 已冻结。")
-    print("🔓 [新头] FiLM 生成器、Actor 头、Critic 头 保持可训练。")
+    vprint("[agent] LSTM Body 和 GNN Body 已冻结。")
+    vprint("[agent] FiLM 生成器、Actor 头、Critic 头 保持可训练。")
 
 
   def forward(self, flow_fingerprint, graph_data):
