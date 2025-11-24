@@ -25,7 +25,7 @@ class ActorCritic(nn.Module):
     gnn_layers=6,       # gnn 层数
     
     # 预训练权重路径
-    pretrained_lstm_path="trained_model/trained_lstm.pth",                # 预训练的 lstm 模型
+    pretrained_lstm_path="trained_model/trained_lstm.pth",                  # 预训练的 lstm 模型
     pretrained_gnn_path ="trained_model/trained_gnn_recall_ospf.pth"):      # 预训练的 gnn 模型(Dijkstra)
             
       

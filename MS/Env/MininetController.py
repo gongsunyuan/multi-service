@@ -165,7 +165,7 @@ def measure_path_qos(server, client, path_route, flow_type):
   
   try:
     # 启动接听命令
-    server_proc = client.popen("ITGRecv")
+    server_proc = server.popen("ITGRecv")
     sleep(0.2)
     # 执行发送 (阻塞)
     client_proc = client.popen(cmd)
