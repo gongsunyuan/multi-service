@@ -22,12 +22,12 @@ class Config:
   # --- 拓扑生成参数 ---
   #
   M_BA = 2
-  MIN_BW = 100.0
-  MAX_BW = 1000.0
+  MIN_BW = 20.0
+  MAX_BW = 200.0
   MIN_DELAY = 1.0
-  MAX_DELAY = 10.0
-  MIN_NODES_NUM = 15
-  MAX_NODES_NUM = 30
+  MAX_DELAY = 100.0
+  MIN_NODES_NUM = 50
+  MAX_NODES_NUM = 100
 
   # --- 训练控制 ---
   MAX_EPISODES = 2000      # 总回合数
@@ -143,14 +143,15 @@ def run_a2c_training():
           # 归一化奖励 (简单除以常数，防止梯度过大)
           # reward_norm = reward / 10.0 
           reward_tensor = torch.tensor([reward], device=CONFIG.DEVICE)
+          reward_tanh = torch.tanh(raw_reward_tensor / 10.0)
           
           # 6. 反向传播 (Update)
           # Advantage
-          advantage = reward_tensor - value_est.detach()
+          advantage = reward_tanh - value_est.detach()
           
           # Losses
           actor_loss = -log_prob_sum * advantage
-          critic_loss = nn.MSELoss()(value_est, reward_tensor)
+          critic_loss = nn.MSELoss()(value_est, reward_tanh)
           
           total_loss = actor_loss + CONFIG.CRITIC_LOSS_COEF * critic_loss
           
@@ -176,7 +177,7 @@ def run_a2c_training():
   print(f"训练结束。最终模型已保存至 {CONFIG.SAVE_PATH}")
 
 if __name__ == '__main__':
-    if os.getuid() != 0:
+  if os.getuid() != 0:
     print("错误: Mininet 必须以 root 权限运行 (sudo python3 ...)")
   else:
     os.makedirs(CONFIG.MODEL_DIR, exist_ok=True)

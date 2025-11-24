@@ -5,8 +5,8 @@ from torch.distributions import Categorical
 from torch_geometric.nn.glob import global_mean_pool
 
 # 导入我们已经训练好的两个模型
-from ..LSTM.PreferenceModule import PreferenceModule
-from ..GNN.Pretrain.DijkstraGnn import GNNPretrainModel
+from MS.Lstm.LstmLayer import LstmLayer
+from MS.GNN.FiLMGnn import FiLMGnn
 
 class ActorCritic(nn.Module):
   """
@@ -25,14 +25,14 @@ class ActorCritic(nn.Module):
     gnn_layers=6,       # gnn 层数
     
     # 预训练权重路径
-    pretrained_lstm_path="MS/LSTM/pretrained-model.pth",         # 预训练的 lstm 模型
-    pretrained_gnn_path="MS/GNN/gnn_pretrained_model.pth"        # 预训练的 gnn 模型(Dijkstra)
-    ):        
+    pretrained_lstm_path="trained_model/trained_lstm.pth",                # 预训练的 lstm 模型
+    pretrained_gnn_path ="trained_model/trained_gnn_recall_ospf.pth"):      # 预训练的 gnn 模型(Dijkstra)
+            
       
     super().__init__()
     
     self.gnn_hidden_dim = gnn_hidden_dim
-    self.gnn_layers = gnn_layers
+    self.gnn_layers     = gnn_layers
 
     # ======================================================================
     # 1. 实例化两个“主体”
@@ -43,60 +43,71 @@ class ActorCritic(nn.Module):
     
     # 路径选择模块 (GNN Model) - 我们先加载整个模型，包括预训练的头
     self.gnn_model = FiLMGnnModel(
-      gnn_node_dim, gnn_hidden_dim, gnn_edge_dim, gnn_layers
-    )
+      gnn_node_dim, gnn_hidden_dim, gnn_edge_dim, gnn_layers)
 
     # ======================================================================
     # 2. 加载预训练权重 (关键步骤)
     # ======================================================================
     
     if pretrained_lstm_path:
-      print(f"🔄 正在加载 [LSTM Body] 权重来源: {pretrained_lstm_path}")
+      print(f"[ms] 正在加载 [LSTM Body] 权重来源: {pretrained_lstm_path}")
       # 加载 jstm 模型
       lstm_state = torch.load(pretrained_lstm_path, map_location='cpu')
       self.lstm_body.load_state_dict(lstm_state)
         
     if pretrained_gnn_path:
-      print(f"🔄 正在加载 [GNN Body] 权重来源: {pretrained_gnn_path}")
+      print(f"[ms] 正在加载 [GNN Body] 权重来源: {pretrained_gnn_path}")
       gnn_state = torch.load(pretrained_gnn_path, map_location='cpu')
       
-      # [关键] 移除多卡训练时 DataParallel 自动添加的 'module.' 前缀
+      # 移除多卡训练时 DataParallel 自动添加的 'module.' 前缀
       gnn_state_cleaned = {k.replace('module.', ''): v for k, v in gnn_state.items()}
       
       # 加载权重，strict=False 允许我们稍后覆盖 GNN 头
       self.gnn_model.load_state_dict(gnn_state_cleaned, strict=False)
 
-    # ======================================================================
-    # 3. 定义新的“头” (随机初始化)
-    # ======================================================================
-    
-    # [新头 1] FiLM 生成器 (缝合模块 / RNN 头)
+    # FiLM 生成器 (缝合模块 / RNN 头)
     # 目标: (B, D_lstm) -> (B, L*D_gnn*2)
+    # 
     self.total_film_params = gnn_layers * gnn_hidden_dim * 2
     self.film_generator = nn.Sequential(
       nn.Linear(lstm_hidden_dim, gnn_hidden_dim),
       nn.ReLU(),
-      nn.Linear(gnn_hidden_dim, self.total_film_params)
-      # 最后一层没有激活函数，允许 gamma/beta 取任意值
-    )
+      nn.Linear(gnn_hidden_dim, self.total_film_params))
 
-    # [新头 2] 路径输出头 (GNN 头 / Actor Head)
+    # 获取生成器的最后一层
+    last_film_layer = self.film_generator[-1]
+    # 1. 将权重设为 0
+    # 这样无论 LSTM 输入什么，初始输出都只取决于偏置(bias)
+    nn.init.zeros_(last_film_layer.weight)
+
+    # 2. 设置偏置以产生 Gamma=1, Beta=0
+    # 创建一个与 bias 形状相同的全 0 张量
+    neutral_bias = torch.zeros_like(last_film_layer.bias)
+    
+    # 重塑为 (Layers, 2, Dim) 以便索引
+    neutral_bias_view = neutral_bias.view(self.gnn_layers, 2, self.gnn_hidden_dim)
+    
+    # 将 Gamma (索引 0) 设为 1
+    neutral_bias_view[:, 0, :] = 1.0
+    neutral_bias_view[:, 1, :] = 0.0
+    
+    # 将构造好的 bias 赋值回去
+    last_film_layer.bias.data.copy_(neutral_bias)
+    # 路径输出头 (GNN 头 / Actor Head)
     # 按照项目要求，重新随机初始化 GNN 头
     # 它将取代 gnn_model 中预训练好的那个头
     self.gnn_model.edge_output_head = nn.Sequential(
       nn.Linear(gnn_hidden_dim * 2 + gnn_edge_dim, gnn_hidden_dim),
       nn.ReLU(),
-      nn.Linear(gnn_hidden_dim, 1)
-    )
-    print("✅ GNN 预训练头已替换为随机初始化的 Actor 头。")
+      nn.Linear(gnn_hidden_dim, 1))
+    # print("✅ GNN 预训练头已替换为随机初始化的 Actor 头。")
 
     # [新头 3] 价值评估头 (Critic Head)
     # 评估 V(s)，输入是流摘要和图摘要的拼接
     self.critic_head = nn.Sequential(
       nn.Linear(lstm_hidden_dim + gnn_hidden_dim, gnn_hidden_dim),
       nn.ReLU(),
-      nn.Linear(gnn_hidden_dim, 1) # 输出一个标量价值
-    )
+      nn.Linear(gnn_hidden_dim, 1) )# 输出一个标量价值
 
     # ======================================================================
     # 4. 冻结主体 (关键步骤)

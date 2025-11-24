@@ -180,7 +180,7 @@ def measure_path_qos(server, client, path_route, flow_type):
       server_proc.kill()
   
   # 检查文件是否存在 (防止传输完全失败导致无日志)
-  check_log = S_host.cmd(f"ls {recv_log}")
+  check_log = server.cmd(f"ls {recv_log}")
   if "No such file" in check_log:
     print("[ERROR] No log generated. Link might be down.")
     return -100.0 # 惩罚
@@ -302,8 +302,7 @@ def send_packet_and_capture(
   flow_type: FlowType, 
   duration_sec=15, 
   n_packets_to_capture=30, 
-  **flow_params
-  ):
+  **flow_params):
   # 发送流并抓包
   """
   在 Mininet 中运行 D-ITG 流量, 并同时使用 tshark 管道实时捕获特征。
