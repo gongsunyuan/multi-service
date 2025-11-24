@@ -156,7 +156,6 @@ def run_a2c_training():
           critic_loss = nn.MSELoss()(value_est, reward_tanh)
           
           total_loss = actor_loss + CONFIG.CRITIC_LOSS_COEF * critic_loss
-
           (total_loss / CONFIG.BATCH_SIZE).backward()     # grad accumulate
 
           if (i_step + 1) % CONFIG.BATCH_SIZE == 0:
