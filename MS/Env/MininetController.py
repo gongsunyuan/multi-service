@@ -17,7 +17,8 @@ from functools import partial
 from mininet.log import setLogLevel, info
 from scapy.all import rdpcap
 from scapy.layers.inet import IP
-from MS.Env.VebosePrint import vprint
+from MS.Env import VerbosePrint as vp
+from MS.Env.VerbosePrint import vprint
 from .FlowGenerator import FlowType, FLOW_PROFILES
 from mininet.node import OVSKernelSwitch, RemoteController
 from mininet.link import TCLink
@@ -47,7 +48,7 @@ def parse_ditg_output(output_str: str) -> dict:
       if 'nan' not in val.lower(): # 过滤掉 -nan
         metrics['delay'] = float(val) * 1000.0 # 秒 -> 毫秒
     else:
-      vprint("[Error] no delay found")
+      vprint("[Error Parse] no delay found")
       # --- 2. 提取平均抖动 (Average jitter) ---
       # 示例行: Average jitter           =     0.000012 s
     jitter_match = re.search(r"Average jitter\s+=\s+([-\d\.nan]+)\s+s", output_str)
@@ -56,7 +57,7 @@ def parse_ditg_output(output_str: str) -> dict:
       if 'nan' not in val.lower():
         metrics['jitter'] = float(val) * 1000.0 # 秒 -> 毫秒
     else:
-      vprint("[Error] no jitter found")
+      vprint("[Error Parse] no jitter found")
 
     # --- 3. 提取吞吐量 (Average bitrate) ---
     # 示例行: Average bitrate          =  4096.000000 Kbit/s
@@ -66,7 +67,7 @@ def parse_ditg_output(output_str: str) -> dict:
       if 'nan' not in val.lower():
         metrics['bandwidth'] = float(val) / 1000.0 # Kbit/s -> Mbps
     else:
-      vprint("[Error] no bitrate found")
+      vprint("[Error Parse] no bitrate found")
 
       # --- 4. 提取丢包率 (Packets dropped) ---
       # 示例行: Packets dropped          =            5 (0.50 %)
@@ -77,19 +78,19 @@ def parse_ditg_output(output_str: str) -> dict:
         if 'nan' not in val.lower():
           metrics['loss_rate'] = float(val) / 100.0 # 0.50% -> 0.005
       else: 
-        vprint("[Error] no loss found")
+        vprint("[Error Parse] no loss found")
       
       # 如果总包数 (Total packets) 为 0，说明完全没通，强制设置最差指标
       total_pkts_match = re.search(r"Total packets\s+=\s+(\d+)", output_str)
       if total_pkts_match and int(total_pkts_match.group(1)) == 0:
-        vprint("[Error] no packets arrive !!")
+        vprint("[Error Parse] no packets arrive !!")
         metrics['loss_rate'] = 1.0
         metrics['bandwidth'] = 0.0
       else:
         vprint(f"[get QoS] successfully get Qoe: {metrics}")
 
   except Exception as e:
-    vprint(f"[Parser] 解析 D-ITG 输出时出错: {e}")
+    vprint(f"[Error Parse] 解析 D-ITG 输出时出错: {e}")
     if MININET_VERBOSE: vprint(f"原始输出片段:\n{output_str[:200]}") # 调试用
 
   return metrics
@@ -164,9 +165,9 @@ def measure_path_qos(server, client, path_route, flow_type):
       client_proc.wait(timeout=10) 
     except Exception:
       # 如果超时还没停，说明可能卡死了，再强制杀
-      vprint("[Error] client send flow timeout")
+      vprint("[Error Send] client send flow timeout")
   except Exception as e:
-    vprint(f"[Error] 实验执行出错: {e}")
+    vprint(f"[Error Send] 实验执行出错: {e}")
   finally:
     if client_proc:
       try:
@@ -185,14 +186,14 @@ def measure_path_qos(server, client, path_route, flow_type):
   # 检查文件是否存在 (防止传输完全失败导致无日志)
   check_log = server.cmd(f"ls {recv_log}")
   if "No such file" in check_log:
-    vprint("[ERROR] No log generated. Link might be down.")
+    vprint("[ERROR Send] No log generated. Link might be down.")
     return -100.0 # 惩罚
       
   # 运行解码器拿到文本结果 
 
 
   # 解析结果 
-  
+  # Meta-DRL
   
   try:
     vprint(f"[Decoder] Running ITGDec on {recv_log}...")
@@ -211,24 +212,28 @@ def measure_path_qos(server, client, path_route, flow_type):
       stdout, stderr = dec_proc.communicate(timeout=10) # 设置个超时防止卡死
 
       if dec_proc.returncode != 0:
-        vprint(f"   [Decoder Error] ITGDec failed with code {dec_proc.returncode}: {stderr}")
+        vprint(f"[Decoder Error] ITGDec failed with code {dec_proc.returncode}: {stderr}")
         dec_output = "" # 失败则为空
       else:
         dec_output = stdout
-        vprint("    [Decoder] success dec recieve file")
+        vprint("[Decoder] success dec recieve file")
         
     qos_metrics = parse_ditg_output(dec_output)
 
   except subprocess.TimeoutExpired:
-    vprint("    [Decoder Error] ITGDec Timed out!")
+    vprint("[Decoder Error] ITGDec Timed out!")
     dec_proc.kill()
     dec_output = ""
-
-  # print(f"--- QoS: {qos_metrics} ---")
-
-  # 立即删除内存文件 
-  # 虽然是在内存里，但也要清理以防占满 RAM
-  client.cmd(f"rm -f {recv_log}")
+  finally:
+    # 更加激进的清理，防止 D-ITG 僵尸进程残留
+    # 使用 kill -9 确保杀死
+    try:
+      client.cmd("killall -9 ITGSend") 
+      server.cmd("killall -9 ITGRecv")
+    except:
+      pass
+    # 移除临时日志文件
+    client.cmd(f"rm -f {recv_log}")
 
   # 计算 Reward
   reward = calculate_qoe_reward(qos_metrics, FLOW_PROFILES[flow_type])
@@ -263,22 +268,26 @@ def get_a_mininet(g: nx.Graph, is_test=False, remote_port=None):
   if remote_port:
     controller = partial(RemoteController, ip='127.0.0.1', port=remote_port)
   else:
-    print("[ms] 没有输入远程控制器，请自己配置流表规则！")
+    vprint("[ms] 没有输入远程控制器，请自己配置流表规则！")
     controller = None
 
-  setLogLevel('error')
+  if not vp.MININET_VERBOSE:
+    setLogLevel('error')
 
   net = Mininet(
     topo=GraphTopo(g, is_test),
     switch=OVSKernelSwitch,
     link=TCLink,
-    controller=controller
+    controller=controller,
+    autoSetMacs=True, 
+    autoStaticArp=True
   )
 
   try:
     net.start()
     yield net
   finally:
+    vprint("[mininet] stopping mininet ...")
     net.stop()
 
   return net
@@ -512,12 +521,28 @@ def normalize_fingerprint(tensor: torch.Tensor) -> torch.Tensor:
 # 管理流表规则
 
 # 清除流表规则
-def clean_flow_rules(net, cookie=0x1234):
-  for sw in net.switches:
-    sw.cmd(f'ovs-ofctl -O OpenFlow13 del-flows {sw.name} "cookie={cookie}/-1"')
-  sleep(0.5)
+def clean_flow_rules(net, cookie=0xA000, mask=0xF000):
+  """
+  清理流表。
+  :param cookie: 要匹配的 Cookie 值 (前缀)
+  :param mask: 掩码。0xF000 表示只匹配前 4 位 (即 0xA...)，忽略后面具体的步数。
+  """
+  
+  # 构造匹配字符串: cookie=0xA000/0xF000
+  # 这告诉 OVS: "只要 Cookie 以 A 开头 (高4位是A)，不管后面几位是什么，统统删掉！"
+  match_str = f"cookie={hex(cookie)}/{hex(mask)}"
+  
+  vprint(f"[Cleaner] Cleaning flows matching {match_str}...")
 
-def verify_cleanup(net, cookie=0x1234):
+  for sw in net.switches:
+    # 注意：这里去掉了 /-1，改用我们计算出的掩码
+    cmd = f'ovs-ofctl -O OpenFlow13 del-flows {sw.name} "{match_str}"'
+    sw.cmd(cmd)
+      
+  sleep(0.5) # 给 OVS 一点反应时间
+  verify_cleanup(net, cookie)
+
+def verify_cleanup(net, cookie=0xA000):
   """
   检查网络中是否还有残留的指定 cookie 的流表。
   返回: True (清理干净了), False (还有残留)
@@ -532,7 +557,7 @@ def verify_cleanup(net, cookie=0x1234):
     
     # 如果 result 不为空，说明找到了残留
     if result.strip():
-      vprint(f"[Warning] Residue flows found on {sw.name}:\n{result.strip()}")
+      vprint(f"[Error Clean] Residue flows found on {sw.name}:\n{result.strip()}")
       has_residue = True
         
   if not has_residue:
@@ -540,6 +565,7 @@ def verify_cleanup(net, cookie=0x1234):
     return True
   else:
     return False
+
 # 下发流表规则
 def install_path_rules(net, path_nodes, cookie=0x1234):
   """
@@ -596,8 +622,8 @@ def install_path_rules(net, path_nodes, cookie=0x1234):
     # 优先级: 100 (高于默认规则)
     cmd = (
       f'ovs-ofctl -O OpenFlow13 add-flow {sw_name} '
-      f'"cookie={cookie},priority=100,dl_type=0x0800,nw_dst={dst_ip},actions=output:{out_port}"'
-    )
+      f'"cookie={cookie},priority=100,dl_type=0x0800,nw_dst={dst_ip},actions=output:{out_port}"')
+
     switch.cmd(cmd)
     
     # --- [重要] 下发反向规则 (Reverse Path) ---
@@ -626,12 +652,6 @@ def install_path_rules(net, path_nodes, cookie=0x1234):
       f'"cookie={cookie},priority=100,dl_type=0x0800,nw_dst={src_ip},actions=output:{rev_port}"')
     switch.cmd(cmd_rev)
 
-    # --- [可选] 处理 ARP ---
-    # 如果没有 Controller 处理 ARP，需要广播 ARP 请求
-    # 动作: output:FLOOD (或者 normal 如果有默认学习规则)
-    switch.cmd(f'ovs-ofctl -O OpenFlow13 add-flow {sw_name} "cookie={cookie},priority=100,dl_type=0x0806,actions=FLOOD"')
-    sleep(1)
-    # After install_path_rules()
   loss = net.ping([h_src, h_dst], timeout=4)
   if loss > 50:
     vprint(f"[Warning] High ping loss ({loss}%) - path might be broken")

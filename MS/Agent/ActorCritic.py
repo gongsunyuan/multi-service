@@ -7,7 +7,7 @@ from torch_geometric.nn.glob import global_mean_pool
 # 导入我们已经训练好的两个模型
 from MS.Lstm.LstmLayer import LstmLayer
 from MS.GNN.FiLMGnn import FiLMGnn
-from MS.Env.VebosePrint import vprint, MININET_VERBOSE, CURRENT_PBAR, LOG_TO_CONSOLE, LOG_FILE_PATH
+from MS.Env.VerbosePrint import vprint, MININET_VERBOSE, CURRENT_PBAR, LOG_TO_CONSOLE, LOG_FILE_PATH
 
 class ActorCritic(nn.Module):
   """

@@ -1,19 +1,22 @@
 import networkx as nx
 import random
 import torch
+import os
 from torch_geometric.data import Data
+from MS.Env.VerbosePrint import vprint
 
 class Default_config:
   # 默认拓扑生成参数
   M_BA = 2
   MIN_BW = 20.0
   MAX_BW = 200.0
-  MIN_LOSS = 0.0 
+  MIN_LOSS = 0.0
   MAX_LOSS = 3.0
-  MIN_DELAY = 1.0 
+  MIN_DELAY = 1.0
   MAX_DELAY = 200.0
   MIN_NODES_NUM = 50
   MAX_NODES_NUM = 100
+
 
 DEFAULT_CONFIG = Default_config()
 
@@ -33,6 +36,40 @@ class TopologyGenerator:
     self.min_delay = config.MIN_DELAY # ms
     self.max_delay = config.MAX_DELAY # ms
     self.G = None
+  
+  def load_topology(self, filepath: str) -> nx.Graph:
+    """
+    从文件加载拓扑图，支持 .pkl (Pickle) 和 .graphml 格式。
+    """
+    if not os.path.exists(filepath):
+      raise FileNotFoundError(f"[Error] 拓扑文件未找到: {filepath}")
+
+    # 1. 检查文件类型并加载
+    if filepath.lower().endswith(('.pkl', '.gpickle')):
+      # 使用 Pickle 加载，用于加载训练状态（包含复杂属性）
+      with open(filepath, 'rb') as f:
+        G = pickle.load(f)
+      
+      vprint(f"[Load Graph] 成功加载 Pickle 文件: {filepath}")
+
+    elif filepath.lower().endswith('.graphml'):
+      # 使用 GraphML 加载，用于加载标准拓扑结构
+      # node_type=int 尝试将节点 ID 转换为整数，提高兼容性
+      G = nx.read_graphml(filepath, node_type=int)
+      
+      # 【关键】确保节点ID是整数。如果 GraphML 文件中的 ID 是字符串，需要转换。
+      if not all(isinstance(n, int) for n in G.nodes()):
+        # 将所有节点标签转换为从 0 开始的整数
+        G = nx.convert_node_labels_to_integers(G)
+      
+      vprint(f"[Load Graph] 成功加载 GraphML 文件: {filepath}")
+
+    else:
+      raise ValueError(f"[Error] 不支持的文件格式: {filepath}。请使用 .pkl 或 .graphml")
+
+    self.G = G
+    vprint(f"   - 节点数: {len(G.nodes())}, 边数: {len(G.edges())}")
+    return G
 
   def generate_topology(self) -> nx.Graph:
     """生成一个随机的BA拓扑，并赋予链路属性。"""

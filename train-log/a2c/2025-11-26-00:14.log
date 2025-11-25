@@ -1,0 +1,215 @@
+[00:14:42.957] [ms] 没有输入远程控制器，请自己配置流表规则！
+[00:14:46.330] [Topo 1] 启动 Mininet success (Nodes: 13)...
+[00:14:46.333] ==================================================
+[00:14:46.333] [Cleaner] Cleaning flows matching cookie=0xa000/0xf000...
+[00:14:47.076] [Check] Flow cleanup verified. No rules with cookie=0xa000 found.
+[00:14:47.077] [Step] env ready !
+[00:14:47.676] [ms] install path success !
+[00:14:49.822] [Cleaner] Cleaning flows matching cookie=0x8888/0xf000...
+[00:14:50.556] [Check] Flow cleanup verified. No rules with cookie=0x8888 found.
+[00:14:55.909] [ms] install path success !
+[00:15:05.910] [Error Send] client send flow timeout
+[00:15:05.922] [Decoder] Running ITGDec on /dev/shm/itg_h5_h11_57c0938b.recv...
+[00:15:05.929] [Decoder] success dec recieve file
+[00:15:06.026] REWARD PENALTY: Delay cliff! 259.924 > 50
+[00:15:06.233] ==================================================
+[00:15:06.233] [Cleaner] Cleaning flows matching cookie=0xa000/0xf000...
+[00:15:06.987] [Check] Flow cleanup verified. No rules with cookie=0xa000 found.
+[00:15:06.987] [Step] env ready !
+[00:15:07.279] [ms] install path success !
+[00:15:09.379] [Cleaner] Cleaning flows matching cookie=0x8888/0xf000...
+[00:15:10.099] [Check] Flow cleanup verified. No rules with cookie=0x8888 found.
+[00:15:10.528] [ms] install path success !
+[00:15:17.414] [Decoder] Running ITGDec on /dev/shm/itg_h9_h0_1af7b8e7.recv...
+[00:15:17.419] [Decoder] success dec recieve file
+[00:15:17.474] REWARD PENALTY: Bandwidth cliff! 2.68796607 < 5
+[00:15:17.530] ==================================================
+[00:15:17.530] [Cleaner] Cleaning flows matching cookie=0xa000/0xf000...
+[00:15:18.247] [Check] Flow cleanup verified. No rules with cookie=0xa000 found.
+[00:15:18.247] [Step] env ready !
+[00:15:18.589] [ms] install path success !
+[00:15:19.925] [Cleaner] Cleaning flows matching cookie=0x8888/0xf000...
+[00:15:20.655] [Check] Flow cleanup verified. No rules with cookie=0x8888 found.
+[00:15:25.056] [ms] install path success !
+[00:15:25.064] [ERROR Send] No log generated. Link might be down.
+[00:15:25.113] ==================================================
+[00:15:25.113] [Cleaner] Cleaning flows matching cookie=0xa000/0xf000...
+[00:15:25.834] [Check] Flow cleanup verified. No rules with cookie=0xa000 found.
+[00:15:25.834] [Step] env ready !
+[00:15:26.395] [ms] install path success !
+[00:15:28.982] [Cleaner] Cleaning flows matching cookie=0x8888/0xf000...
+[00:15:29.678] [Check] Flow cleanup verified. No rules with cookie=0x8888 found.
+[00:15:29.857] ==================================================
+[00:15:29.857] [Cleaner] Cleaning flows matching cookie=0xa000/0xf000...
+[00:15:30.567] [Check] Flow cleanup verified. No rules with cookie=0xa000 found.
+[00:15:30.567] [Step] env ready !
+[00:15:30.887] [ms] install path success !
+[00:15:32.969] [Cleaner] Cleaning flows matching cookie=0x8888/0xf000...
+[00:15:33.706] [Check] Flow cleanup verified. No rules with cookie=0x8888 found.
+[00:15:34.223] [ms] install path success !
+[00:15:39.054] [Decoder] Running ITGDec on /dev/shm/itg_h9_h5_de27b2dc.recv...
+[00:15:39.058] [Decoder] success dec recieve file
+[00:15:39.110] REWARD PENALTY: Delay cliff! 62.8 > 50
+[00:15:39.153] ==================================================
+[00:15:39.153] [Cleaner] Cleaning flows matching cookie=0xa000/0xf000...
+[00:15:39.876] [Check] Flow cleanup verified. No rules with cookie=0xa000 found.
+[00:15:39.876] [Step] env ready !
+[00:15:40.182] [ms] install path success !
+[00:15:42.148] [Cleaner] Cleaning flows matching cookie=0x8888/0xf000...
+[00:15:42.896] [Check] Flow cleanup verified. No rules with cookie=0x8888 found.
+[00:15:43.341] [ms] install path success !
+[00:15:48.625] [Decoder] Running ITGDec on /dev/shm/itg_h10_h6_605b23dc.recv...
+[00:15:48.630] [Decoder] success dec recieve file
+[00:15:48.684] REWARD PENALTY: Bandwidth cliff! 1.2418306780000001 < 5
+[00:15:48.725] ==================================================
+[00:15:48.725] [Cleaner] Cleaning flows matching cookie=0xa000/0xf000...
+[00:15:49.458] [Check] Flow cleanup verified. No rules with cookie=0xa000 found.
+[00:15:49.458] [Step] env ready !
+[00:15:49.776] [ms] install path success !
+[00:15:51.618] [Cleaner] Cleaning flows matching cookie=0x8888/0xf000...
+[00:15:52.577] [Check] Flow cleanup verified. No rules with cookie=0x8888 found.
+[00:15:53.800] [ms] install path success !
+[00:15:59.660] [Decoder] Running ITGDec on /dev/shm/itg_h2_h5_4c8d5f0b.recv...
+[00:15:59.665] [Decoder] success dec recieve file
+[00:15:59.748] ==================================================
+[00:15:59.748] [Cleaner] Cleaning flows matching cookie=0xa000/0xf000...
+[00:16:00.490] [Check] Flow cleanup verified. No rules with cookie=0xa000 found.
+[00:16:00.490] [Step] env ready !
+[00:16:00.610] [ms] install path success !
+[00:16:02.174] [Cleaner] Cleaning flows matching cookie=0x8888/0xf000...
+[00:16:02.899] [Check] Flow cleanup verified. No rules with cookie=0x8888 found.
+[00:16:03.169] [ms] install path success !
+[00:16:07.397] [Decoder] Running ITGDec on /dev/shm/itg_h4_h3_b88e6fd4.recv...
+[00:16:07.401] [Decoder] success dec recieve file
+[00:16:07.508] ==================================================
+[00:16:07.509] [Cleaner] Cleaning flows matching cookie=0xa000/0xf000...
+[00:16:08.218] [Check] Flow cleanup verified. No rules with cookie=0xa000 found.
+[00:16:08.218] [Step] env ready !
+[00:16:08.469] [ms] install path success !
+[00:16:09.567] [Cleaner] Cleaning flows matching cookie=0x8888/0xf000...
+[00:16:10.298] [Check] Flow cleanup verified. No rules with cookie=0x8888 found.
+[00:16:10.685] [ms] install path success !
+[00:16:10.694] [ERROR Send] No log generated. Link might be down.
+[00:16:10.735] ==================================================
+[00:16:10.736] [Cleaner] Cleaning flows matching cookie=0xa000/0xf000...
+[00:16:11.449] [Check] Flow cleanup verified. No rules with cookie=0xa000 found.
+[00:16:11.449] [Step] env ready !
+[00:16:11.697] [ms] install path success !
+[00:16:15.590] [Cleaner] Cleaning flows matching cookie=0x8888/0xf000...
+[00:16:16.310] [Check] Flow cleanup verified. No rules with cookie=0x8888 found.
+[00:16:16.715] [ms] install path success !
+[00:16:21.443] [Decoder] Running ITGDec on /dev/shm/itg_h3_h12_ce07c039.recv...
+[00:16:21.451] [Decoder] success dec recieve file
+[00:16:21.503] REWARD PENALTY: Bandwidth cliff! 3.702834652 < 5
+[00:16:21.539] ==================================================
+[00:16:21.539] [Cleaner] Cleaning flows matching cookie=0xa000/0xf000...
+[00:16:22.256] [Check] Flow cleanup verified. No rules with cookie=0xa000 found.
+[00:16:22.256] [Step] env ready !
+[00:16:22.591] [ms] install path success !
+[00:16:23.942] [Cleaner] Cleaning flows matching cookie=0x8888/0xf000...
+[00:16:24.671] [Check] Flow cleanup verified. No rules with cookie=0x8888 found.
+[00:16:29.023] [ms] install path success !
+[00:16:29.033] [ERROR Send] No log generated. Link might be down.
+[00:16:29.082] ==================================================
+[00:16:29.082] [Cleaner] Cleaning flows matching cookie=0xa000/0xf000...
+[00:16:29.809] [Check] Flow cleanup verified. No rules with cookie=0xa000 found.
+[00:16:29.810] [Step] env ready !
+[00:16:34.007] [ms] install path success !
+[00:16:36.096] [Cleaner] Cleaning flows matching cookie=0x8888/0xf000...
+[00:16:36.823] [Check] Flow cleanup verified. No rules with cookie=0x8888 found.
+[00:16:37.292] [ms] install path success !
+[00:16:43.042] [Decoder] Running ITGDec on /dev/shm/itg_h10_h6_4e500538.recv...
+[00:16:43.056] [Decoder] success dec recieve file
+[00:16:43.182] REWARD PENALTY: Bandwidth cliff! 2.3344582380000003 < 5
+[00:16:43.333] ==================================================
+[00:16:43.333] [Cleaner] Cleaning flows matching cookie=0xa000/0xf000...
+[00:16:44.367] [Check] Flow cleanup verified. No rules with cookie=0xa000 found.
+[00:16:44.368] [Step] env ready !
+[00:16:44.635] [ms] install path success !
+[00:16:47.742] [Cleaner] Cleaning flows matching cookie=0x8888/0xf000...
+[00:16:48.479] [Check] Flow cleanup verified. No rules with cookie=0x8888 found.
+[00:16:48.883] [ms] install path success !
+[00:16:54.913] [Decoder] Running ITGDec on /dev/shm/itg_h4_h9_605dfa80.recv...
+[00:16:54.921] [Decoder] success dec recieve file
+[00:16:54.972] REWARD PENALTY: Bandwidth cliff! 1.188077707 < 5
+[00:16:54.998] ==================================================
+[00:16:54.998] [Cleaner] Cleaning flows matching cookie=0xa000/0xf000...
+[00:16:55.723] [Check] Flow cleanup verified. No rules with cookie=0xa000 found.
+[00:16:55.724] [Step] env ready !
+[00:16:56.078] [ms] install path success !
+[00:16:57.662] [Cleaner] Cleaning flows matching cookie=0x8888/0xf000...
+[00:16:58.382] [Check] Flow cleanup verified. No rules with cookie=0x8888 found.
+[00:16:59.260] [ms] install path success !
+[00:16:59.269] [ERROR Send] No log generated. Link might be down.
+[00:16:59.329] ==================================================
+[00:16:59.329] [Cleaner] Cleaning flows matching cookie=0xa000/0xf000...
+[00:17:00.066] [Check] Flow cleanup verified. No rules with cookie=0xa000 found.
+[00:17:00.067] [Step] env ready !
+[00:17:00.684] [ms] install path success !
+[00:17:04.319] [Cleaner] Cleaning flows matching cookie=0x8888/0xf000...
+[00:17:05.047] [Check] Flow cleanup verified. No rules with cookie=0x8888 found.
+[00:17:13.344] [Warning] High ping loss (100.0%) - path might be broken
+[00:17:21.729] [Decoder] Running ITGDec on /dev/shm/itg_h1_h11_b903c27d.recv...
+[00:17:21.733] [Decoder] success dec recieve file
+[00:17:21.787] REWARD PENALTY: Bandwidth cliff! 1.393005897 < 5
+[00:17:21.833] ==================================================
+[00:17:21.833] [Cleaner] Cleaning flows matching cookie=0xa000/0xf000...
+[00:17:22.546] [Check] Flow cleanup verified. No rules with cookie=0xa000 found.
+[00:17:22.547] [Step] env ready !
+[00:17:22.820] [ms] install path success !
+[00:17:24.631] [Cleaner] Cleaning flows matching cookie=0x8888/0xf000...
+[00:17:25.361] [Check] Flow cleanup verified. No rules with cookie=0x8888 found.
+[00:17:25.720] [ms] install path success !
+[00:17:30.202] [Decoder] Running ITGDec on /dev/shm/itg_h4_h6_f3fa5a70.recv...
+[00:17:30.210] [Decoder] success dec recieve file
+[00:17:30.387] ==================================================
+[00:17:30.387] [Cleaner] Cleaning flows matching cookie=0xa000/0xf000...
+[00:17:31.117] [Check] Flow cleanup verified. No rules with cookie=0xa000 found.
+[00:17:31.117] [Step] env ready !
+[00:17:35.524] [ms] install path success !
+[00:17:37.391] [Cleaner] Cleaning flows matching cookie=0x8888/0xf000...
+[00:17:38.120] [Check] Flow cleanup verified. No rules with cookie=0x8888 found.
+[00:17:38.621] [ms] install path success !
+[00:17:43.399] [Decoder] Running ITGDec on /dev/shm/itg_h12_h10_63b2e0cb.recv...
+[00:17:43.403] [Decoder] success dec recieve file
+[00:17:43.464] REWARD PENALTY: Delay cliff! 60.061 > 50
+[00:17:43.532] ==================================================
+[00:17:43.532] [Cleaner] Cleaning flows matching cookie=0xa000/0xf000...
+[00:17:44.216] [Check] Flow cleanup verified. No rules with cookie=0xa000 found.
+[00:17:44.216] [Step] env ready !
+[00:17:48.425] [ms] install path success !
+[00:17:50.337] [Cleaner] Cleaning flows matching cookie=0x8888/0xf000...
+[00:17:51.066] [Check] Flow cleanup verified. No rules with cookie=0x8888 found.
+[00:17:51.536] [ms] install path success !
+[00:17:56.314] [Decoder] Running ITGDec on /dev/shm/itg_h4_h10_ec730974.recv...
+[00:17:56.318] [Decoder] success dec recieve file
+[00:17:56.374] REWARD PENALTY: Delay cliff! 58.927 > 50
+[00:17:56.413] ==================================================
+[00:17:56.413] [Cleaner] Cleaning flows matching cookie=0xa000/0xf000...
+[00:17:57.139] [Check] Flow cleanup verified. No rules with cookie=0xa000 found.
+[00:17:57.140] [Step] env ready !
+[00:17:57.527] [ms] install path success !
+[00:17:59.343] [Cleaner] Cleaning flows matching cookie=0x8888/0xf000...
+[00:18:00.058] [Check] Flow cleanup verified. No rules with cookie=0x8888 found.
+[00:18:04.436] [ms] install path success !
+[00:18:09.338] [Decoder] Running ITGDec on /dev/shm/itg_h7_h5_48544af2.recv...
+[00:18:09.343] [Decoder] success dec recieve file
+[00:18:09.398] REWARD PENALTY: Delay cliff! 70.524 > 50
+[00:18:09.434] ==================================================
+[00:18:09.434] [Cleaner] Cleaning flows matching cookie=0xa000/0xf000...
+[00:18:10.188] [Check] Flow cleanup verified. No rules with cookie=0xa000 found.
+[00:18:10.189] [Step] env ready !
+[00:18:14.350] [ms] install path success !
+[00:18:15.405] [Cleaner] Cleaning flows matching cookie=0x8888/0xf000...
+[00:18:16.121] [Check] Flow cleanup verified. No rules with cookie=0x8888 found.
+[00:18:16.530] [ms] install path success !
+[00:18:16.540] [ERROR Send] No log generated. Link might be down.
+[00:18:16.585] ==================================================
+[00:18:16.585] [Cleaner] Cleaning flows matching cookie=0xa000/0xf000...
+[00:18:17.311] [Check] Flow cleanup verified. No rules with cookie=0xa000 found.
+[00:18:17.312] [Step] env ready !
+[00:18:17.885] [ms] install path success !
+[00:18:19.977] [Cleaner] Cleaning flows matching cookie=0x8888/0xf000...
+[00:18:20.951] [Check] Flow cleanup verified. No rules with cookie=0x8888 found.
+[00:18:21.988] [ms] install path success !
+[00:18:23.279] [mininet] stopping mininet ...

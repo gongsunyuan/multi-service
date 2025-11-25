@@ -9,10 +9,12 @@ import numpy as np
 from tqdm import tqdm
 from torch.distributions import Categorical
 from torch_geometric.nn.glob import global_mean_pool
+from datetime import datetime
 
 # === 导入自定义模块 ===
 # 请确保项目结构正确，并且 __init__.py 文件存在
-from MS.Env.VebosePrint import vprint, MININET_VERBOSE, CURRENT_PBAR, LOG_TO_CONSOLE, LOG_FILE_PATH
+import MS.Env.VerbosePrint as vp
+from MS.Env.VerbosePrint import vprint
 from MS.Agent.ActorCritic import ActorCritic
 from MS.Env.FlowGenerator import FlowGenerator
 from MS.Env.TensorLog import append_matrix_to_file
@@ -68,6 +70,7 @@ CONFIG = Config()
 def run_a2c_training():
   # 1. 初始化模型
   print(f"[ms] 正在初始化 A2C Agent (Device: {CONFIG.DEVICE})...")
+  start_time = datetime.now().strftime("%Y-%m-%d-%H:%M")
   agent = ActorCritic(
     lstm_hidden_dim=CONFIG.LSTM_DIM,
     gnn_hidden_dim=CONFIG.GNN_DIM,
@@ -89,18 +92,18 @@ def run_a2c_training():
   total_episodes = 0
   stats_reward = []
 
-  print(f"[ms] 开始训练: 共 {CONFIG.EPOCH-1} 次拓扑变更, 总计 {CONFIG.EPOCH} 回合")
+  vprint(f"[ms] 开始训练: 共 {CONFIG.EPOCH-1} 次拓扑变更, 总计 {CONFIG.EPOCH} 回合")
   
   # --- 外层循环：拓扑生命周期 ---
   for topo_idx in range(CONFIG.EPOCH):
       
     # A. 生成新拓扑
+    pbar = None
     G_nx = topo_gen.generate_topology()
 
-    MININET_VERBOSE = True   # 开启日志
-    LOG_TO_CONSOLE = False   # 开启控制台输出
-    LOG_FILE_PATH = None
-
+    vp.MININET_VERBOSE = True   # 开启日志
+    vp.LOG_TO_CONSOLE = False   # 开启控制台输出
+    vp.LOG_FILE_PATH = f"./train-log/a2c/{start_time}.log"
     try:
       # B. 启动 Mininet (Context Manager)
       with get_a_mininet(G_nx) as net:
@@ -110,17 +113,18 @@ def run_a2c_training():
         hosts = {i: net.get(f'h{i}') for i in G_nx.nodes()}
         
         # 内层循环：流训练 (Mininet 复用) 
-        pbar = tqdm(range(CONFIG.EPISODES_PER_TOPO), desc=f"Topo {topo_idx+1}", leave=False, disable=True)
-        CURRENT_PBAR = pbar
+        pbar = tqdm(range(CONFIG.EPISODES_PER_TOPO), desc=f"Topo {topo_idx+1}", leave=False, disable=False)
+        vp.CURRENT_PBAR = pbar
 
         for i_step, _ in enumerate(pbar):
           vprint("="*50)
-          vprint(f"flow {i_step}, {_}")
           # 1. 环境准备
+          current_cookie = 0xA000 + i_step
+
           clean_flow_rules(net) # 清理上一回合规则
           s_node, d_node = topo_gen.select_source_destination()
           h_src, h_dst = hosts[s_node], hosts[d_node]
-          vprint(f"[ms] env ready !")
+          vprint(f"[Step] env ready !")
           # 2. 获取状态 (State)
 
           # 2.1 采集指纹 (耗时操作)
@@ -129,25 +133,25 @@ def run_a2c_training():
             # 计算物理最短路作为临时通路
             temp_path = nx.shortest_path(G_nx, source=s_node, target=d_node)
             install_path_rules(net, temp_path, cookie=TEMP_COOKIE)
-            time.sleep(0.05) # 给 OVS 一点时间生效
           except nx.NetworkXNoPath:
             vprint(f"[Error]: No path between {s_node} and {d_node}")
             continue
-          
+
           flow_type, flow_profile = flow_gen.get_random_flow()
           fingerprint = get_a_fingerprint(
             server=h_dst, client=h_src, 
             flow_type=flow_type, 
             n_packets_to_capture=CONFIG.N_PACKETS).float().to(CONFIG.DEVICE) # Shape: (1, N, 2)
           
+          clean_flow_rules(net, TEMP_COOKIE)
           # append_matrix_to_file(fingerprint.detach().cpu(), "test.log", i_step)
           # 2.2 获取图特征
           monitor.sync_state_to_graph(G_nx)
 
-          for u, v in G_nx.edges():
-            if G_nx.has_edge(u, v):
-              # print(f"     链路 {u}->{v} 利用率: {G_nx[u][v]['utilization']:.2%}")
-              break
+          # for u, v in G_nx.edges():
+          #   if G_nx.has_edge(u, v):
+          #     vprint(f"     链路 {u}->{v} 利用率: {G_nx[u][v]['utilization']:.2%}")
+          #     break
 
           pyg_data, _ = get_pyg_data_from_nx(G_nx, s_node, d_node, CONFIG)
           pyg_data = pyg_data.to(CONFIG.DEVICE)
@@ -198,7 +202,7 @@ def run_a2c_training():
             torch.save(agent.state_dict(), CONFIG.SAVE_PATH)
 
     except Exception as e:
-      CURRENT_PBAR = None
+      vp.CURRENT_PBAR = None
       if pbar: pbar.close()
       print(f"\n[Error] Topo {topo_idx} 异常中断: {e}")
       import traceback
@@ -207,7 +211,7 @@ def run_a2c_training():
 
     finally:
       # [关键] 循环结束后，注销 pbar，防止内存泄漏或逻辑混乱
-      CURRENT_PBAR = None
+      vp.CURRENT_PBAR = None
       if pbar: pbar.close()
   print(f"训练结束。最终模型已保存至 {CONFIG.SAVE_PATH}")
 
