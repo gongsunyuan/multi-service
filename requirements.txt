@@ -1,7 +1,0 @@
-torch
-numpy
-tqdm
-scapy
-networkx==2.8.8
-mininet
-# 手动安装 ryu
