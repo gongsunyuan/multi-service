@@ -260,7 +260,7 @@ class GraphTopo(Topo):
       loss = data.get('loss', 0)
       q_limit = data.get('queue_size', 100)
       # 这里沿用 Mininet 构造函数中设置的 r2q
-      self.addLink(f'{test_str}s{u}', f'{test_str}s{v}', delay=delay, loss=loss, use_htb=True, max_queue_size=q_limit) 
+      self.addLink(f'{test_str}s{u}', f'{test_str}s{v}', bw=bw, delay=delay, loss=loss, use_htb=True, max_queue_size=q_limit) 
 
 # mininet 启动
 @contextmanager
@@ -268,7 +268,6 @@ def get_a_mininet(g: nx.Graph, is_test=False, remote_port=None):
   if remote_port:
     controller = partial(RemoteController, ip='127.0.0.1', port=remote_port)
   else:
-    vprint("[ms] 没有输入远程控制器，请自己配置流表规则！")
     controller = None
 
   if not vp.MININET_VERBOSE:
@@ -280,14 +279,13 @@ def get_a_mininet(g: nx.Graph, is_test=False, remote_port=None):
     link=TCLink,
     controller=controller,
     autoSetMacs=True, 
-    autoStaticArp=True
-  )
+    autoStaticArp=True)
 
   try:
     net.start()
     yield net
   finally:
-    vprint("[mininet] stopping mininet ...")
+    vprint("[Mini] stopping mininet ...")
     net.stop()
 
   return net
@@ -298,8 +296,8 @@ def get_a_fingerprint(
   client, 
   flow_type: FlowType, 
   n_packets_to_capture=30, 
-  **flow_params
-  ):
+  **flow_params):
+
   duration_sec = 15 
 
   final_tensor = send_packet_and_capture(
@@ -319,8 +317,6 @@ def get_a_fingerprint(
       duration_sec=duration_sec,
       n_packets_to_capture=n_packets_to_capture)
   
-  # if flow_type==FlowType.STREAMING:
-  #   print(f"{flow_type.name}{final_tensor.size(0)}")
   return normalize_fingerprint(final_tensor).unsqueeze(0)
 
 # 发送流量并捕获包特征
@@ -476,7 +472,7 @@ def get_flow_command(
 
     protocol = profile['protocol']
     duration_ms = duration_sec * 1000
-    
+    # ITGSend -a {shlex.quote(target_ip)} -t {duration_ms} -T {protocol}
     # 基础命令 (所有模式通用), 明确使用 D-ITG 的 ITGSend
     base_cmd = f"ITGSend -a {shlex.quote(target_ip)} -t {duration_ms} -T {protocol}"
     
@@ -656,7 +652,7 @@ def install_path_rules(net, path_nodes, cookie=0x1234):
   if loss > 50:
     vprint(f"[Warning] High ping loss ({loss}%) - path might be broken")
   else:
-    vprint(f"[ms] install path success !")
+    vprint(f"[Mini] install path success !")
 
 # 根据gnn输出的 logits来生成路径--贪婪/概率选择：
 # 替换 MS/Env/MininetController.py 中的 sample_path 函数

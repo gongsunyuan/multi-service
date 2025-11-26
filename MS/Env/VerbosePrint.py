@@ -1,7 +1,7 @@
 from datetime import datetime
 import os
 
-MININET_VERBOSE = False       # 总开关
+MININET_VERBOSE = True       # 总开关
 LOG_TO_CONSOLE  = True        # 是否打印到终端
 LOG_FILE_PATH   = None        # 日志文件路径 (例如: "./train-log/mininet_debug.log"), 如果设为 None，则不写入文件
 CURRENT_PBAR    = None
