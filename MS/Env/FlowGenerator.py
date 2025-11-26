@@ -1,0 +1,47 @@
+from enum import Enum
+import random
+
+class FlowType(Enum):
+  VOIP = 1      # 实时会话
+  STREAMING = 2 # 流媒体
+  GAMING = 3    # 游戏
+
+# 存储每种流类型的 iperf 参数和 QoE 严格要求 (用于 Reward 函数)
+FLOW_PROFILES = {
+  FlowType.VOIP: {
+    'protocol': 'UDP',       # 改名为 protocol 更通用
+    'ditg_preset': 'VoIP -x G.711.2', # D-ITG 专用参数
+    'qoe_critical': {'max_delay': 150, 'max_jitter': 50}, # 设置悬崖奖励
+    'reward_fn': 'E-Model'
+  },
+  FlowType.STREAMING: {
+    'protocol': 'TCP',
+    'ditg_manual': '-B U 500 1000 C 100 -c 1460 -C 1000',        # 视频流手动参数 
+    'qoe_critical': {'min_bandwidth': 5, 'max_loss_rate': 1e-6}, # Mbps
+    'reward_fn': '3GPP-QCI6'
+  },
+  FlowType.GAMING: {
+    'protocol': 'UDP',
+    'ditg_preset': 'CSa',
+    'qoe_critical': {'max_delay': 50, 'max_jitter': 30}, # ms
+    'reward_fn': '3GPP-QCI80'
+  }}
+
+class FlowGenerator:
+  def get_random_flow(self) -> tuple[FlowType, dict]:
+    """随机选择一个流类型及其配置文件。"""
+    flow_type = random.choice(list(FlowType))
+    profile = FLOW_PROFILES[flow_type]
+    return flow_type, profile
+
+def generate_background_flows():
+  pass
+
+def get_background_flow_cmd(src, dst, duration=5, target_bw_mbps=600):
+  vprint(f"[Back] Generating {target_bw_mbps} Mbps on {client.name}->{server.name}")
+
+  duration_ms = duration*1000
+  pps = target_bw_mbps*1e6 // 1500
+  cmd = f"ITGSend -a {dst.IP()} -T UDP -C {pps} -c 1400 -t {duration_ms}"
+
+  return cmd
