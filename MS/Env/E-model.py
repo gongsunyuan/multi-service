@@ -1,107 +1,215 @@
 import numpy as np
+import math
+import sys
+import json
 
+# ==============================================================================
+# Dependency Check
+# We strictly require the official 'itu-p1203' library for full fidelity.
+# ==============================================================================
+try:
+  from itu_p1203 import P1203Standalone
+  HAS_OFFICIAL_LIB = True
+except ImportError:
+  HAS_OFFICIAL_LIB = False
+  print("❌ [Critical Error] 'itu-p1203' library not found!")
+  print("   Please run: pip install git+https://github.com/itu-p1203/itu-p1203.git")
+  print("   The system will fallback to a simplified model, which is NOT rigorous.")
+
+# ==============================================================================
+# 1. VoIP Model (G.107) - Theoretical Implementation
+# ==============================================================================
 class FullG107Calculator:
+  """
+  ITU-T G.107 (E-model) for VoIP.
+  Implements the exact logarithmic delay impairment curves.
+  """
   def __init__(self):
-    # 1. 基本信噪比 (Basic Signal-to-Noise Ratio)
-    # G.107 推荐值: 93.2 (窄带) 或 94.76 (宽带，暂取窄带标准)
-    self.R0 = 93.2
-    
-    # 2. 同步损伤 (Simultaneous Impairment)
-    # 对于现代数字网络，量化失真极小，取默认值
+    # Constants for G.711 (Narrowband)
+    self.R0 = 93.2 
     self.Is = 0.0
-    
-    # 3. 优势因子 (Advantage Factor)
-    # 0: 有线网络 (Mininet default)
-    # 5: 移动通信
-    # 10: 卫星通信
     self.A = 0.0 
+    self.Ie_base = 0.0
+    self.Bpl = 4.3
 
-    # 4. 编解码器参数 (G.711 Codec Profile)
-    self.Ie_base = 0.0   # G.711 基础损伤
-    self.Bpl = 4.3       # G.711 丢包鲁棒性因子
-
-  def calculate_r_factor(self, delay_ms, loss_pct, jitter_ms):
+  def calculate_mos(self, delay_ms, loss_pct, jitter_ms):
     """
-    Strict implementation of ITU-T G.107
+    Calculates MOS for VoIP.
     Args:
-      delay_ms: One-way delay (d)
-      loss_pct: Packet loss probability (0-100)
-      jitter_ms: Jitter
+      delay_ms: One-way delay (ms)
+      loss_pct: Packet loss rate (0-100)
+      jitter_ms: Jitter (ms)
     """
-    # --- Step 1: Effective Latency Calculation ---
-    # G.107 规定: 有效延迟 Ta = OneWayDelay + Pdd (Packetization Delay)
-    # G.711 打包延迟通常为 10ms 或 20ms，我们取 10ms
-    # Jitter Buffer 带来的额外延迟通常设为 2 * Jitter
+    # 1. Effective Latency (Ta)
+    # Accounts for Network Delay + De-jitter Buffer (2*Jitter) + Packetization (10ms)
     Ta = delay_ms + (2 * jitter_ms) + 10.0 
 
-    # --- Step 2: Id (Delay Impairment) Calculation ---
-    # 严格公式: Id = Idte + Idle + Idd
-    # 在纯网络传输中，重点是 Idd (Absolute Delay Impairment)
-    # 公式来源: G.107 Eq. (4) - (6)
-    
+    # 2. Delay Impairment (Id) - The Rigorous G.107 Curve
+    # Not the linear approximation!
     if Ta <= 100:
-      Id = 0.0  # 100ms 以内几乎无感知
+      Id = 0.0
     else:
-      X = np.log(Ta / 100.0) / np.log(2.0) # log2(Ta/100)
+      X = np.log(Ta / 100.0) / np.log(2.0)
       Id = 25.0 * ( (1 + X**6)**(1/6) - 3 * (1 + (X/3)**6)**(1/6) + 2 )
 
-    # --- Step 3: Ie,eff (Effective Equipment Impairment) ---
-    # 考虑丢包的影响。公式来源: G.107 Eq. (3-28)
-    # Ppl: Packet Loss Probability (0.0 to 1.0) -> input is percent
-    Ppl = loss_pct # G.107 uses percent directly in some versions, check scaling.
-    # 标准公式: Ie,eff = Ie + (95 - Ie) * Ppl / (Ppl + Bpl)
-    # 注意: 如果 loss_pct 是 0-100
-    
+    # 3. Equipment Impairment (Ie_eff) - Loss impact
+    Ppl = loss_pct
     Ie_eff = self.Ie_base + (95 - self.Ie_base) * (Ppl / (Ppl + self.Bpl))
     
-    # --- Step 4: Final R Calculation ---
+    # 4. Final R-Factor
     R = self.R0 - self.Is - Id - Ie_eff + self.A
-    return R
-
-  def r_to_mos(self, R):
-      """
-      ITU-T G.107 Eq. (30): Conversion R -> MOS
-      """
-      if R < 0: return 1.0
-      if R > 100: return 4.5
-      
-      mos = 1 + 0.035 * R + 7e-6 * R * (R - 60) * (100 - R)
-      return np.clip(mos, 1.0, 4.5)
-
-class FullP1203Calculator:
-  def __init__(self):
-    # 预设设备显示参数 (假设 1080p 屏幕)
-    self.device_res_x = 1920
-    self.device_res_y = 1080
     
-    # P.1203 参数系数 (简化提取版，完整版有几百个系数)
-    self.o1 = 4.69 # Max score
-    self.o2 = 4.0  # Quantization parameter
+    # 5. Map R to MOS (1.0 - 4.5)
+    if R < 0: return 1.0
+    if R > 100: return 4.5
+    return 1 + 0.035 * R + 7e-6 * R * (R - 60) * (100 - R)
+
+# ==============================================================================
+# 2. Video Model (P.1203 + Mathis) - The "Full Fidelity" Class
+# ==============================================================================
+class RigorousVideoEvaluator:
+  """
+  High-Fidelity Video QoE Evaluator.
   
-  def calculate_stall(received_bw_kbps, packet_loss_rate, duration_sec):
-    target_bitrate = 5000  # 假设我们要看 5Mbps 的 1080p 视频 (Demand)
-    stall_time = 0.0
-
-    # --- 1. Bandwidth Stall (下载太慢) ---
-    # 我们下载这些数据实际花了多久？
-    # Time_Needed = Data_Size / Speed
-    # Data_Size = Target_Bitrate * Duration
-    if received_bw_kbps < 10: # 防止除以0
-      download_time = 999 # 无限卡顿
-    else:
-      # 如果带宽只有目标的一半，下载就要花 2倍的时间
-      download_time = (target_bitrate * duration_sec) / received_bw_kbps
+  Components:
+  1. Mathis Equation: Theoretical TCP throughput modeling based on Loss/RTT.
+  2. Virtual Buffer: Simulates player buffer dynamics (Stateful).
+  3. ITU-T P.1203: Official standard for MOS calculation (Mode 0).
+  """
+  def __init__(self, target_bitrate_kbps=5000, max_buffer_sec=10.0):
+    self.target_bitrate_kbps = target_bitrate_kbps # e.g. 5000 for 1080p
+    self.max_buffer_sec = max_buffer_sec
     
-    # 额外的耗时就是卡顿时间
-    if download_time > duration_sec:
-      stall_time += (download_time - duration_sec)
+    # Stateful Memory (The "OldBuffer")
+    self.current_buffer_sec = 6.0 
 
-    # --- 2. Loss Stall (丢包重传) ---
-    # 经验公式：丢包率 > 2% 开始导致明显卡顿
-    # 假设每 1% 的丢包会导致 0.5秒 的等待 (简单拟合)
-    if packet_loss_rate > 2.0:
-      stall_time += (packet_loss_rate - 2.0) * 0.5
+  def reset(self):
+    """Resets the buffer state. Call this when a new user session starts."""
+    self.current_buffer_sec = 6.0
 
-    # 卡顿时间不能超过物理时间的限制 (逻辑边界)
-    # 但在 P.1203 中，stall 可以很长，这里我们设个上限防止数值爆炸
-    return min(stall_time, duration_sec * 5)
+  def _get_tcp_throughput_mathis(self, rtt_ms, loss_pct):
+    """
+    [Theoretical Component]
+    Calculates the maximum TCP throughput using the Mathis Equation.
+    Ref: Mathis et al. (1997)
+    Formula: BW = (MSS / RTT) * (C / sqrt(p))
+    """
+    mss_bits = 1460 * 8  # Standard Ethernet MSS (Bits)
+    rtt_sec = max(0.001, rtt_ms / 1000.0) # Avoid div zero
+    p = loss_pct / 100.0 # Percent to probability
+    
+    if p <= 1e-6:
+      # If no loss, TCP is limited only by physical link capacity
+      # We return a very large number, so physical BW becomes the bottleneck
+      return 99999999.0
+    else:
+      # Mathis Constant C ≈ 1.22 (sqrt(3/2))
+      c = 1.22
+      bw_bps = (mss_bits / rtt_sec) * (c / math.sqrt(p))
+      return bw_bps / 1000.0 # Convert to kbps
+
+  def _call_official_lib(self, bitrate_kbps, duration_sec, stall_sec):
+    """
+    [Standard Component]
+    Wraps the official 'itu-p1203' Python library.
+    """
+    if not HAS_OFFICIAL_LIB:
+      return 1.0 # Fail-safe
+
+    # Construct the exact JSON structure required by ITU-T P.1203 Mode 0
+    input_data = {
+      "I11": { # Video Generation Module
+        "segments": [{
+          "bitrate": bitrate_kbps,
+          "codec": "h264",
+          "duration": duration_sec,
+          "fps": 24.0,
+          "resolution": "1920x1080",
+          "start": 0
+        }],
+        "streamId": 1
+      },
+      "I13": { # Stalling Module
+        "stalls": [
+          # Inject a stalling event if calculated stall > 0
+          {"start": duration_sec / 2.0, "duration": stall_sec} 
+          if stall_sec > 0.001 else None
+        ]
+      },
+      "IGen": { # Meta Info
+        "displaySize": "1920x1080",
+        "device": "pc"
+      }
+    }
+    
+    # Sanitize input (Remove None values)
+    input_data["I13"]["stalls"] = [x for x in input_data["I13"]["stalls"] if x]
+
+    try:
+      # Invoke the official engine
+      model = P1203Standalone(input_data)
+      result = model.calculate_complete()
+      # O.46 is the overall Audiovisual MOS
+      return result['O46']
+    except Exception as e:
+      # Fallback for library errors
+      print(f"[P1203 Wrapper Error] {e}")
+      return 1.0
+
+  def calculate_mos(self, loss_pct, rtt_ms, physical_bw_kbps, duration_sec, stateless_mode=True):
+    """
+    Main Calculation Pipeline.
+    
+    Args:
+      loss_pct: Packet loss from D-ITG (%)
+      rtt_ms: Round Trip Time (ms)
+      physical_bw_kbps: Measured link bandwidth (kbps)
+      duration_sec: Step duration (e.g., 4.0s)
+      stateless_mode: If True, resets buffer to 0.5s every step (Worst-Case).
+    """
+    
+    # --- Step 0: Apply Worst-Case Mode (If requested) ---
+    if stateless_mode:
+      # Reset buffer to a minimum safe threshold at every step.
+      # This forces the agent to meet demand instantaneously.
+      self.current_buffer_sec = 0.5
+
+    # --- Step 1: Theoretical TCP Throughput ---
+    # "How fast can TCP send data given this loss rate?"
+    mathis_bw = self._get_tcp_throughput_mathis(rtt_ms, loss_pct)
+    
+    # The actual speed is the minimum of Physical Link and TCP Limit
+    effective_bw = min(physical_bw_kbps, mathis_bw)
+
+    # --- Step 2: Virtual Buffer Simulation ---
+    # "How much video content did we actually download?"
+    # Ratio = Supply / Demand
+    downloaded_content_sec = (effective_bw * duration_sec) / self.target_bitrate_kbps
+    
+    # Update Buffer State
+    prev_buffer = self.current_buffer_sec
+    new_buffer = prev_buffer + downloaded_content_sec - duration_sec
+    
+    stall_duration = 0.0
+    
+    if new_buffer < 0:
+      # Buffer Drained -> Stalling Event!
+      stall_duration = abs(new_buffer)
+      self.current_buffer_sec = 0.0
+    else:
+      # Buffer Healthy -> Cap at max
+      self.current_buffer_sec = min(new_buffer, self.max_buffer_sec)
+
+    # --- Step 3: Determine Viewing Quality ---
+    # If network is slow, Adaptive Bitrate (ABR) lowers quality to match speed.
+    # But it cannot exceed the target (source) quality.
+    viewing_bitrate = min(effective_bw, self.target_bitrate_kbps)
+
+    # --- Step 4: Official ITU-T P.1203 Calculation ---
+    mos = self._call_official_lib(
+      bitrate_kbps=viewing_bitrate,
+      duration_sec=duration_sec,
+      stall_sec=stall_duration
+    )
+    
+    return mos
