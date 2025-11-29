@@ -34,14 +34,14 @@ class FlowGenerator:
     profile = FLOW_PROFILES[flow_type]
     return flow_type, profile
 
-def generate_background_flows():
-  pass
+  def generate_background_flows():
+    pass
 
-def get_background_flow_cmd(src, dst, duration=5, target_bw_mbps=600):
-  vprint(f"[Back] Generating {target_bw_mbps} Mbps on {client.name}->{server.name}")
+  def get_background_flow_cmd(src, dst, duration=5, target_bw_mbps=600):
+    vprint(f"[Back] Generating {target_bw_mbps} Mbps on {client.name}->{server.name}")
 
-  duration_ms = duration*1000
-  pps = target_bw_mbps*1e6 // 1500
-  cmd = f"ITGSend -a {dst.IP()} -T UDP -C {pps} -c 1400 -t {duration_ms}"
+    duration_ms = duration*1000
+    pps = target_bw_mbps*1e6 // 1500
+    cmd = f"ITGSend -a {dst.IP()} -T UDP -C {pps} -c 1400 -t {duration_ms}"
 
-  return cmd
+    return cmd

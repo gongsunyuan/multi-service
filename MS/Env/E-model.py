@@ -213,3 +213,102 @@ class RigorousVideoEvaluator:
     )
     
     return mos
+
+# ==============================================================================
+# 3. Cloud Gaming Model (ITU-T G.1072) - Video Stream Based
+# ==============================================================================
+class RigorousCloudGamingEvaluator:
+  """
+  Source: ITU-T Recommendation G.1072
+  Scenario: GeForce Now, Xbox Cloud, Stadia.
+  Traffic: High Bandwidth Video Stream (UDP).
+  Sensitive to: Bandwidth (Resolution), Loss (Artifacts), Delay (Input Lag).
+  """
+  def __init__(self, target_bitrate_kbps=8000):
+    self.base_mos = 4.5
+    self.target_bitrate_kbps = target_bitrate_kbps 
+
+  def calculate_mos(self, delay_ms, loss_pct, physical_bw_kbps):
+    # 1. Coding Quality (Bandwidth)
+    # G.1072: If BW < Target, resolution drops -> MOS drops.
+    effective_bw = min(physical_bw_kbps, self.target_bitrate_kbps)
+    if effective_bw <= 100:
+      I_coding = 3.5 
+    else:
+      ratio = effective_bw / self.target_bitrate_kbps
+      I_coding = 1.8 * np.exp(-3.0 * ratio) 
+
+    # 2. Delay Impairment (Input Lag)
+    # G.1072: < 30ms imperceptible. > 100ms steep penalty.
+    total_lag = delay_ms + 30.0 # Add ~30ms system overhead
+    
+    if total_lag <= 30:
+      I_delay = 0.0
+    else:
+      if total_lag < 100:
+        I_delay = (total_lag - 30) * 0.015
+      else:
+        I_delay = (100 - 30) * 0.015 + (total_lag - 100) * 0.06
+
+    # 3. Loss Impairment (Frame Freeze)
+    # G.1072: Very sensitive to packet loss (no buffer).
+    I_loss = 4.0 * (loss_pct / 100.0) * 10.0 
+    
+    mos = self.base_mos - I_coding - I_delay - I_loss
+    return np.clip(mos, 1.0, 4.5)
+
+# ==============================================================================
+# 4. Legacy FPS Model (CSa) - State Update Based
+# ==============================================================================
+class RigorousLegacyFPSEvaluator:
+  """
+  Source: Empirical Research (Claypool et al. / Quax et al.)
+  Scenario: Counter-Strike (CSa), Valorant, Overwatch.
+  Traffic: Tiny Packets, High Frequency, Very Low Bandwidth.
+  Sensitive to: Latency (Peeker's Advantage), Jitter (Hit Reg), Loss (Rubber-banding).
+  NOT Sensitive to: Bandwidth (unless < 100kbps).
+  """
+  def __init__(self):
+    self.base_mos = 4.5
+    # Threshold where "Lag" becomes noticeable for pros
+    self.delay_threshold = 20.0 
+
+  def calculate_mos(self, delay_ms, loss_pct, jitter_ms):
+    """
+    Calculates MOS for Legacy FPS.
+    Note: Bandwidth is ignored because CSa flows are tiny (~64kbps).
+    """
+    
+    # --- 1. Delay Penalty (Ping) ---
+    # Based on Claypool's "Exponential Decay of Performance"
+    # < 20ms: Perfect
+    # 20ms - 60ms: Slight disadvantage (Linear)
+    # > 60ms: Severe disadvantage (Exponential-ish)
+    if delay_ms <= self.delay_threshold:
+      I_delay = 0.0
+    elif delay_ms <= 60:
+      I_delay = (delay_ms - self.delay_threshold) * 0.02 # Mild slope
+    else:
+      # Heavy penalty above 60ms
+      I_delay = 0.8 + (delay_ms - 60) * 0.08
+
+    # --- 2. Jitter Penalty (Stability) ---
+    # Legacy FPS servers run at fixed ticks (e.g. 64/128 tick).
+    # High jitter causes "interpolation failure" (hitbox mismatch).
+    # Research suggests Jitter > tick_interval (e.g. 15ms) is fatal.
+    if jitter_ms <= 5:
+      I_jitter = 0.0
+    else:
+      # Jitter is more punishing than constant delay for hit-reg
+      I_jitter = (jitter_ms - 5.0) * 0.15
+
+    # --- 3. Loss Penalty (Rubber-banding) ---
+    # TCP games lag, UDP games (CS) predict and correct (warp).
+    # 1% loss is annoying, 3% is unplayable.
+    # Formula: Steep linear penalty.
+    I_loss = 25.0 * (loss_pct / 100.0) # 1% loss -> 0.25 MOS drop, 5% -> 1.25 drop
+    
+    mos = self.base_mos - I_delay - I_jitter - I_loss
+    return np.clip(mos, 1.0, 4.5)
+
+    
