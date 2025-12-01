@@ -22,10 +22,23 @@ from MS.Env.VerbosePrint import vprint
 from .FlowGenerator import FlowType, FLOW_PROFILES
 from mininet.node import OVSKernelSwitch, RemoteController
 from mininet.link import TCLink
+from MS.Env.E_model import (
+  FullG107Calculator, 
+  RigorousVideoEvaluator, 
+  RigorousCloudGamingEvaluator, 
+  RigorousLegacyFPSEvaluator)
 
 
 # Critic
 # 根据 QoS 打分
+
+# [Global Instances - Stateful/Stateless managers]
+voip_calc = FullG107Calculator()
+video_calc = RigorousVideoEvaluator(target_bitrate_kbps=5000) # 1080p Video
+
+fps_game_calc = RigorousLegacyFPSEvaluator() # CSa
+# cloud_game_calc = RigorousCloudGamingEvaluator(target_bitrate_kbps=8000) # Cloud Gaming
+
 def parse_ditg_output(output_str: str) -> dict:
   """
   解析 ITGDec 的标准输出文本，提取关键 QoS 指标。
@@ -100,45 +113,53 @@ def parse_ditg_output(output_str: str) -> dict:
 
 def calculate_qoe_reward(qos_metrics: dict, flow_profile: dict) -> float:
   """
-  【新增】根据 QoE “悬崖”计算奖励。
-  这是 RL 训练信号的核心。
+  Real QoE Reward Calculation using E-models.
   """
+  # 1. 解析 QoS 数据
+  d = qos_metrics.get('delay', 1.0)       # ms
+  j = qos_metrics.get('jitter', 0.1)      # ms
+  l = qos_metrics.get('loss_rate', 0.0) * 100.0 # Convert to % (0-100)
+  b = qos_metrics.get('bandwidth', 0.0) * 1000.0 # Convert to kbps
   
-  # 默认奖励为正，表示成功
-  reward = 10.0 
-  
-  # 获取 QoE 关键阈值
-  qoe_reqs = flow_profile.get('qoe_critical', {})
-  
-  # 1. 检查延迟 (来自 Ping)
-  max_delay = qoe_reqs.get('max_delay')
-  if max_delay is not None and qos_metrics.get('delay', 1000.0) > max_delay:
-    vprint(f"REWARD PENALTY: Delay cliff! {qos_metrics.get('delay')} > {max_delay}")
-    return -100.0 # 巨大的惩罚
-      
-  # 2. 检查抖动 (来自 iperf -u)
-  max_jitter = qoe_reqs.get('max_jitter')
-  if max_jitter is not None and qos_metrics.get('jitter', 1000.0) > max_jitter:
-    vprint(f"REWARD PENALTY: Jitter cliff! {qos_metrics.get('jitter')} > {max_jitter}")
-    return -100.0 # 巨大的惩罚
+  # 2. 识别业务类型
+  # 假设 flow_profile['type'] 是 FlowType 枚举或字符串
+  # 这里需要根据你的 FlowGenerator 里的定义来匹配
+  f_type_enum = flow_profile.get('type') 
+  # 将 Enum 转为字符串方便判断 (e.g. FlowType.VOIP -> 'voip')
+  f_type = f_type_enum.name.lower() if hasattr(f_type_enum, 'name') else str(f_type_enum).lower()
 
-  # 3. 检查带宽 
-  min_bw = qoe_reqs.get('min_bandwidth')
-  if min_bw is not None and qos_metrics.get('bandwidth', 0.0) < min_bw:
-    vprint(f"REWARD PENALTY: Bandwidth cliff! {qos_metrics.get('bandwidth')} < {min_bw}")
-    return -100.0 # 巨大的惩罚
-      
-  # 4. 检查丢包率 (来自 iperf -u)
-  max_loss = qoe_reqs.get('max_loss_rate')
-  if max_loss is not None and qos_metrics.get('loss_rate', 1.0) > max_loss:
-    vprint(f"REWARD PENALTY: Loss cliff! {qos_metrics.get('loss_rate')} > {max_loss}")
-    return -100.0 # 巨大的惩罚
+  mos = 1.0
+  
+  # vprint(f"[E-Mod] {f_type} | Delay: {d:.1f}ms | Loss: {l:.2f}% | BW: {b:.1f}kbps")
+  # 3. 调用对应的 E-model
+  if 'voip' in f_type:
+    mos = voip_calc.calculate_mos(delay_ms=d, loss_pct=l, jitter_ms=j)
+    
+  elif 'streaming' in f_type:
+    # Video: 使用 Stateless Mode (Worst-Case) 以适应随机流训练
+    mos = video_calc.calculate_mos(
+      loss_pct=l, rtt_ms=d*2, physical_bw_kbps=b, 
+      duration_sec=6.0, stateless_mode=True
+    )
+    
+  elif 'gaming' in f_type:
+    # 区分 Cloud Gaming 和 Legacy FPS
+    # 暂时只考虑 CSa (Legacy FPS)
+    mos = fps_game_calc.calculate_mos(delay_ms=d, loss_pct=l, jitter_ms=j)
 
-  # 如果通过了所有悬崖测试，可以返回一个更精细的奖励
-  # (例如，VoIP 可以基于 E-Model 计算 R-factor)
-  # 简单起见，我们先返回一个固定的正奖励
-  # TODO
-  return reward
+  # vprint(f"[E-Mod] Mos: {mos}")
+
+  # 4. 归一化 Reward
+  # MOS 1.0~4.5 -> Reward -1.0~1.0
+  # (MOS - 3.0) / 1.5 
+  reward = (mos - 3.0) / 1.5
+  
+  # 5. 悬崖惩罚 (Cliff Penalty) - 保留你原有的逻辑作为最后一道防线
+  # 如果 MOS 极低 (比如 < 1.5)，直接给 -1.0 或更低
+  if mos < 1.5:
+    return -1.0
+
+  return float(reward)
 
 def measure_path_qos(server, client, path_route, flow_type):
   """
@@ -197,7 +218,6 @@ def measure_path_qos(server, client, path_route, flow_type):
 
   # 解析结果 
   # Meta-DRL
-  
   try:
     vprint(f"[Decoder] Running ITGDec on {recv_log}...")
 
@@ -312,7 +332,7 @@ def get_a_fingerprint(
     n_packets_to_capture=n_packets_to_capture)
   
   while final_tensor.size(0) < 30:
-    vprint(f"{flow_type.name}----{final_tensor.size(0)}")
+    # vprint(f"{flow_type.name}====={final_tensor.size(0)}")
     sleep(1)
     final_tensor = send_packet_and_capture(
       server=server,
@@ -368,10 +388,10 @@ def send_packet_and_capture(
     target_ip=server_ip,
     duration_sec=duration_sec,
     **flow_params)
-
+  MARK_TOS = 32
   # 4. 准备 tshark 命令 (这是最快的方法)
-  display_filter = f"src host {client_ip} and dst host {server_ip}"
-  timeout_duration = duration_sec+1
+  display_filter = f"src host {client_ip} and dst host {server_ip} and ip[1] == {MARK_TOS}"
+  timeout_duration = duration_sec+5
 
   tshark_cmd = [
     'sudo',
@@ -394,11 +414,6 @@ def send_packet_and_capture(
   server_proc = None
 
   try:
-    # 5. [Action 2] 启动流量
-    # print(f"[Net] 启动 D-ITG 接收端 (h1)...")
-    server_proc = server.popen('ITGRecv')
-  
-    # 6. [Action 3] 启动 tshark 捕获管道
     # print(f"[Capture] 启动 tshark 管道: {' '.join(tshark_cmd)}")
     tshark_proc = subprocess.Popen(
       tshark_cmd, 
@@ -406,6 +421,12 @@ def send_packet_and_capture(
       stderr=subprocess.DEVNULL,
       text=True
     )
+
+    # 5. [Action 2] 启动流量
+    # print(f"[Net] 启动 D-ITG 接收端 (h1)...")
+    server_proc = server.popen('ITGRecv')
+  
+    # 6. [Action 3] 启动 tshark 捕获管道
     sleep_time= 1.2 if flow_type==FlowType.STREAMING else 0.1
     sleep(sleep_time)
     # print(f"[Net] 启动 D-ITG 发送端 (h2): {client_cmd}")
@@ -472,13 +493,14 @@ def get_flow_command(
     返回:
       str: 一个完整的、可在 Mininet 主机上运行的 ITGSend 命令字符串。
     """
+    MARK_TOS = 32
     profile = FLOW_PROFILES[flow_type]
 
     protocol = profile['protocol']
     duration_ms = duration_sec * 1000
     # ITGSend -a {shlex.quote(target_ip)} -t {duration_ms} -T {protocol}
     # 基础命令 (所有模式通用), 明确使用 D-ITG 的 ITGSend
-    base_cmd = f"ITGSend -a {shlex.quote(target_ip)} -t {duration_ms} -T {protocol}"
+    base_cmd = f"ITGSend -a {shlex.quote(target_ip)} -t {duration_ms} -b {MARK_TOS} -T {protocol}"
     
     if 'ditg_preset' in profile:
       # 使用预设 (VoIP, Gaming)
@@ -660,10 +682,10 @@ def install_path_rules(net, path_nodes, cookie=0x1234):
 
 # 根据gnn输出的 logits来生成路径--贪婪/概率选择：
 # 替换 MS/Env/MininetController.py 中的 sample_path 函数
-def sample_path(edge_logits, edge_index, s_node, d_node, max_steps=100, greedy=False):
+def sample_path(edge_logits, edge_index, s_node, d_node, max_steps=100, G_fallback=None, greedy=False):
   """
-  通用路径采样函数 (支持 RL 梯度计算)。
-  返回: path (list), log_prob_sum (tensor), is_success (bool)
+  增强版路径采样：支持 Masking (防环) + Dijkstra Fallback (兜底)
+  返回: path, log_prob_sum, ai_success, path_complete
   """
   # 1. 构建邻接表
   adj = {}
@@ -672,66 +694,89 @@ def sample_path(edge_logits, edge_index, s_node, d_node, max_steps=100, greedy=F
     u = edge_index[0, i].item()
     v = edge_index[1, i].item()
     if u not in adj: adj[u] = []
-    adj[u].append((v, i)) # (邻居节点, 边索引)
+    adj[u].append((v, i)) 
 
   current = s_node
   path = [current]
   visited = {current}
-  log_probs = [] # [新增] 用于存储每一步的 log_prob
+  log_probs = [] 
   
+  # ---------------------------------------------------------
+  # A. AI 游走阶段
+  # ---------------------------------------------------------
   for _ in range(max_steps):
     if current == d_node: break
     if current not in adj: break
     
-    # 获取合法邻居
+    # Action Masking: 禁止走回头路
     neighbors = adj[current]
     valid_options = [n for n in neighbors if n[0] not in visited]
-    if not valid_options: break
+    if not valid_options: break # 死胡同
     
-    # 提取候选边的 Logits
+    # 提取 Logits
     candidate_logits = []
     candidate_nodes = []
     for next_node, edge_idx in valid_options:
       candidate_logits.append(edge_logits[edge_idx])
       candidate_nodes.append(next_node)
-        
-    # --- 核心决策逻辑 ---
+      
     logits_tensor = torch.stack(candidate_logits)
     
     if greedy:
-      # [验证模式]
       action_idx = torch.argmax(logits_tensor).item()
-      # greedy 模式下 log_prob 通常设为 0 或不计算，因为不进行梯度更新
       log_prob = torch.tensor(0.0).to(logits_tensor.device)
     else:
-      # [RL 训练模式]
       probs = torch.softmax(logits_tensor, dim=0)
       dist = torch.distributions.Categorical(probs)
       action_tensor = dist.sample()
       action_idx = action_tensor.item()
-      
-      # [关键] 计算这一步的对数概率，保留梯度图
       log_prob = dist.log_prob(action_tensor)
     
-    # 记录
     log_probs.append(log_prob)
     
     next_hop = candidate_nodes[action_idx]
     path.append(next_hop)
     visited.add(next_hop)
     current = next_hop
-      
-  is_success = (path[-1] == d_node)
+
+  # ---------------------------------------------------------
+  # B. 状态判定与兜底 (Safety Net) [核心修复]
+  # ---------------------------------------------------------
+  ai_success = False      # AI 是否独立完成
+  path_complete = False   # 最终路径是否连通 (含兜底)
+
+  if path[-1] == d_node:
+    # Case 1: AI 独立成功
+    ai_success = True
+    path_complete = True
+  else:
+    # Case 2: AI 失败，尝试 Dijkstra 兜底
+    if G_fallback is not None:
+      try:
+        # 从断点找最短路补全
+        remaining_path = nx.shortest_path(G_fallback, source=path[-1], target=d_node, weight='delay')
+        path.extend(remaining_path[1:]) # 拼接到路径后
+        
+        ai_success = False    # AI 没完成
+        path_complete = True  # 但路通了
+      except nx.NetworkXNoPath:
+        # 物理隔离，彻底失败
+        ai_success = False
+        path_complete = False
+    else:
+      # 没有兜底机制，且 AI 没走通
+      ai_success = False
+      path_complete = False
   
-  # [新增] 汇总整条路径的 log_prob (加法)
+  # 汇总 Log Probs
   if log_probs:
     log_prob_sum = torch.stack(log_probs).sum()
   else:
     log_prob_sum = torch.tensor(0.0).to(edge_logits.device)
 
-  # 返回 3 个值
-  return path, log_prob_sum, is_success
-
+  # 返回 4 个值：路径，梯度概率，AI是否成功，最终是否连通
+  return path, log_prob_sum, ai_success, path_complete
+  
 # 监视器，负责动态提取mininet拓扑状态
 class NetworkMonitor:
   def __init__(self, net):

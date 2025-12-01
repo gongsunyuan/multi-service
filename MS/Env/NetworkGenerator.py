@@ -2,6 +2,7 @@ import networkx as nx
 import random
 import torch
 import os
+import math
 from torch_geometric.data import Data
 from MS.Env.VerbosePrint import vprint
 
@@ -22,79 +23,128 @@ DEFAULT_CONFIG = Default_config()
 
 class TopologyGenerator:
   def __init__(self, config=DEFAULT_CONFIG):
-    """
-    初始化拓扑生成器。
-    :param num_nodes_range: 节点数量的范围 (e.g., 10-20个节点)
-    :param m_ba: BA模型的附着参数 (每个新节点连接到 m_ba 个现有节点)
-    """
-    self.num_nodes_range = (config.MIN_NODES_NUM, config.MAX_NODES_NUM)
-    self.m_ba = config.M_BA 
-    self.min_bw = config.MIN_BW  # Mbps
-    self.max_bw = config.MAX_BW  # Mbps
-    self.min_loss = config.MIN_LOSS
-    self.max_loss = config.MAX_LOSS
-    self.min_delay = config.MIN_DELAY # ms
-    self.max_delay = config.MAX_DELAY # ms
-    self.G = None
-  
-  def load_topology(self, filepath: str) -> nx.Graph:
-    """
-    从文件加载拓扑图，支持 .pkl (Pickle) 和 .graphml 格式。
-    """
-    loadpath = f"TopoGraph/{filepath}"
-    if not os.path.exists(loadpath):
-      raise FileNotFoundError(f"[Error] 拓扑文件未找到: {filepath}")
+    pass
 
-    # 1. 检查文件类型并加载
-    if filepath.lower().endswith(('.pkl', '.gpickle')):
-      # 使用 Pickle 加载，用于加载训练状态（包含复杂属性）
+  def load_topology(self, filename: str) -> nx.Graph:
+    """
+    加载固定的 GraphML 文件 (NSFNet)，并初始化 RL 环境所需的动态属性。
+    自动搜索路径：当前目录 -> TopoGraph/ 目录
+    """
+    # --- 1. 智能路径搜索 ---
+    # 情况 A: 用户传了完整路径 "TopoGraph/nsfnet.graphml"
+    if os.path.exists(filename):
+      loadpath = filename
+    # 情况 B: 用户只传了文件名 "nsfnet.graphml"，自动补全前缀
+    elif os.path.exists(f"TopoGraph/{filename}"):
+      loadpath = f"TopoGraph/{filename}"
+    else:
+      raise FileNotFoundError(f"[Error] Load Topology: file not found: {filename} (Checked root and TopoGraph/)")
+
+    # --- 2. 加载文件 (使用找到的 loadpath) ---
+    if loadpath.endswith('.graphml'):
+      # node_type=int: 尝试将节点 ID 转为整数 (NSFNet graphml 中 id="0")
+      try:
+        G = nx.read_graphml(loadpath, node_type=int)
+      except Exception as e:
+        vprint(f"[Error] Load Topology: {e}, trying default loader...")
+        G = nx.read_graphml(loadpath) # Fallback
+
+      # [关键] 强制转换节点 Label 为连续整数 (0, 1, 2...)
+      # 确保兼容 Mininet 的 h0, h1 命名规则
+      G = nx.convert_node_labels_to_integers(G, ordering='sorted')
+      
+    elif loadpath.endswith('.pkl'):
       with open(loadpath, 'rb') as f:
         G = pickle.load(f)
-      
-      vprint(f"[Graph] 成功加载 Pickle 文件: {filepath}")
-
-    elif filepath.lower().endswith('.graphml'):
-      # 使用 GraphML 加载，用于加载标准拓扑结构
-      # node_type=int 尝试将节点 ID 转换为整数，提高兼容性
-      G = nx.read_graphml(filepath, node_type=int)
-      
-      # 【关键】确保节点ID是整数。如果 GraphML 文件中的 ID 是字符串，需要转换。
-      if not all(isinstance(n, int) for n in G.nodes()):
-        # 将所有节点标签转换为从 0 开始的整数
-        G = nx.convert_node_labels_to_integers(G)
-      
-      vprint(f"[Graph] 成功加载 GraphML 文件: {filepath}")
-
     else:
-      raise ValueError(f"[Error] 不支持的文件格式: {filepath}。请使用 .pkl 或 .graphml")
-
+      raise ValueError(f"Unsupported format: {loadpath}")
+    
+    # G = self.scale_topology_bandwidth(G, 0.5)
     self.G = G
-    vprint(f"   - 节点数: {len(G.nodes())}, 边数: {len(G.edges())}")
+    vprint(f"[Graph] Loaded Fixed Topo: {loadpath} | Nodes: {len(G.nodes())}")
     return G
 
-  def generate_topology(self) -> nx.Graph:
-    """生成一个随机的BA拓扑，并赋予链路属性。"""
-    num_nodes = random.randint(*self.num_nodes_range)
-    
-    # 1. 生成 BA 无标度网络
-    G = nx.barabasi_albert_graph(n=num_nodes, m=self.m_ba)
+  def scale_topology_bandwidth(self, G: nx.Graph, scale: float):
+    """
+    等比例缩放图中所有边的带宽。
 
+    Args:
+      G (nx.Graph): NetworkX 图对象 (会被原地修改)
+      scale (float): 缩放比例 (例如 1.5 代表增加 50%，0.8 代表减少 20%)
+
+    Returns:
+      nx.Graph: 修改后的图对象
+    """
+    # 遍历图中所有的边
+    # data=True 表示我们会获取边的属性字典
+    for u, v, data in G.edges(data=True):
+
+      # 检查这条边是否有带宽属性
+      # 获取旧带宽
+      old_bw = data['bandwidth']
+      # 计算新带宽
+      new_bw = old_bw * scale
+      # 更新属性
+      data['capacity'] = new_bw
+      data['bandwidth'] = new_bw
+
+    # vprint(f"[Graph] 已将拓扑带宽缩放 {scale} 倍 (Key: {bw_key})")
+    return G
+
+  def refresh_dynamic_state(self, G, difficulty=1.0):
+    """
+    [核心逻辑] 模拟网络动态变化
+    1. 随机生成背景流量 (Utilization)
+    2. 基于 M/M/1 模型推导 Delay 和 Loss
+    """
     for u, v in G.edges():
-      # 随机但合理的链路属性
-      bw = random.uniform(self.min_bw, self.max_bw)
-      delay = random.uniform(self.min_delay, self.max_delay)
-      loss = random.uniform(self.min_loss, self.max_loss)
-      rtt = 2*(delay+1500*8/(bw*1000))
 
-      # 存储属性
-      G[u][v]['loss'] = loss
-      G[u][v]['delay'] = delay
-      G[u][v]['bandwidth'] = bw
-      G[u][v]['utilization'] = 0.0    # 假设可用容量是带宽的80%
-      G[u][v]['capacity'] = bw * 0.8  # 存储容量（例如，基于带宽或QCI等级）
-      G[u][v]['queue_size'] = rtt*bw*1000//(1500*8)
+      for u, v in G.edges():
+        if difficulty < 0.3:
+          # [简单模式] 几乎无拥塞，Agent 只需要学会连通性
+          utilization = random.uniform(0.0, 0.1)
+        elif difficulty < 0.7:
+          # [中等模式] 偶尔有拥塞
+          utilization = random.uniform(0.2, 0.5)
+        else:
+          # [困难模式] 真实的 Beta 分布，包含严重拥塞
+          utilization = random.betavariate(2, 5)
+            
+      G[u][v]['utilization'] = utilization
+      # 获取物理属性
+      capacity = float(G[u][v].get('capacity', 100.0)) # Mbps
+      base_delay = float(G[u][v].get('delay', 5.0))    # ms (物理传播延迟)
       
-    self.G = G
+      # 2. M/M/1 推导排队延迟 (Queueing Delay)
+      # Delay_total = Delay_prop + Delay_queue
+      # Delay_queue = (1 / (µ - λ)) - (1/µ)  => 简化为  Base / (1 - rho)
+      # 为了防止除以0，rho 上限设为 0.99
+      rho = min(utilization, 0.99)
+      
+      # 估算排队因子 (Scaling Factor)
+      # 假设当利用率 0% 时，延迟 = base_delay
+      # 当利用率 90% 时，延迟会显著增加
+      # 这里使用一个简化的排队公式:
+      queue_delay = (10.0 * rho) / (1.0 - rho) # 10.0 是排队系数
+      
+      total_delay = base_delay + queue_delay
+      
+      # 3. M/M/1/K 推导丢包率 (Packet Loss)
+      # 假设队列长度有限 (K)，根据利用率估算丢包概率
+      # 当利用率低时，丢包几乎为0；利用率接近1时，丢包指数上升
+      if rho < 0.8:
+        loss = 0.0
+      else:
+        loss = 1.0 * math.pow((rho - 0.8) / 0.2, 2)
+          
+      # 更新图属性 (供 Agent 观测)
+      G[u][v]['delay'] = total_delay
+      G[u][v]['loss' ] = loss
+      
+      # 更新带宽 (剩余带宽)
+      # available_bw = capacity * (1 - rho)
+      G[u][v]['bandwidth'] = capacity * (1.0 - rho)
+
     return G
 
   def select_source_destination(self) -> tuple[int, int]:
@@ -111,18 +161,24 @@ class TopologyGenerator:
         return s, d
 
 def get_pyg_data_from_nx(G: nx.Graph, S_node: int, D_node: int, config):
-  # 1. 预计算图结构特征
+  # --- 1. 性能优化：结构特征缓存 ---
   try:
-    # 对于小图(10-30节点)，这些计算非常快
+    if 'betweenness' not in G.graph:
+      G.graph['betweenness'] = nx.betweenness_centrality(G)
+    if 'pagerank' not in G.graph:
+      G.graph['pagerank'] = nx.pagerank(G, alpha=0.85)
+    if 'clustering' not in G.graph:
+      G.graph['clustering'] = nx.clustering(G)
+      
+    betweenness = G.graph['betweenness']
+    pagerank = G.graph['pagerank']
+    clustering = G.graph['clustering']
+  except:
     betweenness = nx.betweenness_centrality(G)
     pagerank = nx.pagerank(G, alpha=0.85)
     clustering = nx.clustering(G)
-  except:
-    # 容错处理
-    betweenness = {n: 0.0 for n in G.nodes()}
-    clustering = {n: 0.0 for n in G.nodes()}  
-    pagerank = {n: 0.0 for n in G.nodes()}
 
+  # --- 2. 边特征处理 ---
   source_nodes, target_nodes = [], []
   edge_attrs_raw = []
   
@@ -130,11 +186,10 @@ def get_pyg_data_from_nx(G: nx.Graph, S_node: int, D_node: int, config):
     source_nodes.extend([u, v])
     target_nodes.extend([v, u])
     
-    # --- [关键修改] 边特征扩展为 4 维 ---
-    d = data.get('delay', 1.0)
-    l = data.get('loss', 0.0)       # 丢包率
-    b = data.get('bandwidth', 1000.0)
-    u_load = data.get('utilization', 0.0) # 利用率 (预训练默认为0)
+    d = float(data.get('delay', 1.0))
+    l = float(data.get('loss', 0.0))
+    b = float(data.get('bandwidth', 100.0))
+    u_load = float(data.get('utilization', 0.0))
     avail_bw = b * (1.0 - u_load)
 
     attr = [d, b, l, u_load, avail_bw]
@@ -145,52 +200,55 @@ def get_pyg_data_from_nx(G: nx.Graph, S_node: int, D_node: int, config):
 
   # 归一化
   edge_attr = torch.zeros_like(edge_attr_tensor)
-  # Delay
+  # 假设 config 中有这些 MAX/MIN 常量，或者直接写死数值
+  # 这里为了稳健，加上 float() 强转
   edge_attr[:, 0] = (edge_attr_tensor[:, 0] - config.MIN_DELAY) / (config.MAX_DELAY - config.MIN_DELAY + 1e-6)
-
-  # Bandwidth & Available_Bandwidth
   edge_attr[:, 1] = (edge_attr_tensor[:, 1] - config.MIN_BW) / (config.MAX_BW - config.MIN_BW + 1e-6)
+  edge_attr[:, 2] = edge_attr_tensor[:, 2] / 5.0 # Loss (假设最大5%)
+  edge_attr[:, 3] = edge_attr_tensor[:, 3] # Util (0-1)
   edge_attr[:, 4] = (edge_attr_tensor[:, 4] - config.MIN_BW) / (config.MAX_BW - config.MIN_BW + 1e-6)
-
-  # Loss & Utilization (本身就是 0-1)
-  edge_attr[:, 2] = edge_attr_tensor[:, 2]
-  edge_attr[:, 3] = edge_attr_tensor[:, 3]
-  
   edge_attr = edge_attr.clamp(0.0, 1.0)
 
-  # 距离计算
+  # --- 3. 节点特征处理 ---
   try:
     dist_from_s = nx.single_source_shortest_path_length(G, S_node)
   except:
     dist_from_s = {n: 999 for n in G.nodes()}
-
+    
   try:
     dist_to_d = nx.single_source_shortest_path_length(G, D_node)
   except:
     dist_to_d = {n: 999 for n in G.nodes()}
 
   num_nodes = G.number_of_nodes()
-  node_features_list = []
-  deg_max = config.MAX_NODES_NUM # 使用配置中的最大节点数作为归一化分母
+  node_features_list = [] # [FIX] 必须初始化这个列表
+  deg_max = config.MAX_NODES_NUM 
 
   for i in range(num_nodes):
-    # --- [关键修改] 节点特征扩展为 8 维 ---
+    node_data = G.nodes[i] # [OK] 正确获取节点属性
+    
     deg = G.degree(i) / (deg_max + 1e-6)
     is_s = 1.0 if i == S_node else 0.0
     is_d = 1.0 if i == D_node else 0.0
-    # 距离特征
+    
     ds = 1.0 * min(dist_from_s.get(i, 999), deg_max) / deg_max 
     dd = 1.0 * min(dist_to_d.get(i, 999), deg_max) / deg_max
-    # 结构特征
+    
     betw = betweenness.get(i, 0.0)
     clus = clustering.get(i, 0.0)
-    pr = pagerank.get(i, 0.0) * 10.0 # 适当放大 PageRank
+    pr = pagerank.get(i, 0.0) * 10.0
     
-    bo= data.get('buffer_occupancy', 0)
-    pd= data.get('proc_delay', 0)
+    bo = float(node_data.get('buffer_occupancy', 0.0))
+    pd = float(node_data.get('proc_delay', 0.0))
 
-    node_features_list.append([deg, is_s, is_d, ds, dd, betw, clus, pr, bo, pd])
-
+    # 基础特征 (10维)
+    basic_feat = [deg, is_s, is_d, ds, dd, betw, clus, pr, bo, pd]
+    
+    # [FIX] 必须把特征加到列表里！
+    node_features_list.append(basic_feat)
+    
+  # [FIX] 在循环外将列表转为 Tensor
   x = torch.tensor(node_features_list, dtype=torch.float)
+  
   return Data(x=x, edge_index=edge_index, edge_attr=edge_attr), G
 

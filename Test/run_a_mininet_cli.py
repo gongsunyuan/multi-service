@@ -23,15 +23,13 @@ def function_test():
   topo_parser=TopoParaser()
   args = topo_parser.parse_args()
 
-  FLOW_DURATION = 30 
-  N_PACKETS_TO_CAPTURE = 30
   flow_gen = TopologyGenerator()
-  load_graph_path = "TopoGraph/nsfnet.graphml"
+  load_graph_path = "nsfnet.graphml"
   g = flow_gen.load_topology(load_graph_path)
 
   with get_a_mininet(g, remote_port=args.remote_port) as net: 
     for u, v in g.edges():
-      print(f"[{u:.2d}, {v:.2d}] bandwidth={g[u][v]['bandwidth']} delay={g[u][v]['delay']}")
+      print(f"[{u}, {v}] bandwidth={g[u][v]['bandwidth']} delay={g[u][v]['delay']}")
     install_path_rules(net, [0, 1])
     CLI(net)
 

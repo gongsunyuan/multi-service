@@ -1,0 +1,24 @@
+# --- Core Scientific Stack ---
+numpy>=1.21.0
+scipy>=1.7.0
+networkx>=2.6.0
+tqdm>=4.64.0
+
+# --- Deep Learning (PyTorch & PyG) ---
+# Note: For specific CUDA versions, visit pytorch.org
+torch>=1.12.0
+torch-geometric>=2.3.0
+
+# Dependencies for Graph Neural Networks (Optional but recommended for GATConv)
+# These often require matching versions with torch. 
+# If pip fails, install them manually from https://data.pyg.org/whl/
+# torch-scatter
+# torch-sparse
+# torch-cluster
+# torch-spline-conv
+
+# --- Networking & Packet Manipulation ---
+scapy>=2.5.0
+
+# --- Video QoE Standard (Official Git Repo) ---
+itu-p1203 @ git+https://github.com/itu-p1203/itu-p1203.git

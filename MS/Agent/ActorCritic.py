@@ -51,13 +51,13 @@ class ActorCritic(nn.Module):
     # ======================================================================
     
     if pretrained_lstm_path:
-      vprint(f"[ms] 正在加载 [LSTM Body] 权重来源: {pretrained_lstm_path}")
+      vprint(f"[agent] 正在加载 [LSTM Body] 权重来源: {pretrained_lstm_path}")
       # 加载 jstm 模型
       lstm_state = torch.load(pretrained_lstm_path, map_location='cpu')
       self.lstm_body.load_state_dict(lstm_state)
         
     if pretrained_gnn_path:
-      vprint(f"[ms] 正在加载 [GNN Body] 权重来源: {pretrained_gnn_path}")
+      vprint(f"[agent] 正在加载 [GNN Body] 权重来源: {pretrained_gnn_path}")
       gnn_state = torch.load(pretrained_gnn_path, map_location='cpu')
       
       # 移除多卡训练时 DataParallel 自动添加的 'module.' 前缀

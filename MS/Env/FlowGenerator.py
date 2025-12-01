@@ -9,18 +9,21 @@ class FlowType(Enum):
 # 存储每种流类型的 iperf 参数和 QoE 严格要求 (用于 Reward 函数)
 FLOW_PROFILES = {
   FlowType.VOIP: {
+    'type'    : 'VOIP',
     'protocol': 'UDP',       # 改名为 protocol 更通用
     'ditg_preset': 'VoIP -x G.711.2', # D-ITG 专用参数
     'qoe_critical': {'max_delay': 150, 'max_jitter': 50}, # 设置悬崖奖励
     'reward_fn': 'E-Model'
   },
   FlowType.STREAMING: {
+    'type'    : 'STREAMING',
     'protocol': 'TCP',
     'ditg_manual': '-B U 500 1000 C 100 -c 1460 -C 1000',        # 视频流手动参数 
     'qoe_critical': {'min_bandwidth': 5, 'max_loss_rate': 1e-6}, # Mbps
     'reward_fn': '3GPP-QCI6'
   },
   FlowType.GAMING: {
+    'type'    : 'GAMING',
     'protocol': 'UDP',
     'ditg_preset': 'CSa',
     'qoe_critical': {'max_delay': 50, 'max_jitter': 30}, # ms
