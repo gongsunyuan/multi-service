@@ -34,9 +34,9 @@ class Config:
   MAX_DELAY = 200
   MAX_NODES_NUM = 14
   # --- Training Control ---
-  EPOCH = 20              # 理论训练极快，可以多跑几轮
-  EPISODES_PER_TOPO = 20000 # 每个拓扑状态下多练几次
-  BATCH_SIZE = 32         # 纯计算模式下，Batch 可以大一点
+  EPOCH = 200              # 理论训练极快，可以多跑几轮
+  EPISODES_PER_TOPO = 2000 # 每个拓扑状态下多练几次
+  BATCH_SIZE = 64         # 纯计算模式下，Batch 可以大一点
   
   # --- Hyperparameters ---
   LR = 1e-5               # 理论环境比较干净，学习率可以稍大
@@ -58,7 +58,7 @@ class Config:
   # --- Environment ---
   N_PACKETS = 30
   START_TIME = datetime.now().strftime("%Y-%m-%d-%H:%M")
-  LOG_FILE_PATH=f"train-log/a2c/{START_TIME}.log"
+  LOG_FILE_PATH=f"train_log/a2c/{START_TIME}.log"
   DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 CONFIG = Config()
@@ -172,24 +172,13 @@ def run_mm1_training():
     pretrained_gnn_path=CONFIG.PRETRAINED_GNN
   ).to(CONFIG.DEVICE)
 
-  MM1_CHECKPOINT = "checkpoints/a2c/checkpoint.pth" # 确保文件名对
-  if os.path.exists(MM1_CHECKPOINT):
-    vprint(f"[Transfer] Loading pre-trained MM1 agent from: {MM1_CHECKPOINT}")
-    state_dict = torch.load(MM1_CHECKPOINT, map_location=CONFIG.DEVICE)
-    agent.load_state_dict(state_dict)
-  else:
-    vprint("[Warning] MM1 Checkpoint not found! Starting from scratch.")
-
-  # -------------------------------------------------------------
-  # [Step B] 核心操作：解冻 GNN Body (允许适应新地图)
-  # -------------------------------------------------------------
-  vprint("[Fine-tuning] Unfreezing GNN Body for NSFNet adaptation...")
-  for param in agent.gnn_model.node_embed.parameters():
-    param.requires_grad = True
-  for param in agent.gnn_model.convs.parameters():
-    param.requires_grad = True
-  for param in agent.gnn_model.layer_norms.parameters():
-    param.requires_grad = True
+  # MM1_CHECKPOINT = "checkpoints/a2c/checkpoint.pth" # 确保文件名对
+  # if os.path.exists(MM1_CHECKPOINT):
+  #   vprint(f"[Transfer] Loading pre-trained MM1 agent from: {MM1_CHECKPOINT}")
+  #   state_dict = torch.load(MM1_CHECKPOINT, map_location=CONFIG.DEVICE)
+  #   agent.load_state_dict(state_dict)
+  # else:
+  #   vprint("[Warning] MM1 Checkpoint not found! Starting from scratch.")
       
   agent.train()
   optimizer = optim.Adam(filter(lambda p: p.requires_grad, agent.parameters()), lr=CONFIG.LR)
@@ -202,6 +191,7 @@ def run_mm1_training():
   
   stats_reward = []
   total_steps = 0
+  update_count = 0
   
   # 只需要一个巨大的进度条
   total_iterations = CONFIG.EPOCH * CONFIG.EPISODES_PER_TOPO
@@ -254,7 +244,7 @@ def run_mm1_training():
       if success:
         reward = calculate_theoretical_reward(current_G, path, flow_type)
       elif path_complete:
-        reward = calculate_theoretical_reward(current_G, path, flow_type)-1.5
+        reward = calculate_theoretical_reward(current_G, path, flow_type)-1
         # vprint(f"[Penalty] agent find path failed ! reward = {reward}")
       else:
         vprint(f"[Error] failed completely !")
@@ -276,6 +266,10 @@ def run_mm1_training():
         torch.nn.utils.clip_grad_norm_(agent.parameters(), CONFIG.MAX_GRAD_NORM)
         optimizer.step()
         optimizer.zero_grad()
+        update_count += 1 # 计数 +1
+        CKPT_DIR = "checkpoints/a2c/"
+        ckpt_path = os.path.join(CKPT_DIR, f"checkpoint_{update_count}.pth")
+        torch.save(agent.state_dict(), ckpt_path)
         vprint(f"[train] avg reward: {avg_r:.2f}")
           
       total_steps += 1

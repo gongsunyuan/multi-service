@@ -6,23 +6,8 @@ import math
 from torch_geometric.data import Data
 from MS.Env.VerbosePrint import vprint
 
-class Default_config:
-  # 默认拓扑生成参数
-  M_BA = 2
-  MIN_BW = 20.0
-  MAX_BW = 200.0
-  MIN_LOSS = 0.0
-  MAX_LOSS = 3.0
-  MIN_DELAY = 1.0
-  MAX_DELAY = 200.0
-  MIN_NODES_NUM = 50
-  MAX_NODES_NUM = 100
-
-
-DEFAULT_CONFIG = Default_config()
-
 class TopologyGenerator:
-  def __init__(self, config=DEFAULT_CONFIG):
+  def __init__(self):
     pass
 
   def load_topology(self, filename: str) -> nx.Graph:
@@ -59,7 +44,7 @@ class TopologyGenerator:
     else:
       raise ValueError(f"Unsupported format: {loadpath}")
     
-    # G = self.scale_topology_bandwidth(G, 0.5)
+    G = self.scale_topology_bandwidth(G, 0.15)
     self.G = G
     vprint(f"[Graph] Loaded Fixed Topo: {loadpath} | Nodes: {len(G.nodes())}")
     return G

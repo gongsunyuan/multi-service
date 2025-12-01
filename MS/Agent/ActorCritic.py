@@ -101,7 +101,7 @@ class ActorCritic(nn.Module):
     #   nn.Linear(gnn_hidden_dim * 2 + gnn_edge_dim, gnn_hidden_dim),
     #   nn.ReLU(),
     #   nn.Linear(gnn_hidden_dim, 1))
-    # vprint("✅ GNN 预训练头已替换为随机初始化的 Actor 头。")
+    # vprint("GNN 预训练头已替换为随机初始化的 Actor 头。")
 
     # [新头 3] 价值评估头 (Critic Head)
     # 评估 V(s)，输入是流摘要和图摘要的拼接
@@ -129,7 +129,7 @@ class ActorCritic(nn.Module):
     # 注意：self.gnn_model.edge_output_head (Actor头) 仍然是可训练的
     
     vprint("[agent] LSTM Body 和 GNN Body 已冻结。")
-    vprint("[agent] FiLM 生成器、Actor 头、Critic 头 保持可训练。")
+    vprint("[agent] FiLM 生成器、 Actor 头、 Critic 头 保持可训练。")
 
 
   def forward(self, flow_fingerprint, graph_data):
