@@ -12,7 +12,6 @@ from tqdm import tqdm
 from datetime import datetime
 
 # === Import Custom Modules ===
-# 注意：这里不导入 Mininet 相关的控制器，只导入计算逻辑
 from MS.Env import VerbosePrint as vp
 from MS.Agent.ActorCritic import ActorCritic
 from MS.Env.FlowGenerator import FlowGenerator, FlowType, FLOW_PROFILES
@@ -34,16 +33,16 @@ class Config:
   MIN_DELAY = 1.0
   MAX_DELAY = 200.0
   MAX_NODES_NUM = 14
+
   # --- Training Control ---
-  EPOCH = 50               # 增加 Epoch 数量
-  EPISODES_PER_TOPO = 80   # 减少 Episodes Per Topo (总步数 N_total = 4000)
-  BATCH_SIZE = 32          # [FIX] 纯计算模式下 Batch Size 设为 32
+  EPOCH = 500               # 增加 Epoch 数量
+  EPISODES_PER_TOPO = 800   # 减少 Episodes Per Topo (总步数 N_total = 4000)
+  BATCH_SIZE = 64          # [FIX] 纯计算模式下 Batch Size 设为 32
   
   # --- Hyperparameters ---
   # [FIX] 初始 LR 调整为正常 Head LR
   LR = 1e-4                
   GAMMA = 0.99
-  # [FIX] 初始探索权重，用于 P1
   ENTROPY_COEF = 0.05      
   MAX_GRAD_NORM = 0.5
   CRITIC_LOSS_COEF = 0.5
@@ -185,39 +184,42 @@ def run_mm1_training():
   # -------------------------------------------------------------
   
   # 1. 加载 MM1 Checkpoint (如果存在，继承策略)
-  MM1_CHECKPOINT = "./trained_model/trained_agent_mm1.pth" 
-  if os.path.exists(MM1_CHECKPOINT):
+  MM1_CHECKPOINT = None 
+  # MM1_CHECKPOINT = "./trained_model/trained_agent_mm1.pth" 
+  if not MM1_CHECKPOINT == None :
+    if os.path.exists(MM1_CHECKPOINT):
       vprint(f"[Transfer] Loading MM1 agent checkpoint: {MM1_CHECKPOINT}")
       state_dict = torch.load(MM1_CHECKPOINT, map_location=CONFIG.DEVICE)
       agent.load_state_dict(state_dict)
-  else:
+    else:
       vprint("[Warning] MM1 Checkpoint not found! Starting from base GNN/LSTM.")
 
   # 2. 解冻 GNN Body (允许适应新地图)
   vprint("[Config] Unfreezing GNN Body and setting up Differential LR...")
   
   param_groups = [
-      # GNN Backbone (保护性极低 LR)
-      {'params': agent.gnn_model.node_embed.parameters(), 'lr': LR_GNN_BODY_P1, 'name': 'GNN_Embed'},
-      {'params': agent.gnn_model.convs.parameters(), 'lr': LR_GNN_BODY_P1, 'name': 'GNN_Convs'},
-      {'params': agent.gnn_model.layer_norms.parameters(), 'lr': LR_GNN_BODY_P1, 'name': 'GNN_Norms'},
-      
-      # Heads and FiLM Adapter (初始高学习率)
-      {'params': agent.film_generator.parameters(), 'lr': LR_HEADS_P1, 'name': 'FiLM_Gen'},
-      {'params': agent.critic_head.parameters(), 'lr': LR_HEADS_P1, 'name': 'Critic_Head'},
-      {'params': agent.gnn_model.edge_output_head.parameters(), 'lr': LR_HEADS_P1, 'name': 'Actor_Head'}
+    # GNN Backbone (保护性极低 LR)
+    {'params': agent.gnn_model.node_embed.parameters(), 'lr': LR_GNN_BODY_P1, 'name': 'GNN_Embed'},
+    {'params': agent.gnn_model.convs.parameters(), 'lr': LR_GNN_BODY_P1, 'name': 'GNN_Convs'},
+    {'params': agent.gnn_model.layer_norms.parameters(), 'lr': LR_GNN_BODY_P1, 'name': 'GNN_Norms'},
+    
+    # Heads and FiLM Adapter (初始高学习率)
+    {'params': agent.film_generator.parameters(), 'lr': LR_HEADS_P1, 'name': 'FiLM_Gen'},
+    {'params': agent.critic_head.parameters(), 'lr': LR_HEADS_P1, 'name': 'Critic_Head'},
+    {'params': agent.gnn_model.edge_output_head.parameters(), 'lr': LR_HEADS_P1, 'name': 'Actor_Head'}
   ]
 
   # 3. 必须解冻 GNN Body 的参数，才能让优化器看到它们
   for param in agent.gnn_model.parameters():
-      param.requires_grad = True
+    param.requires_grad = True
   for param in agent.lstm_body.parameters():
-      param.requires_grad = False
+    param.requires_grad = False
   
   # 4. 优化器必须在解冻之后初始化
   optimizer = optim.Adam(param_groups)
-  
-  topo_gen = TopologyGenerator(CONFIG) 
+  scheduler = None
+
+  topo_gen = TopologyGenerator() 
   flow_gen = FlowGenerator()
   base_G_nx = topo_gen.load_topology("nsfnet.graphml")
   
@@ -249,16 +251,23 @@ def run_mm1_training():
       
       # [Trigger 1: 40%] PHASE 2: 稳定学习率，消除震荡
       if progress >= 0.4 and current_head_lr == LR_HEADS_P1:
-          current_head_lr = LR_HEADS_P2
-          for group in optimizer.param_groups:
-              if group['name'] in ['FiLM_Gen', 'Critic_Head', 'Actor_Head']:
-                  group['lr'] = LR_HEADS_P2
-                  vprint(f"[Scheduler] PHASE 2: Heads LR lowered to {LR_HEADS_P2:.1e}")
+        current_head_lr = LR_HEADS_P2
+        for group in optimizer.param_groups:
+          if group['name'] in ['FiLM_Gen', 'Critic_Head', 'Actor_Head']:
+            group['lr'] = LR_HEADS_P2
+            vprint(f"[Scheduler] PHASE 2: Heads LR lowered to {LR_HEADS_P2:.1e}")
 
       # [Trigger 2: 80%] PHASE 3: 降低探索权重，固化策略
       if progress >= 0.8 and current_entropy_coef == ENTROPY_P1:
-          current_entropy_coef = ENTROPY_P3
-          vprint(f"[Scheduler] PHASE 3: Entropy Coef lowered to {ENTROPY_P3:.3f}")
+        RESTART_PEAK_LR = 5e-5
+        for group in optimizer.param_groups:
+          if group['name'] in ['FiLM_Gen', 'Critic_Head', 'Actor_Head']:
+            group['lr'] = RESTART_PEAK_LR
+        current_entropy_coef = ENTROPY_P3
+        scheduler = torch.optimlr_scheduler.CosineAnnealingWarmRestarts(
+          optimizer, T_0=200, T_mult=1, eta_min=1e-8
+        )
+        vprint(f"[Scheduler] PHASE 3: Entropy Coef lowered to {ENTROPY_P3:.3f}")
           
       # -------------------------------------------------------------
 
@@ -304,28 +313,27 @@ def run_mm1_training():
       
       if path_complete:
         # [FIX] 使用 current_G 计算 Reward
-        base_reward = calculate_theoretical_reward(current_G, path, flow_type)
+        base_reward = calculate_theoretical_reward(current_G, path, flow_profile)
         
         if ai_success:
-            # Agent 独立完成，全额奖励
-            reward = base_reward
+          # Agent 独立完成，全额奖励
+          reward = base_reward
         else:
-            # Dijkstra 兜底完成，惩罚 -0.6
-            reward = base_reward - 0.6
-            # vprint(f"[Penalty] Dijkstra rescue. Base R:{base_reward:.2f} -> R:{reward:.2f}")
-
+          # Dijkstra 兜底完成，惩罚 -0.6
+          reward = base_reward - 0.6
+          # vprint(f"[Penalty] Dijkstra rescue. Base R:{base_reward:.2f} -> R:{reward:.2f}")
       else:
         # 彻底失败 (物理断连)，惩罚最重
-        reward = -2.0 # 使用 -2.0 避免 tanh 饱和，但给明确负信号
+        reward = -2.0 
         
       # 6. Optimization
       reward_tensor = torch.tensor([reward], device=CONFIG.DEVICE)
-      reward_norm = torch.tanh(reward_tensor / 5.0) 
       
-      advantage = reward_norm - value_est.detach()
+      advantage = reward_tensor - value_est.detach()
       actor_loss = -log_prob_sum * advantage
-      critic_loss = nn.MSELoss()(value_est, reward_norm)
+      critic_loss = nn.MSELoss()(value_est, reward_tensor)
       
+      entropy = dist.entropy().mean()
       # [FIX] 使用动态的 Entropy Coef
       total_loss = actor_loss + (CONFIG.CRITIC_LOSS_COEF * critic_loss) - (current_entropy_coef * entropy)
       
@@ -335,13 +343,12 @@ def run_mm1_training():
         torch.nn.utils.clip_grad_norm_(agent.parameters(), CONFIG.MAX_GRAD_NORM)
         optimizer.step()
         optimizer.zero_grad()
+        if scheduler is not None: scheduler.step()
         update_count += 1
         
         # Checkpoint saving logic
-        CKPT_DIR = os.path.join(CONFIG.MODEL_DIR, "checkpoints_mm1")
+        CKPT_DIR = os.path.join(CONFIG.MODEL_DIR, "checkpoints/a2c_mm1")
         os.makedirs(CKPT_DIR, exist_ok=True)
-        ckpt_path = os.path.join(CKPT_DIR, f"checkpoint_{update_count}.pth")
-        torch.save(agent.state_dict(), ckpt_path)
         vprint(f"[train] avg reward: {avg_r:.2f} | Updates: {update_count}")
           
       total_steps += 1
@@ -349,8 +356,9 @@ def run_mm1_training():
       avg_r = np.mean(stats_reward[-50:])
     
       # Save final checkpoint
-      if len(stats_reward) % 500 == 0:
-        torch.save(agent.state_dict(), CONFIG.SAVE_PATH)
+      if len(stats_reward) % 5000 == 0:
+        ckpt_path = os.path.join(CKPT_DIR, f"checkpoint_{update_count}.pth")
+        torch.save(agent.state_dict(), ckpt_path)
           
     except Exception as e:
       vprint(f"[Error] Step failed: {e}")
