@@ -278,12 +278,16 @@ class GraphTopo(Topo):
       self.addLink(f'{test_str}h{node_id}', f'{test_str}s{node_id}', delay='0ms')
 
     for u, v, data in blueprint_g.edges(data=True):
-      bw = data.get('bandwidth', 1000)
+      bw = data.get('bandwidth', 200)
       delay = f"{data.get('delay', 1)}ms"
       loss = data.get('loss', 0)
-      q_limit = data.get('queue_size', 100)
-      r2q = bw*1e6/30000/8
+      q_limit = data.get('queue_size', 500)
+      rate_bytes = bw * 1000000 / 8
+      if bw < 5: loss = 5.0
+      # 2. 计算最佳 r2q (确保 quantum ≈ 1500)
+      r2q = int(max(1, rate_bytes / 1500))
       # 这里沿用 Mininet 构造函数中设置的 r2q
+      vprint(f"Adding Link {u}-{v} with bw={bw}Mbps")
       self.addLink(f'{test_str}s{u}', f'{test_str}s{v}', cls=TCLink, bw=bw, delay=delay, loss=loss, r2q = r2q, use_htb=True, max_queue_size=q_limit) 
 
 # mininet 启动
@@ -306,6 +310,13 @@ def get_a_mininet(g: nx.Graph, is_test=False, remote_port=None):
     autoStaticArp=True)
 
   try:
+    vprint("[Mini] Disabling TCP Offload (TSO/GSO/GRO) on all switches...")
+    for sw in net.switches:
+      for intf in sw.intfList():
+        if intf.name != 'lo':
+          # 使用 ethtool 关闭卸载
+          sw.cmd(f"ethtool -K {intf.name} tso off gso off gro off > /dev/null 2>&1")
+          
     net.start()
     yield net
   finally:
@@ -589,7 +600,7 @@ def verify_cleanup(net, cookie=0xA000):
     return False
 
 # 下发流表规则
-def install_path_rules(net, path_nodes, cookie=0x1234):
+def install_path_rules(net, path_nodes, cookie=0x1234, do_ping=True):
   """
   将逻辑路径转化为 OpenFlow 流表规则并下发。
   支持双向联通 (TCP/ARP 需要回路)，或者仅单向 (UDP)。
@@ -673,12 +684,13 @@ def install_path_rules(net, path_nodes, cookie=0x1234):
       f'ovs-ofctl -O OpenFlow13 add-flow {sw_name} '
       f'"cookie={cookie},priority=100,dl_type=0x0800,nw_dst={src_ip},actions=output:{rev_port}"')
     switch.cmd(cmd_rev)
-
-  loss = net.ping([h_src, h_dst], timeout=4)
-  if loss > 50:
-    vprint(f"[Warning] High ping loss ({loss}%) - path might be broken")
-  else:
-    vprint(f"[Mini] install path success !")
+    
+  if do_ping:
+    loss = net.ping([h_src, h_dst], timeout=0.1)
+    if loss > 50:
+      vprint(f"[Warning] High ping loss ({loss}%) - path might be broken")
+    else:
+      vprint(f"[Mini] install path success !")
 
 # 根据gnn输出的 logits来生成路径--贪婪/概率选择：
 # 替换 MS/Env/MininetController.py 中的 sample_path 函数
@@ -858,12 +870,12 @@ class NetworkMonitor:
         
     return stats
 
-  def sync_state_to_graph(self, G: nx.Graph):
+  def sync_state_to_graph(self, G: nx.Graph, duration = 0.05):
     """
     [主动采样模式]
     休眠一小段时间，计算精确的瞬时速率。
     """
-    SAMPLE_WINDOW = 0.05 # 采样窗口 50ms
+    SAMPLE_WINDOW = duration # 采样窗口 50ms
     
     # 1. 第一次快照
     snapshot1 = self._get_all_interfaces_stats(G)
@@ -895,7 +907,7 @@ class NetworkMonitor:
       
       # 写入图
       data['utilization'] = util
-      
+      data['measured_speed'] = speed_mbps
       # --- B. 获取瞬时队列 (Buffer) ---
       # 队列长度只需要读一次（取最新状态）
       # 解析 tc 输出
@@ -923,5 +935,3 @@ class NetworkMonitor:
       node_u['proc_delay'] = 0.3 * node_u.get('proc_delay', 0) + 0.7 * proc_delay
 
     return G
-
-

@@ -74,7 +74,15 @@ def run_baseline_test():
     pretrained_lstm_path=CONFIG.PRETRAINED_LSTM,
     pretrained_gnn_path=CONFIG.PRETRAINED_GNN
   ).to(CONFIG.DEVICE)
-  
+
+  MM1_CHECKPOINT = "./trained_model/trained_agent_mm1.pth" 
+  if not MM1_CHECKPOINT == None :
+    if os.path.exists(MM1_CHECKPOINT):
+      print(f"[Transfer] Loading MM1 agent checkpoint: {MM1_CHECKPOINT}")
+      state_dict = torch.load(MM1_CHECKPOINT, map_location=CONFIG.DEVICE)
+      agent.load_state_dict(state_dict)
+    else:
+      print("[Warning] MM1 Checkpoint not found! Starting from base GNN/LSTM.")
   # 切换到评估模式
   agent.eval()
   

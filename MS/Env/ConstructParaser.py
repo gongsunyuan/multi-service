@@ -19,6 +19,18 @@ class TopoParaser(ArgumentParser):
       default="",
       help="指定使用gpu-'0,1,2,3'"
     )
+    self.add_argument(
+      '--yaml', 
+      type=str, 
+      default='./config.yaml', 
+      help='Path to the YAML configuration file (default: ./config.yaml)'
+    )
+    self.add_argumetn(
+      '--checkpoint',
+      type=str,
+      default=None,
+      help='Path to the training checkpoint file'
+    )
     
 
 

@@ -1,50 +1,210 @@
-from enum import Enum
 import random
+import networkx as nx
+import time
+import heapq
+from enum import Enum
 
+# === 配置与定义 ===
 class FlowType(Enum):
-  VOIP = 1      # 实时会话
-  STREAMING = 2 # 流媒体
-  GAMING = 3    # 游戏
+  VOIP = 1
+  STREAMING = 2
+  GAMING = 3
 
-# 存储每种流类型的 iperf 参数和 QoE 严格要求 (用于 Reward 函数)
 FLOW_PROFILES = {
   FlowType.VOIP: {
-    'type'    : 'VOIP',
-    'protocol': 'UDP',       # 改名为 protocol 更通用
-    'ditg_preset': 'VoIP -x G.711.2', # D-ITG 专用参数
-    'qoe_critical': {'max_delay': 150, 'max_jitter': 50}, # 设置悬崖奖励
-    'reward_fn': 'E-Model'
+    'type': 'VOIP', 'protocol': 'UDP', 'ditg_preset': 'VoIP -x G.711.2',
+    'qoe_critical': {'max_delay': 150, 'max_jitter': 50}, 'reward_fn': 'E-Model'
   },
   FlowType.STREAMING: {
-    'type'    : 'STREAMING',
-    'protocol': 'TCP',
-    'ditg_manual': '-B U 500 1000 C 100 -c 1460 -C 1000',        # 视频流手动参数 
-    'qoe_critical': {'min_bandwidth': 5, 'max_loss_rate': 1e-6}, # Mbps
-    'reward_fn': '3GPP-QCI6'
+    'type': 'STREAMING', 'protocol': 'TCP',
+    'ditg_manual': '-B U 500 1000 C 100 -c 1460 -C 1000',
+    'qoe_critical': {'min_bandwidth': 5, 'max_loss_rate': 1e-6}, 'reward_fn': '3GPP-QCI6'
   },
   FlowType.GAMING: {
-    'type'    : 'GAMING',
-    'protocol': 'UDP',
-    'ditg_preset': 'CSa',
-    'qoe_critical': {'max_delay': 50, 'max_jitter': 30}, # ms
-    'reward_fn': '3GPP-QCI80'
-  }}
+    'type': 'GAMING', 'protocol': 'UDP', 'ditg_preset': 'CSa',
+    'qoe_critical': {'max_delay': 50, 'max_jitter': 30}, 'reward_fn': '3GPP-QCI80'
+  }
+}
 
 class FlowGenerator:
+  def __init__(self):
+    pass
+
   def get_random_flow(self) -> tuple[FlowType, dict]:
     """随机选择一个流类型及其配置文件。"""
     flow_type = random.choice(list(FlowType))
     profile = FLOW_PROFILES[flow_type]
     return flow_type, profile
 
-  def generate_background_flows():
-    pass
+  # =========================================================================
+  # [核心模块] 背景流量生成 (Gravity Model + Aggregation)
+  # =========================================================================
 
-  def get_background_flow_cmd(src, dst, duration=5, target_bw_mbps=600):
-    vprint(f"[Back] Generating {target_bw_mbps} Mbps on {client.name}->{server.name}")
+  def generate_traffic_matrix(self, nodes, total_load_mbps=500.0):
+    """
+    [Step 1: Generate]
+    使用重力模型生成流量矩阵，并进行聚合优化。
+    """
+    # 1. 分配随机权重
+    node_weights = {node: random.uniform(0.1, 5.0) for node in nodes}
+    total_weight = sum(node_weights.values())
+    tm = {}
+    
+    # 2. 计算原始矩阵
+    for u in nodes:
+      for v in nodes:
+        if u == v: continue
+        interaction = node_weights[u] * node_weights[v]
+        bw = (interaction / (total_weight ** 2)) * total_load_mbps
+        # 过滤掉微小流
+        if bw > 0.01:
+          tm[(u, v)] = bw
 
-    duration_ms = duration*1000
-    pps = target_bw_mbps*1e6 // 1500
-    cmd = f"ITGSend -a {dst.IP()} -T UDP -C {pps} -c 1400 -t {duration_ms}"
+    # 3. [流量聚合] 限制最大并发数，保护 CPU
+    MAX_BG_FLOWS = 20
 
-    return cmd
+    return tm
+
+    if len(tm) > MAX_BG_FLOWS:
+      # 选出 Top N 大流
+      top_flows = heapq.nlargest(MAX_BG_FLOWS, tm.items(), key=lambda x: x[1])
+      
+      # 计算缩放因子，保持总负载不变
+      total_original = sum(tm.values())
+      total_top = sum([bw for _, bw in top_flows])
+      scale = total_original / total_top if total_top > 0 else 1.0
+      
+      # 重构矩阵
+      final_tm = {k: v * scale for k, v in top_flows}
+      # print(f"[TM] Aggregated: {len(tm)} -> {len(final_tm)} flows (Scale x{scale:.2f})")
+      return final_tm
+    else:
+      return tm
+
+  def simulate_tm_on_graph(self, G, tm_dict):
+    """
+    [Step 2: Simulate]
+    在内存中预演流量矩阵，计算利用率、延迟和丢包。
+    """
+    edge_loads = {e: 0.0 for e in G.edges()}
+
+    # 模拟最短路路由
+    for (s, d), bw in tm_dict.items():
+      try:
+        path = nx.shortest_path(G, s, d, weight=None)
+        for i in range(len(path) - 1):
+          u, v = path[i], path[i+1]
+          if (u, v) in edge_loads: edge_loads[(u, v)] += bw
+          elif (v, u) in edge_loads: edge_loads[(v, u)] += bw
+      except nx.NetworkXNoPath:
+        continue 
+
+    # 更新图属性 (MM1 模型)
+    for u, v, data in G.edges(data=True):
+      capacity = float(data.get('capacity', 100.0))
+      prop_delay = float(data.get('base_delay', 5.0)) # 假设原始延迟存为 base_delay
+
+      current_load = edge_loads.get((u, v), 0.0) + edge_loads.get((v, u), 0.0)
+      rho = min(current_load / (capacity + 1e-6), 0.999)
+      
+      # M/M/1 延迟公式
+      queue_delay = 10.0 * (rho / (1.0 - rho))
+      total_delay = prop_delay + min(queue_delay, 500.0)
+      
+      # 丢包率模型 (Soft Threshold)
+      if rho < 0.8: loss = 0.0
+      else: loss = 0.05 * ((rho - 0.8) / 0.2) ** 2
+
+      data['utilization'] = rho
+      data['bandwidth'] = capacity * (1.0 - rho)
+      data['delay'] = total_delay
+      data['loss'] = loss
+
+    return G
+
+  def apply_traffic_matrix_to_mininet(self, net, tm_dict, G_nx, install_rules_func, duration=10):
+    """
+    [Step 4: Execute]
+    注入背景流 (Ghost Traffic)。
+    关键修复：
+    1. 启动 ITGRecv 守护进程。
+    2. Drop 规则仅匹配 UDP (nw_proto=17)，放行 TCP 信令。
+    """
+    print(f"[TM] Injecting {len(tm_dict)} background flows (Ghost Strategy)...")
+    
+    BG_COOKIE = 0xB000
+    BG_TOS = 184
+    
+    # ==========================================
+    # Phase 0: 确保接收端在线 (Signaling Ready)
+    # ==========================================
+    # D-ITG 发送前需要连接接收端的 9000 端口
+    for h in net.hosts:
+      # 以后台模式启动，忽略输出，防止阻塞
+      h.cmd("ITGRecv > /dev/null 2>&1 &")
+    
+    # ==========================================
+    # Phase 1: 铺设路径 & 设置陷阱
+    # ==========================================
+    configured_drops = set()
+
+    for (u, v) in tm_dict.keys():
+      try:
+        path_nodes = nx.shortest_path(G_nx, u, v, weight=None)
+      except:
+        continue
+
+      # 1.1 全程铺路 (Forwarding)
+      if len(path_nodes) > 1:
+        install_rules_func(net, path_nodes, cookie=BG_COOKIE, do_ping=False)
+
+      # 1.2 终点设卡 (Drop UDP Only)
+      dst_host = net.get(f'h{v}')
+      dst_ip = dst_host.IP()
+      last_switch_name = f's{path_nodes[-1]}'
+      last_switch = net.get(last_switch_name)
+      
+      drop_key = (last_switch_name, dst_ip)
+      if drop_key not in configured_drops:
+        # [CRITICAL FIX] 增加 nw_proto=17
+        # 结果：UDP数据包被丢弃（制造拥塞但不进Host），TCP信令包放行（完成握手）
+        cmd_drop = (
+          f'ovs-ofctl -O OpenFlow13 add-flow {last_switch_name} '
+          f'"cookie={hex(BG_COOKIE)},priority=200,dl_type=0x0800,'
+          f'nw_dst={dst_ip},nw_proto=17,nw_tos={BG_TOS},actions=drop"'
+        )
+        last_switch.cmd(cmd_drop)
+        configured_drops.add(drop_key)
+
+    time.sleep(0.5) # 让流表生效
+
+    # ==========================================
+    # Phase 2: 启动发送端
+    # ==========================================
+    count = 0
+    for (u, v), bw in tm_dict.items():
+      h_src = net.get(f'h{u}')
+      dst_ip = net.get(f'h{v}').IP()
+      
+      # 计算 PPS (-C 模式)
+      # 限制最大 3000 PPS 防止 D-ITG 内部溢出
+      pps = min(int(bw * 1_000_000 / 8000), 3000)
+      if pps < 1: pps = 1
+      
+      # ITGSend 命令
+      # 注意：不需要 -b 0，默认即为 0
+      cmd_send = (
+        f"ITGSend -a {dst_ip} "
+        f"-T UDP "
+        f"-C {pps} "
+        f"-c 1000 "
+        f"-t {duration * 1000} "
+        f"-b {BG_TOS} "
+        f"> /dev/null 2>&1 &"
+      )
+      
+      h_src.cmd(cmd_send)
+      
+      # 错峰启动，减轻 CPU 冲击
+      count += 1
+      if count % 10 == 0: time.sleep(0.1)
