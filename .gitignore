@@ -1,9 +1,15 @@
 # Python bytecode files
-__pycache__/
+*.pth 
 *.pyc
+*.ingest
+
+
 temp.log
 vllm_server.log
+__pycache__/
 checkpoints/
 dataset/
 trained_model/
 train_log/
+curve/
+tmp/

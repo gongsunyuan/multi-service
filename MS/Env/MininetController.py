@@ -278,12 +278,13 @@ class GraphTopo(Topo):
       self.addLink(f'{test_str}h{node_id}', f'{test_str}s{node_id}', delay='0ms')
 
     for u, v, data in blueprint_g.edges(data=True):
-      bw = data.get('bandwidth', 1000)
+      bw = data.get('bandwidth', 200)
       delay = f"{data.get('delay', 1)}ms"
       loss = data.get('loss', 0)
       q_limit = data.get('queue_size', 100)
       r2q = bw*1e6/30000/8
       # 这里沿用 Mininet 构造函数中设置的 r2q
+      vprint(f"Adding Link {u}-{v} with bw={bw}Mbps")
       self.addLink(f'{test_str}s{u}', f'{test_str}s{v}', cls=TCLink, bw=bw, delay=delay, loss=loss, r2q = r2q, use_htb=True, max_queue_size=q_limit) 
 
 # mininet 启动
@@ -923,5 +924,3 @@ class NetworkMonitor:
       node_u['proc_delay'] = 0.3 * node_u.get('proc_delay', 0) + 0.7 * proc_delay
 
     return G
-
-
