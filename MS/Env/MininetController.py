@@ -5,7 +5,7 @@ import re
 from mininet.net import Mininet
 from enum import Enum 
 from contextlib import contextmanager
-import torch
+# import torch
 import sys
 import signal
 import shlex
@@ -281,7 +281,7 @@ class GraphTopo(Topo):
       bw = data.get('bandwidth', 200)
       delay = f"{data.get('delay', 1)}ms"
       loss = data.get('loss', 0)
-      q_limit = data.get('queue_size', 500)
+      q_limit = data.get('queue_size', 20)
       rate_bytes = bw * 1000000 / 8
       if bw < 5: loss = 5.0
       # 2. 计算最佳 r2q (确保 quantum ≈ 1500)
@@ -311,6 +311,11 @@ def get_a_mininet(g: nx.Graph, is_test=False, remote_port=None):
 
   try:
     vprint("[Mini] Disabling TCP Offload (TSO/GSO/GRO) on all switches...")
+    for h in net.hosts:
+      for intf in h.intfList():
+        if intf.name != 'lo':
+          # 使用 ethtool 关闭卸载
+          h.cmd(f"ethtool -K {intf.name} tso off gso off gro off > /dev/null 2>&1")
     for sw in net.switches:
       for intf in sw.intfList():
         if intf.name != 'lo':
@@ -600,18 +605,19 @@ def verify_cleanup(net, cookie=0xA000):
     return False
 
 # 下发流表规则
-def install_path_rules(net, path_nodes, cookie=0x1234, do_ping=True):
+def install_path_rules(net, path_nodes, tos=None, dst_port=None, cookie=0x1234, do_ping=True):
   """
-  将逻辑路径转化为 OpenFlow 流表规则并下发。
-  支持双向联通 (TCP/ARP 需要回路)，或者仅单向 (UDP)。
+  安装端到端路径流表 (完整版)
   
   参数:
     net: Mininet 网络对象
-    path_nodes: 节点 ID 列表，例如 [0, 2, 5] 代表 s0 -> s2 -> s5
-    cookie: 规则标记，用于清理
+    path_nodes: 节点ID列表 (如 [0, 1, 2])
+    tos: 流量 ToS 标记 (None=泛洪, 32=Agent, 184=Background)
+    dst_port: 目的端口 (None=通配所有端口, 12000=精确匹配)
+    cookie: 流表标记
+    do_ping: 是否执行 Ping 测试 (仅在 tos=None 时建议开启)
   """
   # 1. 获取源主机和目的主机对象
-  # 根据 GraphTopo 的命名规则: 节点 i -> 主机 hi, 交换机 si
   src_id = path_nodes[0]
   dst_id = path_nodes[-1]
   
@@ -620,57 +626,94 @@ def install_path_rules(net, path_nodes, cookie=0x1234, do_ping=True):
   dst_ip = h_dst.IP()
   src_ip = h_src.IP()
   
-  # print(f"[Controller] Installing path: h{src_id} -> ... -> h{dst_id}")
+  # Debug 信息
+  port_str = f"Port={dst_port}" if dst_port else "Port=ANY"
+  vprint(f"[Install] h{src_id}->h{dst_id} | ToS={tos} | {port_str}")
 
   # 2. 遍历路径上的每一跳交换机
   for i, current_node_id in enumerate(path_nodes):
     sw_name = f's{current_node_id}'
     switch = net.get(sw_name)
     
-    # --- 确定输出端口 (Out Port) ---
+    # ==========================================
+    # A. 计算正向输出端口 (Out Port)
+    # ==========================================
+    out_port = None
     if i == len(path_nodes) - 1:
-      # Case A: 最后一跳 (s_dst)，要去往主机 h_dst
-      # 获取 switch 连接到 h_dst 的端口
-      # linksBetween 返回 [(intf1, intf2)], 我们需要 switch 侧的 intf
+      # Case: 最后一跳 -> 目的主机
       links = net.linksBetween(switch, h_dst)
-      if not links: continue
-      link = links[0]
-      # 确定哪个接口属于 switch
-      out_intf = link.intf1 if link.intf1.node == switch else link.intf2
-      out_port = switch.ports[out_intf]
+      if links:
+        link = links[0]
+        # 确定 switch 侧的接口
+        out_intf = link.intf1 if link.intf1.node == switch else link.intf2
+        out_port = switch.ports[out_intf]
     else:
-      # Case B: 中间跳，要去往下一跳交换机 s_next
+      # Case: 中间跳 -> 下一跳交换机
       next_node_id = path_nodes[i+1]
       next_switch = net.get(f's{next_node_id}')
-      
       links = net.linksBetween(switch, next_switch)
-      if not links: continue
-      link = links[0]
-      out_intf = link.intf1 if link.intf1.node == switch else link.intf2
-      out_port = switch.ports[out_intf]
-
-    # --- 下发规则 (Forwarding) ---
-    # 匹配: 目的 IP 是 dst_ip
-    # 动作: 转发到 out_port
-    # 优先级: 100 (高于默认规则)
-    cmd = (
-      f'ovs-ofctl -O OpenFlow13 add-flow {sw_name} '
-      f'"cookie={cookie},priority=100,dl_type=0x0800,nw_dst={dst_ip},actions=output:{out_port}"')
-
-    switch.cmd(cmd)
+      if links:
+        link = links[0]
+        out_intf = link.intf1 if link.intf1.node == switch else link.intf2
+        out_port = switch.ports[out_intf]
     
-    # --- [重要] 下发反向规则 (Reverse Path) ---
-    # TCP 握手和 iperf 结束报告需要回包。
-    # 简单起见，我们让反向流量沿原路返回。
+    if out_port is None:
+      print(f"❌ Error: Cannot find link from {sw_name}")
+      continue
+
+    # ==========================================
+    # B. 下发正向规则 (Forwarding Rules)
+    # ==========================================
+
+    if tos is not None:
+      # === QoS 专用模式 (区分业务) ===
+      
+      # [规则 1.A]: D-ITG 默认信令 (TCP 9000) - 给背景流用
+      cmd_sig = (f'ovs-ofctl -O OpenFlow13 add-flow {sw_name} '
+                 f'"cookie={cookie},priority=150,dl_type=0x0800,'
+                 f'nw_proto=6,tp_dst=9000,nw_dst={dst_ip},actions=output:{out_port}"')
+      switch.cmd(cmd_sig)
+
+      # [规则 1.B]: D-ITG VIP 信令 (TCP 9001) - 给智能体流用 (NEW!)
+      # 必须加这条，否则 Step 2 的 VIP 通道不通！
+      cmd_sig_vip = (f'ovs-ofctl -O OpenFlow13 add-flow {sw_name} '
+                 f'"cookie={cookie},priority=150,dl_type=0x0800,'
+                 f'nw_proto=6,tp_dst=9001,nw_dst={dst_ip},actions=output:{out_port}"')
+      switch.cmd(cmd_sig_vip)
+      
+      # [规则 2]: 业务数据流 (UDP) - 优先级 150
+      # 动态构建匹配条件
+      match_str = (f"cookie={cookie},priority=150,dl_type=0x0800,"
+                   f"nw_proto=17,nw_tos={tos},nw_dst={dst_ip}")
+      
+      # 如果指定了端口，加入精确匹配；否则通配所有端口
+      if dst_port is not None:
+        match_str += f",tp_dst={dst_port}"
+      
+      cmd_data = f'ovs-ofctl -O OpenFlow13 add-flow {sw_name} "{match_str},actions=output:{out_port}"'
+      switch.cmd(cmd_data)
+      
+    else:
+      # === 兼容/泛洪模式 (Ping) ===
+      # [规则 3]: 通用 IP 转发 - 优先级 100
+      cmd_gen = (f'ovs-ofctl -O OpenFlow13 add-flow {sw_name} '
+                 f'"cookie={cookie},priority=100,dl_type=0x0800,'
+                 f'nw_dst={dst_ip},actions=output:{out_port}"')
+      switch.cmd(cmd_gen)
+
+    # ==========================================
+    # C. 计算反向输出端口 (Reverse Port)
+    # ==========================================
+    rev_port = None
     if i == 0:
-      # 第一跳的反向出口是去往 h_src
+      # Case: 第一跳 -> 源主机 (回包终点)
       links_rev = net.linksBetween(switch, h_src)
       if links_rev:
         link_rev = links_rev[0]
         rev_intf = link_rev.intf1 if link_rev.intf1.node == switch else link_rev.intf2
         rev_port = switch.ports[rev_intf]
     else:
-      # 中间跳的反向出口是去往上一跳交换机 s_prev
+      # Case: 中间跳 -> 上一跳交换机
       prev_node_id = path_nodes[i-1]
       prev_switch = net.get(f's{prev_node_id}')
       links_rev = net.linksBetween(switch, prev_switch)
@@ -678,19 +721,30 @@ def install_path_rules(net, path_nodes, cookie=0x1234, do_ping=True):
         link_rev = links_rev[0]
         rev_intf = link_rev.intf1 if link_rev.intf1.node == switch else link_rev.intf2
         rev_port = switch.ports[rev_intf]
+
+    if rev_port is None:
+      print(f"[Error] : Cannot find reverse link from {sw_name}")
+      continue
+
+    # ==========================================
+    # D. 下发反向规则 (Reverse Rules)
+    # ==========================================
     
-    # 反向规则: 匹配目的 IP 是 src_ip (即回包)
-    cmd_rev = (
-      f'ovs-ofctl -O OpenFlow13 add-flow {sw_name} '
-      f'"cookie={cookie},priority=100,dl_type=0x0800,nw_dst={src_ip},actions=output:{rev_port}"')
-    switch.cmd(cmd_rev)
-    
-  if do_ping:
+    # [规则 4]: 反向 IP 回包 - 优先级 100
+    # 确保 TCP ACK (信令回应) 和 Ping Reply 能回来
+    # 这里放宽条件，匹配所有发往 src_ip 的包
+    cmd_rev_ip = (f'ovs-ofctl -O OpenFlow13 add-flow {sw_name} '
+                  f'"cookie={cookie},priority=100,dl_type=0x0800,'
+                  f'nw_dst={src_ip},actions=output:{rev_port}"')
+    switch.cmd(cmd_rev_ip)
+
+  # 3. 连通性验证 (仅在非 QoS 模式下推荐，因为 Ping 不带 ToS)
+  if do_ping and tos is None:
     loss = net.ping([h_src, h_dst], timeout=0.1)
     if loss > 50:
-      vprint(f"[Warning] High ping loss ({loss}%) - path might be broken")
+      print(f"[Warning] High ping loss ({loss}%) - Path might be broken")
     else:
-      vprint(f"[Mini] install path success !")
+      print(f"[Mini] Path installed successfully.")
 
 # 根据gnn输出的 logits来生成路径--贪婪/概率选择：
 # 替换 MS/Env/MininetController.py 中的 sample_path 函数

@@ -3,14 +3,18 @@ import sys
 import time
 import networkx as nx
 import re
+import signal
+import subprocess
+import time
 import numpy as np
+import subprocess
 from mininet.log import setLogLevel, info
-
+from mininet.cli import CLI
 # 确保路径正确
 sys.path.append(os.getcwd())
 
-from MS.Env.NetworkGenerator import TopologyGenerator
 from MS.Env.FlowGenerator import FlowGenerator
+from MS.Env.NetworkGenerator import TopologyGenerator
 from MS.Env.MininetController import get_a_mininet, install_path_rules, clean_flow_rules, NetworkMonitor
 
 class Config:
@@ -19,6 +23,74 @@ class Config:
   MIN_DELAY = 1.0
   MAX_DELAY = 200.0
   MAX_NODES_NUM = 14
+
+def run_itg_safe(h_src, cmd, timeout_sec=20):
+  """
+  安全运行 ITGSend：如果超时，发送 SIGINT 让其写入日志后退出。
+  """
+  print(f"🚀 [Sender] 启动命令 (超时限制 {timeout_sec}s)...")
+  
+  # 注意：这里我们使用 h_src.popen 的底层 subprocess 对象
+  # start_new_session=True 是为了能够向进程组发送信号 (可选，视 Mininet 实现而定)
+  proc = h_src.popen(cmd.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+  
+  try:
+    # 1. 正常等待 (Wait)
+    # 如果 D-ITG 在规定时间内跑完，这里会正常返回
+    stdout, stderr = proc.communicate(timeout=timeout_sec)
+      
+  except subprocess.TimeoutExpired:
+    # 2. 发生超时 (Hang) -> 触发熔断
+    print(f"⏰ [Timeout] TCP 发送卡死 (> {timeout_sec}s)！正在强制结算...")
+    
+    # 【关键步骤】发送 SIGINT (Ctrl+C)
+    # 这告诉 D-ITG: "别发了，赶紧写日志收工！"
+    proc.send_signal(signal.SIGINT)
+      
+    try:
+      # 给它 1-2 秒时间处理后事 (写文件)
+      stdout, stderr = proc.communicate(timeout=2)
+      print("✅ [Safe Kill] 进程已优雅退出，日志应已保存。")
+    except subprocess.TimeoutExpired:
+      # 3. 敬酒不吃吃罚酒 -> 强杀
+      print("💀 [Force Kill] 进程无响应，执行 SIGKILL。")
+      proc.kill()
+      stdout, stderr = proc.communicate()
+          
+  # 打印输出以便调试
+  if stderr:
+    print(f"❌ Stderr: {stderr.decode('utf-8')}")
+      
+  return stdout, stderr
+
+def verify_offload_status(net):
+  """
+  遍历网络中的所有交换机接口，打印 TCP Segmentation Offload 状态。
+  用于验证 '幽灵带宽' 问题是否已解决。
+  """
+  from MS.Env.VerbosePrint import vprint # 假设你有这个打印函数，或者直接用 print
+  
+  print("\n" + "="*40)
+  print("🔍 [DEBUG] Verifying TSO/GSO Status on Switches")
+  print("="*40)
+  
+  # 抽样检查：如果接口太多，可以只检查前几个交换机
+  for sw in net.switches:
+    for intf in sw.intfList():
+      if intf.name == 'lo': continue # 跳过回环接口
+      
+      # 在该节点(Switch)内部执行 shell 命令
+      # grep 过滤只显示 tcp-segmentation 相关的行
+      cmd = f"ethtool -k {intf.name} | grep 'tcp-segmentation-offload'"
+      result = sw.cmd(cmd).strip()
+      
+      # 解析结果：如果是 'on'，用红色或显眼标记；如果是 'off'，表示成功
+      status_mark = "✅ OFF (Safe)" if ": off" in result else "❌ ON (Ghost Bandwidth Risk!)"
+      
+      print(f"[{sw.name}][{intf.name}]: {status_mark}")
+      print(f"    Raw: {result}") # 如果需要详细信息可取消注释
+
+  print("="*40 + "\n")
 
 def print_network_status(G):
   """打印全网高负载链路"""
@@ -93,6 +165,7 @@ def run_survival_test():
     return
 
   with get_a_mininet(G_nx) as net:
+    verify_offload_status(net)
     print("[System] Mininet started.")
     monitor = NetworkMonitor(net) # 1. 初始化 Monitor
     
@@ -100,13 +173,15 @@ def run_survival_test():
     clean_flow_rules(net, cookie=0xA001, mask=0xFFFF)
     
     # --- Step 1: 制造拥塞 ---
-    print("\n[Step 1] 注入背景流 (Target: 600 Mbps)...")
-    tm = flow_gen.generate_traffic_matrix(G_nx.nodes(), total_load_mbps=600.0)
+    LOAD_FLOW=200
+    print(f"\n[Step 1] 注入背景流 (Target: {LOAD_FLOW} Mbps)...")
+    tm = flow_gen.generate_traffic_matrix(G_nx.nodes(), total_load_mbps=LOAD_FLOW)
     
-    flow_gen.apply_traffic_matrix_to_mininet(
-      net, tm, G_nx, install_path_rules, duration=30
+    proccesses = flow_gen.apply_traffic_matrix_to_mininet(
+      net, tm, G_nx, install_path_rules, duration=100
     )
     
+    print(f"[Ghost] There is {len(proccesses)} num of proc")
     print("[Wait] 等待 5 秒让背景流稳定...")
     time.sleep(5)
     
@@ -116,7 +191,7 @@ def run_survival_test():
     
     # 1. 打印全网状态 (看看是不是真的堵了)
     print_network_status(G_nx)
-    
+    # CLI(net)
     # --- Step 2: 发送目标流 ---
     s, d = 0, 13
     h_src, h_dst = net.get(f'h{s}'), net.get(f'h{d}')
@@ -128,37 +203,68 @@ def run_survival_test():
     except:
       print("  -> 无路可走!")
       return
+
+    install_path_rules(net, path, tos=32, dst_port=12000, cookie=0xA001, do_ping=True)
       
+    # 2.2 [诊断] 检查现有的 ITGRecv 是否存活
+    # 既然背景流在跑，h_dst 上应该必须有一个 ITGRecv 在运行
+    print(f"🔄 在 {h_dst.name} 上启动 VIP ITGRecv (Port 9001)...")
+    # 清理旧的 VIP 进程
+    h_dst.cmd("pkill -f 'ITGRecv -Sp 9001'") 
+    time.sleep(0.2)
+    # 启动新进程
+    output = h_dst.cmd("ITGRecv -Sp 9001 > /dev/null 2>&1 &")
+    print("start ITGRecv 9001: ")
+    print(output)
+    time.sleep(0.5)
+
+    # 2.5 诊断 VIP 通道
+    dst_ip = h_dst.IP()
+    print(f"🕵️  [Diag] 诊断 VIP 通道 (TCP 9001)...")
+    nc_res = h_src.cmd(f"nc -z -v -w 4 {dst_ip} 9001")
+    if "succeeded" not in nc_res:
+      print(f"❌ VIP 通道不通: {nc_res.strip()}")
+    else:
+      print("✅ VIP 通道 (9001) 畅通无阻！")
+
     # 2. [NEW] 打印目标路径状态 (看看这车是不是往火坑里开)
     print_path_status(G_nx, path)
 
     # 2.2 下发规则 & 启动接收端
-    install_path_rules(net, path, cookie=0xA001, do_ping=False)
     
-    recv_log = "/tmp/target_survival.log"
+    send_log = "/tmp/sender_output.log"
+    recv_log = "/tmp/receiver_output.log"
     if os.path.exists(recv_log): os.remove(recv_log)
     
-    # 确保 ITGRecv 重启
-    h_dst.cmd("killall -9 ITGRecv")
-    h_dst.cmd("ITGRecv > /dev/null 2>&1 &")
     time.sleep(0.5)
 
+    print(f"[Ghost] There is {len(proccesses)} num of proc")
     # 2.3 启动发送端
     cmd = (f"ITGSend -a {h_dst.IP()} "
            f"-T TCP "
+           f"-rp 12000 "
            f"-C 500 -c 1600 -t 15000 "
-           f"-x {recv_log} "
-           f"-b 32") # 护身符
+           f"-Sdp 9001 "
+           f'-b 32 '
+           f"-l {send_log} "
+           f"-x {recv_log}") # 护身符
            
-    print(f"  -> 发送命令: {cmd}")
-    h_src.cmd(cmd)
-    
-    print("  -> 等待传输完成...")
-    time.sleep(4)
-    
+    run_itg_safe(h_src, cmd, timeout_sec=18)
+
+    time.sleep(2)
     # --- Step 3: 验证结果 ---
+    print(f"[Ghost] There is {len(proccesses)} num of proc")
+    monitor.sync_state_to_graph(G_nx) # 读取真实物理状态写入 G_nx
+    # 1. 打印全网状态 (看看是不是真的堵了)
+    print_network_status(G_nx)
     print("\n[Step 3] 验证 D-ITG 接收结果:")
+    print(f"[Ghost] There is {len(proccesses)} num of proc")
     
+    if "No such file" in h_src.cmd(f"ls {send_log}"):
+      print("❌ 发送端日志都没生成，ITGSend 彻底崩了。")
+    else:
+      print("✅ 发送端日志已生成 (说明 D-ITG 运行正常)。")
+
     if not os.path.exists(recv_log):
       print(f"❌ 失败：日志未生成。")
     else:
@@ -184,6 +290,8 @@ def run_survival_test():
                 print("🤔 效果: 目标流未受干扰 (路径太顺了？建议加大背景负载)。")
       else:
         print(f"❌ 解析失败。")
+      
+      
 
     os.system("sudo killall -9 ITGSend ITGRecv > /dev/null 2>&1")
 

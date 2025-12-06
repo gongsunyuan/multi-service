@@ -2,7 +2,11 @@ import random
 import networkx as nx
 import time
 import heapq
+import os  # 需要引入 os 模块来创建目录
 from enum import Enum
+from MS.Env import VerbosePrint as vp
+
+vprint = vp.vprint
 
 # === 配置与定义 ===
 class FlowType(Enum):
@@ -57,7 +61,7 @@ class FlowGenerator:
         interaction = node_weights[u] * node_weights[v]
         bw = (interaction / (total_weight ** 2)) * total_load_mbps
         # 过滤掉微小流
-        if bw > 0.01:
+        if bw > 1:
           tm[(u, v)] = bw
 
     # 3. [流量聚合] 限制最大并发数，保护 CPU
@@ -76,7 +80,7 @@ class FlowGenerator:
       
       # 重构矩阵
       final_tm = {k: v * scale for k, v in top_flows}
-      # print(f"[TM] Aggregated: {len(tm)} -> {len(final_tm)} flows (Scale x{scale:.2f})")
+      vprint(f"[TM] Aggregated: {len(tm)} -> {len(final_tm)} flows (Scale x{scale:.2f})")
       return final_tm
     else:
       return tm
@@ -122,30 +126,36 @@ class FlowGenerator:
 
     return G
 
-  def apply_traffic_matrix_to_mininet(self, net, tm_dict, G_nx, install_rules_func, duration=10):
+  def apply_traffic_matrix_to_mininet(self, net, tm_dict, G_nx, install_rules_func, duration=1000):
     """
     [Step 4: Execute]
     注入背景流 (Ghost Traffic)。
-    关键修复：
-    1. 启动 ITGRecv 守护进程。
-    2. Drop 规则仅匹配 UDP (nw_proto=17)，放行 TCP 信令。
+    增强功能：详细的生命周期打印 & 独立日志记录。
     """
-    print(f"[TM] Injecting {len(tm_dict)} background flows (Ghost Strategy)...")
+    print(f"\n[TM] 🚀 Injecting {len(tm_dict)} background flows (Ghost Strategy)...")
+    print(f"[TM] 🕒 Duration set to: {duration} seconds (Ensure this > target flow time!)")
     
     BG_COOKIE = 0xB000
     BG_TOS = 184
     
+    # 创建统一的日志目录，方便排查
+    log_dir = "/tmp/bg_logs"
+    os.makedirs(log_dir, exist_ok=True)
+    # 清理旧日志 (可选)
+    os.system(f"rm -f {log_dir}/*.log")
+
     # ==========================================
     # Phase 0: 确保接收端在线 (Signaling Ready)
     # ==========================================
-    # D-ITG 发送前需要连接接收端的 9000 端口
+    print("[TM] 🛠️  Starting ITGRecv daemons on all hosts...")
     for h in net.hosts:
-      # 以后台模式启动，忽略输出，防止阻塞
-      h.cmd("ITGRecv > /dev/null 2>&1 &")
+      # 建议记录 Recv 日志以便排查控制平面问题
+      h.cmd(f"ITGRecv -l {log_dir}/recv_{h.name}.log > {log_dir}/recv_{h.name}.out 2>&1 &")
     
     # ==========================================
     # Phase 1: 铺设路径 & 设置陷阱
     # ==========================================
+    print("[TM] 🚧 Installing routing rules & Ghost drop policies...")
     configured_drops = set()
 
     for (u, v) in tm_dict.keys():
@@ -156,7 +166,7 @@ class FlowGenerator:
 
       # 1.1 全程铺路 (Forwarding)
       if len(path_nodes) > 1:
-        install_rules_func(net, path_nodes, cookie=BG_COOKIE, do_ping=False)
+        install_rules_func(net, path_nodes, tos=BG_TOS, dst_port=11000, cookie=BG_COOKIE, do_ping=False)
 
       # 1.2 终点设卡 (Drop UDP Only)
       dst_host = net.get(f'h{v}')
@@ -166,8 +176,7 @@ class FlowGenerator:
       
       drop_key = (last_switch_name, dst_ip)
       if drop_key not in configured_drops:
-        # [CRITICAL FIX] 增加 nw_proto=17
-        # 结果：UDP数据包被丢弃（制造拥塞但不进Host），TCP信令包放行（完成握手）
+        # [CRITICAL FIX] 只丢弃 UDP 数据包 (nw_proto=17)，放行 TCP 握手信令
         cmd_drop = (
           f'ovs-ofctl -O OpenFlow13 add-flow {last_switch_name} '
           f'"cookie={hex(BG_COOKIE)},priority=200,dl_type=0x0800,'
@@ -176,35 +185,55 @@ class FlowGenerator:
         last_switch.cmd(cmd_drop)
         configured_drops.add(drop_key)
 
-    time.sleep(0.5) # 让流表生效
+    time.sleep(1.0) # 稍微多给点时间让流表同步到 Datapath
 
     # ==========================================
-    # Phase 2: 启动发送端
+    # Phase 2: 启动发送端 (带详细监控)
     # ==========================================
+    print(f"\n{'='*60}")
+    print(f"{'Src':<5} -> {'Dst':<5} | {'BW (Mbps)':<10} | {'PPS':<8} | {'PID':<8} | {'Log File'}")
+    print(f"{'-'*60}")
+
+    bg_processes = [] # 存储进程对象，防止被垃圾回收
+
     count = 0
     for (u, v), bw in tm_dict.items():
       h_src = net.get(f'h{u}')
-      dst_ip = net.get(f'h{v}').IP()
+      h_dst = net.get(f'h{v}')
+      dst_ip = h_dst.IP()
       
-      # 计算 PPS (-C 模式)
-      # 限制最大 3000 PPS 防止 D-ITG 内部溢出
+      # 计算 PPS
       pps = min(int(bw * 1_000_000 / 8000), 3000)
       if pps < 1: pps = 1
       
+      # 日志文件路径
+      log_file = f"{log_dir}/send_h{u}_to_h{v}.log"
+
       # ITGSend 命令
-      # 注意：不需要 -b 0，默认即为 0
+      # 使用 nohup 或直接后台运行，并将输出重定向到文件
       cmd_send = (
         f"ITGSend -a {dst_ip} "
         f"-T UDP "
         f"-C {pps} "
         f"-c 1000 "
+        f"-rp 11000 "
         f"-t {duration * 1000} "
         f"-b {BG_TOS} "
-        f"> /dev/null 2>&1 &"
       )
       
-      h_src.cmd(cmd_send)
+      # 使用 popen 启动并在 Python 层持有句柄
+      proc = h_src.popen(cmd_send, shell=True)
+      bg_processes.append(proc)
       
-      # 错峰启动，减轻 CPU 冲击
+      # 打印生命周期信息
+      print(f"h{u:<4} -> h{v:<4} | {bw:<10.2f} | {pps:<8} | {proc.pid:<8} | .../send_h{u}_to_h{v}.log")
+      
       count += 1
       if count % 10 == 0: time.sleep(0.1)
+
+    print(f"{'='*60}")
+    print(f"[TM] ✅ All {count} background flows dispatched.")
+    print(f"[TM] 💡 Check {log_dir}/ for specific error messages if flows die unexpectedly.\n")
+    
+    # 可选：返回进程列表，以便外部脚本可以在测试结束后显式 kill 它们
+    return bg_processes

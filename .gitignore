@@ -2,6 +2,7 @@
 *.pth 
 *.pyc
 *.ingest
+*.log
 
 
 temp.log
