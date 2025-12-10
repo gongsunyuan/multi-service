@@ -11,319 +11,418 @@ import numpy as np
 import random
 from tqdm import tqdm
 from datetime import datetime
+from mininet.cli import CLI
 
-# === 导入自定义模块 ===
+# === 导入你的自定义模块 ===
+# 确保项目根目录在 sys.path 中
+sys.path.append(os.getcwd())
+
 import MS.Env.VerbosePrint as vp
 from MS.Env.VerbosePrint import vprint
 from MS.Agent.ActorCritic import ActorCritic
-from MS.Env.FlowGenerator import FlowGenerator, FlowType
-from MS.Env.NetworkGenerator import TopologyGenerator, get_pyg_data_from_nx
+from MS.Env.ConstructParaser import TopoParaser
+from MS.Env.FlowGenerator import FlowGenerator, FlowType, FLOW_PROFILES
 from MS.Env.MininetController import (
-  get_a_mininet, get_a_fingerprint, measure_path_qos, 
-  sample_path, clean_flow_rules, NetworkMonitor, install_path_rules,
-  calculate_qoe_reward
-)
+  get_a_mininet, 
+  get_a_fingerprint, 
+  measure_path_qos, 
+  sample_path, 
+  clean_flow_rules, 
+  install_path_rules, 
+  calculate_qoe_reward,
+  vprint_network_status,
+  NetworkMonitor)
+from MS.Env.NetworkGenerator import get_pyg_data_from_nx, TopologyGenerator
+
+# === 全局常量 ===
+AGENT_COOKIE = 0xA001  # 你的目标流 Cookie
+BG_COOKIE    = 0xB000  # 背景流 Cookie
+BG_MASK      = 0xF000
+
+# 实例化生成器
+FLOW_GEN = FlowGenerator()
+TOPO_GEN = TopologyGenerator()
 
 # ==============================================================================
 # 1. 配置加载器
 # ==============================================================================
 def load_config(config_path):
+
+  config_path = os.path.join('config/', config_path)
   if not os.path.exists(config_path):
-    raise FileNotFoundError(f"❌ 配置文件未找到: {config_path}")
+    raise FileNotFoundError(f"[Error] Config not found: {config_path}")
   
   with open(config_path, 'r', encoding='utf-8') as f:
     data = yaml.safe_load(f)
     
   class DynamicConfig: pass
   config = DynamicConfig()
-  
-  # 扁平化注入属性
   for section in data.values():
     for k, v in section.items():
       setattr(config, k, v)
-      
-  # 路径处理
-  model_dir = getattr(config, 'MODEL_DIR', './trained_model')
-  config.SAVE_PATH = os.path.join(model_dir, config.SAVE_PATH)
-  config.MM1_CHECKPOINT = os.path.join(model_dir, config.MM1_CHECKPOINT)
-  config.PRETRAINED_LSTM = os.path.join(model_dir, config.PRETRAINED_LSTM)
-  config.PRETRAINED_GNN = os.path.join(model_dir, config.PRETRAINED_GNN)
-  config.FINGERPRINT_BANK = os.path.join(config.FINGERPRINT_BANK) # 假设是相对路径
   
-  config.DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-  
-  # 创建日志目录
-  start_time = datetime.now().strftime("%Y-%m-%d-%H-%M")
-  config.LOG_FILE = os.path.join(config.LOG_DIR, f"{start_time}.log")
-  os.makedirs(os.path.dirname(config.LOG_FILE), exist_ok=True)
-  
+  # 处理相对路径
+  base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+  model_dir = os.path.join(base_dir, getattr(config, 'MODEL_DIR'))
+  for path_attr in ['PRETRAINED_LSTM', 'PRETRAINED_GNN', 'PRETRAINED_MM1']:
+    if hasattr(config, path_attr):
+      setattr(config, path_attr, os.path.join(model_dir, getattr(config, path_attr)))
+      print(f"{path_attr}: {getattr(config, path_attr)}")
+
+  setattr(config, 'FINGERPRINT_BANK', os.path.join(base_dir, getattr(config, 'FINGERPRINT_BANK')))
+
+  log_dir = os.path.dirname(os.path.join(base_dir, getattr(config, 'LOG_DIR')))
+  log_file_name = f"{datetime.now().strftime("%Y-%m-%d-%H:%M:%S")}.log"
+  setattr(config, "LOG_FILE_PATH", os.path.join(log_dir, log_file_name))
+
   return config
 
 # ==============================================================================
-# 2. 可行性检查 (静态物理约束)
+# 2. 背景流量管理 (The TCP Hell Manager)
 # ==============================================================================
-def is_episode_solvable(G_nx, s_node, d_node, flow_type):
+def refresh_background_traffic(net, topo_graph, load_mbps=600.0):
   """
-  仅检查静态物理连通性和容量上限。
-  不检查动态拥塞（那是 Agent 要解决的问题）。
+  刷新背景流量：清理旧流 -> 生成新矩阵 -> 注入 Mininet
   """
-  # 硬编码约束或从 Config 读取
+  vprint(f"[BG-Manager] Refreshing Background Traffic (Target: {load_mbps} Mbps)...")
+  
+  # 1. 清理旧的背景流
+  clean_flow_rules(net, cookie=BG_COOKIE, mask=BG_MASK)
+  os.system("sudo killall -9 ITGSend ITGRecv > /dev/null 2>&1")
+  
+  # 2. 生成新的流量矩阵 (Gravity Model)
+  nodes = list(topo_graph.nodes())
+  tm_dict = FLOW_GEN.generate_traffic_matrix(nodes, total_load_mbps=load_mbps)
+  
+  # 3. 更新图的理论属性 (用于 Mock 计算，可选)
+  topo_graph = FLOW_GEN.simulate_tm_on_graph(topo_graph, tm_dict)
+  
+  # 4. 注入物理网络 (Sim-to-Real 核心)
+  # 注意：这里会自动处理 ToS=184 和 Drop 规则
+  FLOW_GEN.apply_traffic_matrix_to_mininet(
+    net, 
+    tm_dict, 
+    topo_graph, 
+    install_rules_func=install_path_rules, 
+    duration=600 # 只要比一个 Epoch 长即可
+  )
+  
+  # 5. 等待流量稳定 (TCP 慢启动需要时间)
+  vprint("[BG-Manager] Waiting 5s for congestion stabilization...")
+  time.sleep(5.0)
+
+  return topo_graph
+
+def is_episode_solvable(G, s_node, d_node, flow_type_str):
+  """
+  检查在当前背景流压力下，是否存在满足 QoS 要求的路径。
+  基于 G 中的理论状态 (utilization, delay 等) 进行快速预判。
+  """
+  # 1. 获取业务约束 (Hard Constraints)
+  # 这里简单定义一下，或者从 FLOW_PROFILES 获取
   constraints = {
-    'voip':      {'max_delay': 150, 'min_bw': 0.1},
-    'gaming':    {'max_delay': 60,  'min_bw': 0.5},
-    'streaming': {'max_delay': 500, 'min_bw': 5.0} 
+    'VOIP':      {'max_delay': 150, 'min_bw': 0.1},
+    'GAMING':    {'max_delay': 60,  'min_bw': 0.5},
+    'STREAMING': {'max_delay': 1000, 'min_bw': 2.0} # 视频对带宽要求高
   }
-  req = constraints.get(flow_type.name.lower(), constraints['streaming'])
   
-  # 1. 带宽初筛 (物理容量 Capacity)
+  req = constraints.get(flow_type_str, constraints['VOIP'])
+  
+  # 2. 定义过滤函数
   def filter_edge(u, v):
-    cap = G_nx[u][v].get('capacity', 100.0)
-    return cap >= (req['min_bw'] * 1.2) # 留 20% 余量
+    edge_data = G[u][v]
+    # A. 检查剩余带宽
+    # capacity (Mbps) * (1 - utilization)
+    cap = edge_data.get('bandwidth', 10.0)
+    util = edge_data.get('utilization', 0.0)
+    residual_bw = cap * (1.0 - util)
+    
+    if residual_bw < req['min_bw']:
+      return False
+    return True
 
-  valid_subgraph = nx.subgraph_view(G_nx, filter_edge=filter_edge)
+  # 3. 创建视图 (只包含带宽达标的边)
+  view = nx.subgraph_view(G, filter_edge=filter_edge)
   
-  # 2. 延迟检查 (物理传播延迟 Prop Delay)
+  # 4. 检查连通性 & 延迟
   try:
-    path = nx.dijkstra_path(valid_subgraph, s_node, d_node, weight='delay')
-    total_delay = sum(G_nx[u][v].get('delay', 1.0) for u, v in zip(path[:-1], path[1:]))
-    return total_delay <= req['max_delay']
+    # 在过滤后的图中找最短延迟路径
+    path = nx.shortest_path(view, source=s_node, target=d_node, weight='delay')
+    
+    # 计算这条路径的总延迟
+    total_delay = 0
+    for i in range(len(path)-1):
+      u, v = path[i], path[i+1]
+      total_delay += G[u][v].get('delay', 0.0)
+      
+    if total_delay > req['max_delay']:
+      return False # 虽然通，但延迟超标
+      
+    return True # 通过检查
+    
   except nx.NetworkXNoPath:
-    return False
+    return False # 物理不连通 (带宽不够)
+
+def get_real_fingerprint_from_bank(flow_type, FINGERPRINT_BANK, CONFIG):
+  key = flow_type.name.lower()
+  samples = FINGERPRINT_BANK.get(key)
+  
+  if not samples:
+    raise ValueError(f"Bank empty for {key}")
+      
+  fp = random.choice(samples) 
+  
+  # 增加一点点高斯噪声 (Data Augmentation)
+  noise = torch.randn_like(fp) * 0.02
+  fp_aug = fp + noise
+  
+  # 增加 Batch 维度 (1, N, 2) 并送入 GPU
+  return fp_aug.unsqueeze(0).float().to(CONFIG.DEVICE)
 
 # ==============================================================================
-# 3. 主训练循环 (Sim-to-Real)
+# 3. 训练主循环
 # ==============================================================================
-def run_a2c_training(CONFIG):
-  print(f"[MS] Initializing Agent on {CONFIG.DEVICE}...")
-  vp.MININET_VERBOSE = True
-  vp.LOG_TO_CONSOLE = False
-  vp.LOG_FILE_PATH = CONFIG.LOG_FILE
+def train():
+  # --- 初始化检查 ---
+  if os.geteuid() != 0:
+    print("[Error] Must run as root (sudo) to control Mininet.")
+    sys.exit(1)
+
+  # --- 参数解析 ---
+  parser = TopoParaser()
+  args = parser.parse_args()
   
-  # --- A. 初始化 Agent ---
+  CONFIG = load_config(args.yaml)
+  vp.LOG_TO_CONSOLE = args.verbose # 训练时减少刷屏
+  vp.LOG_FILE_PATH = getattr(CONFIG, 'LOG_FILE_PATH')
+  device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+  setattr(CONFIG, 'DEVICE', device)
+  print(f"=== SDN Agent Training (TCP Hell Edition) ===")
+  print(f"Device: {device} | Batch: {CONFIG.BATCH_SIZE}")
+
+  # --- 加载指纹库 ---
+  if os.path.exists(CONFIG.FINGERPRINT_BANK):
+    print(f"[Init] Loading fingerprint bank from {CONFIG.FINGERPRINT_BANK}...")
+    fingerprint_bank = torch.load(CONFIG.FINGERPRINT_BANK)
+  else:
+    print(f"[Error] : Fingerprint bank not found! {CONFIG.FINGERPRINT_BANK}")
+    sys.exit(1)
+
+  # --- 初始化 Agent ---
   agent = ActorCritic(
     lstm_hidden_dim=CONFIG.LSTM_DIM,
     gnn_hidden_dim=CONFIG.GNN_DIM,
+    gnn_node_dim=getattr(CONFIG, 'GNN_NODE_DIM', 10), # 根据你的 feature 维度调整
     gnn_layers=CONFIG.GNN_LAYERS,
     pretrained_lstm_path=CONFIG.PRETRAINED_LSTM,
-    pretrained_gnn_path=CONFIG.PRETRAINED_GNN
-  ).to(CONFIG.DEVICE)
-
-  # --- B. 加载 MM1 权重 (Transfer Learning) ---
-  if os.path.exists(CONFIG.MM1_CHECKPOINT):
-    vprint(f"[Transfer] Loading MM1 weights: {CONFIG.MM1_CHECKPOINT}")
-    state_dict = torch.load(CONFIG.MM1_CHECKPOINT, map_location=CONFIG.DEVICE)
-    agent.load_state_dict(state_dict)
-  else:
-    vprint(f"[Warning] MM1 checkpoint not found at {CONFIG.MM1_CHECKPOINT}!")
-
-  # --- C. 解冻与优化器设置 ---
-  vprint("[Config] Unfreezing GNN Body for fine-tuning...")
-  param_groups = [
-    # GNN 主体：极低学习率 (1e-7)，保护"常识"
-    {'params': agent.gnn_model.node_embed.parameters(), 'lr': CONFIG.LR_GNN_BODY},
-    {'params': agent.gnn_model.convs.parameters(),      'lr': CONFIG.LR_GNN_BODY},
-    {'params': agent.gnn_model.layer_norms.parameters(),'lr': CONFIG.LR_GNN_BODY},
-    # Heads & FiLM：正常微调学习率 (1e-5)
-    {'params': agent.film_generator.parameters(),       'lr': CONFIG.LR_HEADS},
-    {'params': agent.critic_head.parameters(),          'lr': CONFIG.LR_HEADS},
-    {'params': agent.gnn_model.edge_output_head.parameters(), 'lr': CONFIG.LR_HEADS}
-  ]
+    pretrained_gnn_path=CONFIG.PRETRAINED_GNN).to(device)
   
-  # 必须先设置 requires_grad = True
-  for param in agent.gnn_model.parameters(): param.requires_grad = True
-  # LSTM 保持冻结 (指纹特征通用)
-  for param in agent.lstm_body.parameters(): param.requires_grad = False
+  if os.path.exists(CONFIG.PRETRAINED_MM1):
+    print(f"[Init] Loading MM1 Pretrained Weights from {CONFIG.PRETRAINED_MM1}...")
+    state_dict = torch.load(CONFIG.PRETRAINED_MM1, map_location=device)
     
-  agent.train()
+    # 注意：如果 MM1 的结构和 SDN Agent 完全一致，直接加载
+    # 如果不一致（比如 Head 维度不同），你需要只加载部分 key
+    agent.load_state_dict(state_dict, strict=False) 
+  else:
+    print("[Init] MM1 weights not found, starting Actor/Critic from scratch.")
+    
+  param_groups = [
+    # GNN Backbone (保护性极低 LR)
+    {'params': agent.gnn_model.node_embed.parameters(), 'lr': CONFIG.LR_GNN_BODY, 'name': 'GNN_Embed'},
+    {'params': agent.gnn_model.convs.parameters(), 'lr': CONFIG.LR_GNN_BODY, 'name': 'GNN_Convs'},
+    {'params': agent.gnn_model.layer_norms.parameters(), 'lr': CONFIG.LR_GNN_BODY, 'name': 'GNN_Norms'},
+    
+    # Heads and FiLM Adapter (初始高学习率)
+    {'params': agent.film_generator.parameters(), 'lr': CONFIG.LR_HEADS, 'name': 'FiLM_Gen'},
+    {'params': agent.critic_head.parameters(), 'lr': CONFIG.LR_HEADS, 'name': 'Critic_Head'},
+    {'params': agent.gnn_model.edge_output_head.parameters(), 'lr': CONFIG.LR_HEADS, 'name': 'Actor_Head'}]
+
+  # 分层学习率
   optimizer = optim.Adam(param_groups)
 
-  # --- D. 环境组件 ---
-  topo_gen = TopologyGenerator(CONFIG)
-  flow_gen = FlowGenerator()
-  base_G_nx = topo_gen.load_topology("nsfnet.graphml")
-  
-  total_steps = 0
-  stats_reward = []
-  total_iterations = CONFIG.EPOCH * CONFIG.EPISODES_PER_TOPO
-  
-  # --- E. 启动 Mininet ---
+  # --- 加载拓扑图 ---
   try:
-    with get_a_mininet(base_G_nx) as net:
-      vprint(f"===========================================================")
-      vprint(f"[System] Mininet Started. Nodes: {len(base_G_nx.nodes())}")
+    base_G_nx = TOPO_GEN.load_topology("nsfnet.graphml")
+  except:
+    print("[Error]: nsfnet.graphml not found.")
+    sys.exit(1)
+
+  # ==========================================
+  # 启动 Mininet 环境 (Context Manager)
+  # ==========================================
+  # 注意：get_a_mininet 内部现在包含了 Disable TSO/GSO 的关键代码
+  with get_a_mininet(base_G_nx) as net:
+    print("[System] Mininet Started. TSO/GSO Disabled.")
+    monitor = NetworkMonitor(net)
+    
+    total_episodes = CONFIG.EPOCH * CONFIG.EPISODES_PER_TOPO
+    num_epochs = total_episodes // CONFIG.BATCH_SIZE
+    
+    stats_rewards = []
+    
+    # --- Epoch Loop ---
+    for epoch in range(num_epochs):
       
-      monitor = NetworkMonitor(net)
-      hosts = {i: net.get(f'h{i}') for i in base_G_nx.nodes()}
+      # [Step 1] 刷新环境 (制造 TCP 地狱)
+      # 课程学习：负载从 100 增加到 400
+      curr_load = 100.0 + (epoch / num_epochs) * 300.0
+      current_G = refresh_background_traffic(net, base_G_nx, load_mbps=curr_load)
       
-      pbar = tqdm(range(total_iterations), desc="Sim-to-Real Training")
+      # [Step 2] 感知网络 (Sync Monitor)
+      # 这步至关重要！读取真实的 tx_bytes 和 backlog，写入 current_G
+      vprint("[Monitor] Syncing physical network state to Graph...")
+      current_G = monitor.sync_state_to_graph(current_G, duration=0.1)
+      vprint_network_status(current_G)
+  
+      # --- Batch Loop ---
+      optimizer.zero_grad()
+      batch_loss = 0
+      batch_rewards = []
       
-      for i_step in pbar:
-        progress = i_step / total_iterations
-        
-        # ------------------------------------------------------
-        # [Step 1] 构造性保障循环：生成背景流量矩阵
-        # ------------------------------------------------------
-        tm_dict = {}
-        valid_env = False
-        
-        # 课程学习：难度随进度线性增加
-        # Phase 1 (Easy): 30 Mbps -> Phase 3 (Hard): 300 Mbps
-        target_load = CONFIG.MIN_BG_LOAD + progress * (CONFIG.MAX_BG_LOAD - CONFIG.MIN_BG_LOAD)
-        
-        for retry in range(10):
-          # 生成 TM (重力模型)
-          current_load = target_load * random.uniform(0.8, 1.2)
-          tm = flow_gen.generate_traffic_matrix(base_G_nx.nodes(), current_load)
+      with tqdm(total=CONFIG.BATCH_SIZE, desc=f"Ep {epoch+1}/{num_epochs} [Load {curr_load:.0f}]", leave=False) as pbar:
+        for _ in range(CONFIG.BATCH_SIZE):
+          current_G = monitor.sync_state_to_graph(current_G, duration=0.1)
+          vp.CURRENT_PBAR = pbar
+          max_try = 10
+          valid_scenario = False
           
-          # 内存预演 (Simulation)
-          sim_G = base_G_nx.copy()
-          flow_gen.simulate_tm_on_graph(sim_G, tm)
+          # 临时变量，用于保存选中的参数
+          selected_s = None
+          selected_d = None
+          selected_flow_type = None
           
-          # 生成 Agent 任务
-          s_node, d_node = topo_gen.select_source_destination()
-          flow_type, _ = flow_gen.get_random_flow()
-          
-          # 检查物理可行性
-          if is_episode_solvable(sim_G, s_node, d_node, flow_type):
-            valid_env = True
-            tm_dict = tm
-            break
+          for _ in range(max_try):
+            # 1. 随机选择源宿节点
+            s, d = TOPO_GEN.select_source_destination()
+            flow_type_enum, _ = FLOW_GEN.get_random_flow()
+            t_str = flow_type_enum.name 
             
-        if not valid_env:
-          vprint("[Skip] Failed to generate valid scenario.")
-          continue
+            # 4. 可行性检查
+            # 注意：current_G 必须已经包含了 simulate_tm_on_graph 的结果
+            if is_episode_solvable(current_G, s, d, t_str):
+              selected_s = s
+              selected_d = d
+              selected_flow_type = flow_type_enum
+              valid_scenario = True
+              break
+          
+          if not valid_scenario:
+            # 如果随了10次都不行，说明网络太堵了，跳过这次采样
+            vprint("[Error] No satisfied path !!!")
+            vprint(f"[Ghost Flow] Try to low down the curr_load: {curr_load} to {curr_load*0.9}")
+            curr_load = curr_load*0.9
+            current_G = refresh_background_traffic(net, base_G_nx, load_mbps=curr_load)
+            current_G = monitor.sync_state_to_graph(current_G, duration=0.1)
+            continue
+          vprint(f"[Agent] s_node: {selected_s} d_node: {selected_d} flow-type: {selected_flow_type}")
+          
+          try:
+            # 直接调用你集成好的函数
+            fingerprint = get_real_fingerprint_from_bank(selected_flow_type, fingerprint_bank, CONFIG)
+          except ValueError as e:
+            # 防止指纹库里没有对应类型的指纹导致崩溃
+            print(f"[Warn] Fingerprint error: {e}")
+          vprint(f"[Agent] Fingerprint got")
+          s_node = selected_s
+          d_node = selected_d
+          topo_data, _ = get_pyg_data_from_nx(current_G, s_node, d_node, config=CONFIG)
+          topo_data = topo_data.to(device)
+            
+          # B. Agent 决策
+          try:
+            # GNN + LSTM 推理
+            dist, value, edge_logits = agent(fingerprint, topo_data)
+            
+            # 路径采样 (含 Dijkstra 兜底)
+            # 注意：sample_path 需要 edge_index 来还原图结构
+            path, log_prob, ai_success, path_complete = sample_path(
+              edge_logits, topo_data.edge_index, s_node, d_node, 
+              G_fallback=current_G, max_steps=30 )
+            
+            # C. 执行与奖励
+            reward = -2.0 # 默认惩罚
+            
+            if path_complete and len(path) > 1:
+              # 下发规则 (Cookie=AGENT_COOKIE)
+              install_path_rules(net, path, cookie=AGENT_COOKIE, do_ping=False)
+              
+              # 获取 Host 对象
+              h_src = net.get(f'h{path[0]}')
+              h_dst = net.get(f'h{path[-1]}')
+              
+              # D. 物理测量 (Sim-to-Real 核心)
+              # 这会在真实的拥塞背景流中发送探测包
+              r_measure = measure_path_qos(
+                h_src, h_dst, path, 
+                flow_type=selected_flow_type
+              )
+              
+              # 奖励逻辑
+              if ai_success:
+                reward = r_measure
+              else:
+                # 兜底惩罚 (虽然通了，但是是 Dijkstra 救的)
+                reward = r_measure - 0.5 
+              
+              # 清理刚才下发的规则 (不影响背景流)
+              clean_flow_rules(net, cookie=AGENT_COOKIE, mask=0xFFFF)
+              time.sleep(1)
+            else:
+              # 寻路失败 (死胡同或断路)
+              reward = -2.0
+            
+            # E. 记录 Loss
+            r_tensor = torch.tensor(reward, dtype=torch.float32).to(device)
+            advantage = r_tensor - value.detach()
+            
+            act_loss = -(log_prob * advantage) 
+            cri_loss = CONFIG.CRITIC_LOSS_COEF * (r_tensor - value).pow(2)
+            
+            # 如果是分布对象，dist.entropy().mean()；如果是 logits，需自行处理
+            # 这里假设 sample_path 处理了采样，dist 是 Distribution 对象
+            entropy = dist.entropy().mean()
+            
+            loss = act_loss + cri_loss - (CONFIG.ENTROPY_COEF * entropy)
+            (loss / CONFIG.BATCH_SIZE).backward()
+            
+            batch_rewards.append(reward)
+            pbar.update(1)
+            pbar.set_postfix({'R': f"{reward:.2f}"})
+            
+          except Exception as e:
+            print(f"[Step Error] {e}")
+            import traceback
+            traceback()
+            exit()
 
-        # ------------------------------------------------------
-        # [Step 2] 实战部署 (Inject & Monitor)
-        # ------------------------------------------------------
-        clean_flow_rules(net, cookie=0xB000, mask=0xFFFF) # 清理背景流
-        clean_flow_rules(net, cookie=0xA000, mask=0xF000) # 清理目标流
-        
-        # 注入幽灵流量 (Ghost Traffic)
-        flow_gen.apply_traffic_matrix_to_mininet(
-          net, tm_dict, base_G_nx, install_path_rules, duration=10
-        )
-        
-        # 等待流量铺满网络
-        time.sleep(1.5)
-        
-        # [感知] 同步真实网络状态到图
-        monitor.sync_state_to_graph(base_G_nx)
-        
-        # ------------------------------------------------------
-        # [Step 3] Agent 决策
-        # ------------------------------------------------------
-        h_src, h_dst = hosts[s_node], hosts[d_node]
-        
-        # 采集指纹 (需要临时通路)
-        TEMP_COOKIE = 0x8888
-        try:
-          temp_path = nx.shortest_path(base_G_nx, s_node, d_node, weight='delay')
-          install_path_rules(net, temp_path, cookie=TEMP_COOKIE, do_ping=False)
-          
-          fingerprint = get_a_fingerprint(
-            server=h_dst, client=h_src, 
-            flow_type=flow_type, 
-            n_packets_to_capture=CONFIG.N_PACKETS
-          ).float().to(CONFIG.DEVICE)
-          
-          clean_flow_rules(net, TEMP_COOKIE)
-        except Exception as e:
-          vprint(f"[Error] Fingerprint failed: {e}")
-          continue
+      # --- End of Batch ---
+      torch.nn.utils.clip_grad_norm_(agent.parameters(), CONFIG.MAX_GRAD_NORM)
+      optimizer.step()
+      
+      # 打印统计
+      avg_r = np.mean(batch_rewards) if batch_rewards else -2.0
+      print(f"Epoch {epoch+1} | Load: {curr_load:.0f}M | Avg Reward: {avg_r:.4f}")
+      
+      # 保存模型
+      if (epoch + 1) % 10 == 0:
+        save_path = os.path.join(CONFIG.MODEL_DIR, f"agent_sdn_ep{epoch+1}.pth")
+        torch.save(agent.state_dict(), save_path)
+        print(f"Saved model to {save_path}")
 
-        # GNN 推理
-        pyg_data, _ = get_pyg_data_from_nx(base_G_nx, s_node, d_node, CONFIG)
-        pyg_data = pyg_data.to(CONFIG.DEVICE)
-        
-        dist, value_est, edge_logits = agent(fingerprint, pyg_data)
-        
-        # 路径采样 (含 Dijkstra 兜底)
-        path, log_prob_sum, ai_success, path_complete = sample_path(
-          edge_logits, pyg_data.edge_index, s_node, d_node,
-          G_fallback=base_G_nx, # 兜底地图
-          max_steps=50,
-          greedy=False
-        )
+    # --- End of Training ---
+    print("Training Finished.")
+    # 清理残局
+    os.system("sudo killall -9 ITGSend ITGRecv > /dev/null 2>&1")
 
-        # ------------------------------------------------------
-        # [Step 4] 执行与奖励
-        # ------------------------------------------------------
-        reward = -2.0 # 默认断连惩罚
-        
-        if path_complete:
-          # 下发实际路径
-          install_path_rules(net, path, cookie=0xA005)
-          
-          # 测量真实 QoS (D-ITG)
-          r_measure = measure_path_qos(h_src, h_dst, path, flow_type)
-          
-          # 奖励重塑
-          if ai_success:
-            reward = r_measure
-          else:
-            # 兜底惩罚
-            reward = r_measure - 0.6
-            vprint(f"[Penalty] Dijkstra rescue. R: {r_measure:.2f} -> {reward:.2f}")
-        
-        # ------------------------------------------------------
-        # [Step 5] 优化 (A2C)
-        # ------------------------------------------------------
-        reward_tensor = torch.tensor([reward], device=CONFIG.DEVICE)
-        
-        # 不再使用 tanh 压缩，直接用原始奖励 (-2 ~ 1)
-        advantage = reward_tensor - value_est.detach()
-        actor_loss = -log_prob_sum * advantage
-        critic_loss = nn.MSELoss()(value_est, reward_tensor)
-        entropy = dist.entropy().mean()
-        
-        total_loss = actor_loss + (CONFIG.CRITIC_LOSS_COEF * critic_loss) - (CONFIG.ENTROPY_COEF * entropy)
-        
-        (total_loss / CONFIG.BATCH_SIZE).backward()
-        
-        total_steps += 1
-        if total_steps % CONFIG.BATCH_SIZE == 0:
-          torch.nn.utils.clip_grad_norm_(agent.parameters(), CONFIG.MAX_GRAD_NORM)
-          optimizer.step()
-          optimizer.zero_grad()
-          
-          # 打印学习率
-          curr_lr = optimizer.param_groups[3]['lr'] # Head LR
-          vprint(f"[Train] Step {total_steps} | LR: {curr_lr:.2e} | Reward: {reward:.2f}")
-        
-        stats_reward.append(reward)
-        avg_r = np.mean(stats_reward[-50:])
-        
-        pbar.set_postfix({
-          "Mode": f"{flow_type.name[:3]}",
-          "Load": f"{target_load:.0f}",
-          "R": f"{reward:.2f}",
-          "Avg": f"{avg_r:.2f}"
-        })
-        
-        if total_steps % 100 == 0:
-           torch.save(agent.state_dict(), CONFIG.SAVE_PATH)
-
+if __name__ == "__main__":
+  try:
+    train()
+  except KeyboardInterrupt:
+    print("\n[Stop] User interrupted.")
+    os.system("sudo mn -c > /dev/null 2>&1")
   except Exception as e:
     print(f"\n[Crash] {e}")
     import traceback
     traceback.print_exc()
-  finally:
-    # 清理残局
-    os.system("sudo killall -9 ITGSend ITGRecv > /dev/null 2>&1")
-    print(f"[Done] Model saved to {CONFIG.SAVE_PATH}")
-
-if __name__ == '__main__':
-  # 解析命令行参数
-  parser = argparse.ArgumentParser()
-  parser.add_argument('--yaml', type=str, default='config.yaml', help='Path to config file')
-  args = parser.parse_args()
-  
-  if os.getuid() != 0:
-    print("❌ Error: Must run as root (sudo) for Mininet.")
-  else:
-    try:
-      cfg = load_config(args.yaml)
-      run_a2c_training(cfg)
-    except Exception as e:
-      print(f"❌ Init failed: {e}")
+    os.system("sudo mn -c > /dev/null 2>&1")

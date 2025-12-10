@@ -94,14 +94,6 @@ class ActorCritic(nn.Module):
     
     # 将构造好的 bias 赋值回去
     last_film_layer.bias.data.copy_(neutral_bias)
-    # 路径输出头 (GNN 头 / Actor Head)
-    # 按照项目要求，重新随机初始化 GNN 头
-    # 它将取代 gnn_model 中预训练好的那个头
-    # self.gnn_model.edge_output_head = nn.Sequential(
-    #   nn.Linear(gnn_hidden_dim * 2 + gnn_edge_dim, gnn_hidden_dim),
-    #   nn.ReLU(),
-    #   nn.Linear(gnn_hidden_dim, 1))
-    # vprint("GNN 预训练头已替换为随机初始化的 Actor 头。")
 
     # [新头 3] 价值评估头 (Critic Head)
     # 评估 V(s)，输入是流摘要和图摘要的拼接
@@ -130,7 +122,6 @@ class ActorCritic(nn.Module):
     
     vprint("[agent] LSTM Body 和 GNN Body 已冻结。")
     vprint("[agent] FiLM 生成器、 Actor 头、 Critic 头 保持可训练。")
-
 
   def forward(self, flow_fingerprint, graph_data):
     """

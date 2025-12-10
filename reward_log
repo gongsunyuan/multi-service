@@ -1,0 +1,12 @@
+PRETRAINED_LSTM: /home/gsy/multi-service/trained_model/trained_lstm.pth
+PRETRAINED_GNN: /home/gsy/multi-service/trained_model/trained_gnn_recall_ospf.pth
+PRETRAINED_MM1: /home/gsy/multi-service/trained_model/trained_agent_mm1.pth
+=== SDN Agent Training (TCP Hell Edition) ===
+Device: cuda | Batch: 32
+[Init] Loading fingerprint bank from /home/gsy/multi-service/dataset/fingerprint_bank.pt...
+[Init] Loading MM1 Pretrained Weights from /home/gsy/multi-service/trained_model/trained_agent_mm1.pth...
+[System] Mininet Started. TSO/GSO Disabled.
+Epoch 1 | Load: 100M | Avg Reward: 0.9640
+Epoch 2 | Load: 100M | Avg Reward: 0.4351
+Epoch 3 | Load: 100M | Avg Reward: 0.8428
+Epoch 4 | Load: 100M | Avg Reward: 0.8157

@@ -22,14 +22,19 @@ class TopoParaser(ArgumentParser):
     self.add_argument(
       '--yaml', 
       type=str, 
-      default='./config.yaml', 
+      default='config.yaml', 
       help='Path to the YAML configuration file (default: ./config.yaml)'
     )
-    self.add_argumetn(
+    self.add_argument(
       '--checkpoint',
       type=str,
       default=None,
       help='Path to the training checkpoint file'
+    )
+    self.add_argument(
+      '--verbose',
+      action='store_true',
+      help='Enable verbose output for debugging'
     )
     
 

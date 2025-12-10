@@ -66,8 +66,8 @@ class RigorousVideoEvaluator:
     # O.22 Video Quality
     if bitrate <= 10: mos_v = 1.0
     else:
-        term = self.q4 * (math.log10(self.q3) - math.log10(bitrate))
-        mos_v = self.q2 + (self.q1 - self.q2) / (1 + math.exp(term))
+      term = self.q4 * (math.log10(self.q3) - math.log10(bitrate))
+      mos_v = self.q2 + (self.q1 - self.q2) / (1 + math.exp(term))
     
     # O.23 Stalling Penalty
     if stall > 0.001:

@@ -21,7 +21,7 @@ FLOW_PROFILES = {
   },
   FlowType.STREAMING: {
     'type': 'STREAMING', 'protocol': 'TCP',
-    'ditg_manual': '-B U 500 1000 C 100 -c 1460 -C 1000',
+    'ditg_manual': ' -c 1000 -C 750',
     'qoe_critical': {'min_bandwidth': 5, 'max_loss_rate': 1e-6}, 'reward_fn': '3GPP-QCI6'
   },
   FlowType.GAMING: {
@@ -65,9 +65,7 @@ class FlowGenerator:
           tm[(u, v)] = bw
 
     # 3. [流量聚合] 限制最大并发数，保护 CPU
-    MAX_BG_FLOWS = 20
-
-    return tm
+    MAX_BG_FLOWS = 80
 
     if len(tm) > MAX_BG_FLOWS:
       # 选出 Top N 大流
@@ -132,8 +130,8 @@ class FlowGenerator:
     注入背景流 (Ghost Traffic)。
     增强功能：详细的生命周期打印 & 独立日志记录。
     """
-    print(f"\n[TM] 🚀 Injecting {len(tm_dict)} background flows (Ghost Strategy)...")
-    print(f"[TM] 🕒 Duration set to: {duration} seconds (Ensure this > target flow time!)")
+    vprint(f"[TM] Injecting {len(tm_dict)} background flows (Ghost Strategy)...")
+    vprint(f"[TM] Duration set to: {duration} seconds (Ensure this > target flow time!)")
     
     BG_COOKIE = 0xB000
     BG_TOS = 184
@@ -147,15 +145,16 @@ class FlowGenerator:
     # ==========================================
     # Phase 0: 确保接收端在线 (Signaling Ready)
     # ==========================================
-    print("[TM] 🛠️  Starting ITGRecv daemons on all hosts...")
+    vprint("[TM] Starting ITGRecv daemons on all hosts...")
     for h in net.hosts:
       # 建议记录 Recv 日志以便排查控制平面问题
-      h.cmd(f"ITGRecv -l {log_dir}/recv_{h.name}.log > {log_dir}/recv_{h.name}.out 2>&1 &")
+      h.popen(f"nice -n 2 ITGRecv ")
     
+    time.sleep(1)
     # ==========================================
     # Phase 1: 铺设路径 & 设置陷阱
     # ==========================================
-    print("[TM] 🚧 Installing routing rules & Ghost drop policies...")
+    vprint("[TM] Installing routing rules & Ghost drop policies...")
     configured_drops = set()
 
     for (u, v) in tm_dict.keys():
@@ -190,9 +189,6 @@ class FlowGenerator:
     # ==========================================
     # Phase 2: 启动发送端 (带详细监控)
     # ==========================================
-    print(f"\n{'='*60}")
-    print(f"{'Src':<5} -> {'Dst':<5} | {'BW (Mbps)':<10} | {'PPS':<8} | {'PID':<8} | {'Log File'}")
-    print(f"{'-'*60}")
 
     bg_processes = [] # 存储进程对象，防止被垃圾回收
 
@@ -212,6 +208,7 @@ class FlowGenerator:
       # ITGSend 命令
       # 使用 nohup 或直接后台运行，并将输出重定向到文件
       cmd_send = (
+        f"nice -n 2 "
         f"ITGSend -a {dst_ip} "
         f"-T UDP "
         f"-C {pps} "
@@ -226,14 +223,14 @@ class FlowGenerator:
       bg_processes.append(proc)
       
       # 打印生命周期信息
-      print(f"h{u:<4} -> h{v:<4} | {bw:<10.2f} | {pps:<8} | {proc.pid:<8} | .../send_h{u}_to_h{v}.log")
+      # print(f"h{u:<4} -> h{v:<4} | {bw:<10.2f} | {pps:<8} | {proc.pid:<8} | .../send_h{u}_to_h{v}.log")
       
       count += 1
       if count % 10 == 0: time.sleep(0.1)
 
-    print(f"{'='*60}")
-    print(f"[TM] ✅ All {count} background flows dispatched.")
-    print(f"[TM] 💡 Check {log_dir}/ for specific error messages if flows die unexpectedly.\n")
+    # vprint(f"{'='*60}")
+    # vprint(f"[TM] ✅ All {count} background flows dispatched.")
+    # vprint(f"[TM] 💡 Check {log_dir}/ for specific error messages if flows die unexpectedly.\n")
     
     # 可选：返回进程列表，以便外部脚本可以在测试结束后显式 kill 它们
     return bg_processes

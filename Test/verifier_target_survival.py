@@ -15,7 +15,10 @@ sys.path.append(os.getcwd())
 
 from MS.Env.FlowGenerator import FlowGenerator
 from MS.Env.NetworkGenerator import TopologyGenerator
-from MS.Env.MininetController import get_a_mininet, install_path_rules, clean_flow_rules, NetworkMonitor
+from MS.Env.MininetController import get_a_mininet, install_path_rules, clean_flow_rules, NetworkMonitor, run_itg_safe
+from MS.Env import VerbosePrint as vp
+
+vprint = vp.vprint
 
 class Config:
   MAX_BW = 90.0
@@ -23,45 +26,6 @@ class Config:
   MIN_DELAY = 1.0
   MAX_DELAY = 200.0
   MAX_NODES_NUM = 14
-
-def run_itg_safe(h_src, cmd, timeout_sec=20):
-  """
-  安全运行 ITGSend：如果超时，发送 SIGINT 让其写入日志后退出。
-  """
-  print(f"🚀 [Sender] 启动命令 (超时限制 {timeout_sec}s)...")
-  
-  # 注意：这里我们使用 h_src.popen 的底层 subprocess 对象
-  # start_new_session=True 是为了能够向进程组发送信号 (可选，视 Mininet 实现而定)
-  proc = h_src.popen(cmd.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-  
-  try:
-    # 1. 正常等待 (Wait)
-    # 如果 D-ITG 在规定时间内跑完，这里会正常返回
-    stdout, stderr = proc.communicate(timeout=timeout_sec)
-      
-  except subprocess.TimeoutExpired:
-    # 2. 发生超时 (Hang) -> 触发熔断
-    print(f"⏰ [Timeout] TCP 发送卡死 (> {timeout_sec}s)！正在强制结算...")
-    
-    # 【关键步骤】发送 SIGINT (Ctrl+C)
-    # 这告诉 D-ITG: "别发了，赶紧写日志收工！"
-    proc.send_signal(signal.SIGINT)
-      
-    try:
-      # 给它 1-2 秒时间处理后事 (写文件)
-      stdout, stderr = proc.communicate(timeout=2)
-      print("✅ [Safe Kill] 进程已优雅退出，日志应已保存。")
-    except subprocess.TimeoutExpired:
-      # 3. 敬酒不吃吃罚酒 -> 强杀
-      print("💀 [Force Kill] 进程无响应，执行 SIGKILL。")
-      proc.kill()
-      stdout, stderr = proc.communicate()
-          
-  # 打印输出以便调试
-  if stderr:
-    print(f"❌ Stderr: {stderr.decode('utf-8')}")
-      
-  return stdout, stderr
 
 def verify_offload_status(net):
   """
@@ -173,7 +137,7 @@ def run_survival_test():
     clean_flow_rules(net, cookie=0xA001, mask=0xFFFF)
     
     # --- Step 1: 制造拥塞 ---
-    LOAD_FLOW=200
+    LOAD_FLOW=100
     print(f"\n[Step 1] 注入背景流 (Target: {LOAD_FLOW} Mbps)...")
     tm = flow_gen.generate_traffic_matrix(G_nx.nodes(), total_load_mbps=LOAD_FLOW)
     
@@ -213,10 +177,8 @@ def run_survival_test():
     h_dst.cmd("pkill -f 'ITGRecv -Sp 9001'") 
     time.sleep(0.2)
     # 启动新进程
-    output = h_dst.cmd("ITGRecv -Sp 9001 > /dev/null 2>&1 &")
-    print("start ITGRecv 9001: ")
-    print(output)
-    time.sleep(0.5)
+    recv_proc = h_dst.popen("nice -n 1 ITGRecv -Sp 9001")
+    time.sleep(3)
 
     # 2.5 诊断 VIP 通道
     dst_ip = h_dst.IP()
@@ -237,19 +199,22 @@ def run_survival_test():
     if os.path.exists(recv_log): os.remove(recv_log)
     
     time.sleep(0.5)
-
+    # CLI(net)
     print(f"[Ghost] There is {len(proccesses)} num of proc")
     # 2.3 启动发送端
-    cmd = (f"ITGSend -a {h_dst.IP()} "
-           f"-T TCP "
-           f"-rp 12000 "
-           f"-C 500 -c 1600 -t 15000 "
-           f"-Sdp 9001 "
-           f'-b 32 '
-           f"-l {send_log} "
-           f"-x {recv_log}") # 护身符
+    cmd = (
+      f"nice -n 1 "
+      f"ITGSend -a {h_dst.IP()} "
+      f"-b 32 "
+      f"-rp 12000 "
+      f"-Sdp 9001 "
+      f"-T TCP "
+      f"-C 750 -c 1000 -t 6000 "
+      f"-x {recv_log} "
+      # f"-l {send_log} "
+      ) # 护身符
            
-    run_itg_safe(h_src, cmd, timeout_sec=18)
+    run_itg_safe(h_src, cmd, timeout_sec=100)
 
     time.sleep(2)
     # --- Step 3: 验证结果 ---
@@ -265,6 +230,10 @@ def run_survival_test():
     else:
       print("✅ 发送端日志已生成 (说明 D-ITG 运行正常)。")
 
+    if os.path.exists(send_log):
+      out = h_src.cmd(f"ITGDec {recv_log}")
+      print(f"Send log: \n{out}")
+
     if not os.path.exists(recv_log):
       print(f"❌ 失败：日志未生成。")
     else:
@@ -272,7 +241,7 @@ def run_survival_test():
       pkts_match = re.search(r"Total packets\s+=\s+(\d+)", out)
       loss_match = re.search(r"Packets dropped\s+=\s+\d+\s+\(([\d\.]+)\s+%\)", out)
       delay_match = re.search(r"Average delay\s+=\s+([\d\.]+)\s+s", out)
-      print(out)
+      print(f"Recv log: \n{out}")
       if pkts_match:
         total = int(pkts_match.group(1))
         loss = float(loss_match.group(1)) if loss_match else 0.0
@@ -292,7 +261,6 @@ def run_survival_test():
         print(f"❌ 解析失败。")
       
       
-
     os.system("sudo killall -9 ITGSend ITGRecv > /dev/null 2>&1")
 
 if __name__ == "__main__":
