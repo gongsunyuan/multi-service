@@ -1,0 +1,41 @@
+# config.yaml
+
+# --- Project Paths ---
+PATHS:
+  MODEL_DIR: "trained_model"
+  SAVE_PATH: "trained_agent_sdn.pth"
+  PRETRAINED_LSTM: "trained_lstm.pth"
+  PRETRAINED_GNN: "trained_gnn_recall_ospf.pth"
+  PRETRAINED_MM1: "trained_agent_mm1.pth"
+  FINGERPRINT_BANK: "dataset/fingerprint_bank.pt"
+  LOG_DIR: "train_log/sdn/"
+# --- Model Dimensions ---
+MODEL:
+  GNN_DIM: 256
+  LSTM_DIM: 128
+  GNN_LAYERS: 6
+  N_PACKETS: 30
+
+# --- Training Hyperparameters ---
+TRAINING:
+  EPOCH: 200
+  EPISODES_PER_TOPO: 32
+  BATCH_SIZE: 32
+  ENTROPY_COEF: 0.01
+  LR_HEADS: 1.0e-4
+  LR_GNN_BODY: 1.0e-7
+  GAMMA: 0.99
+  CRITIC_LOSS_COEF: 0.5
+  MAX_GRAD_NORM: 0.5
+  START_LOAD: 250
+  END_LOAD: 400
+
+# --- Environment & QoS Constraints ---
+ENV:
+  MAX_NODES_NUM: 10
+  MIN_DELAY: 1.0
+  MAX_DELAY: 200.0
+  MIN_BW: 7.5
+  MAX_BW: 90.0
+  MAX_LOSS: 5.0
+

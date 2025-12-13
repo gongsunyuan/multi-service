@@ -80,6 +80,7 @@ def load_config(config_path):
 # ==============================================================================
 # 2. 背景流量管理 (The TCP Hell Manager)
 # ==============================================================================
+
 def refresh_background_traffic(net, topo_graph, load_mbps=600.0):
   """
   刷新背景流量：清理旧流 -> 生成新矩阵 -> 注入 Mininet
@@ -89,14 +90,16 @@ def refresh_background_traffic(net, topo_graph, load_mbps=600.0):
   # 1. 清理旧的背景流
   clean_flow_rules(net, cookie=BG_COOKIE, mask=BG_MASK)
   os.system("sudo killall -9 ITGSend ITGRecv > /dev/null 2>&1")
+  time.sleep(1.0)
   
   # 2. 生成新的流量矩阵 (Gravity Model)
   nodes = list(topo_graph.nodes())
-  tm_dict = FLOW_GEN.generate_traffic_matrix(nodes, total_load_mbps=load_mbps)
+  tm_dict = FLOW_GEN.generate_traffic_matrix(nodes, topo_graph, total_load_mbps=load_mbps)
   
-  # 3. 更新图的理论属性 (用于 Mock 计算，可选)
+  # tm_dict = FLOW_GEN.clip_tm_to_capacity(tm_dict, topo_graph, max_util=0.95)
+  FLOW_GEN.print_theoretical_tm_load(topo_graph, tm_dict)
+  # 3. 在图上模拟流量矩阵，更新边的利用率和延迟
   topo_graph = FLOW_GEN.simulate_tm_on_graph(topo_graph, tm_dict)
-  
   # 4. 注入物理网络 (Sim-to-Real 核心)
   # 注意：这里会自动处理 ToS=184 和 Drop 规则
   FLOW_GEN.apply_traffic_matrix_to_mininet(
@@ -217,7 +220,11 @@ def train():
     pretrained_lstm_path=CONFIG.PRETRAINED_LSTM,
     pretrained_gnn_path=CONFIG.PRETRAINED_GNN).to(device)
   
-  if os.path.exists(CONFIG.PRETRAINED_MM1):
+  if args.checkpoint and os.path.exists(args.checkpoint):
+    print(f"[Init] Loading Agent checkpoint from {args.checkpoint}...")
+    agent.load_state_dict(torch.load(args.checkpoint, map_location=device))
+
+  elif os.path.exists(CONFIG.PRETRAINED_MM1):
     print(f"[Init] Loading MM1 Pretrained Weights from {CONFIG.PRETRAINED_MM1}...")
     state_dict = torch.load(CONFIG.PRETRAINED_MM1, map_location=device)
     
@@ -265,24 +272,26 @@ def train():
     for epoch in range(num_epochs):
       
       # [Step 1] 刷新环境 (制造 TCP 地狱)
-      # 课程学习：负载从 100 增加到 400
-      curr_load = 100.0 + (epoch / num_epochs) * 300.0
+      # 课程学习：负载从 150 增加到 250 Mbps
+      curr_load = CONFIG.START_LOAD + (epoch / num_epochs) * (CONFIG.END_LOAD - CONFIG.START_LOAD)
       current_G = refresh_background_traffic(net, base_G_nx, load_mbps=curr_load)
-      
-      # [Step 2] 感知网络 (Sync Monitor)
-      # 这步至关重要！读取真实的 tx_bytes 和 backlog，写入 current_G
-      vprint("[Monitor] Syncing physical network state to Graph...")
-      current_G = monitor.sync_state_to_graph(current_G, duration=0.1)
-      vprint_network_status(current_G)
   
       # --- Batch Loop ---
       optimizer.zero_grad()
       batch_loss = 0
       batch_rewards = []
+
       
+      # [Step 2] 感知网络 (Sync Monitor)
+      # 这步至关重要！读取真实的 tx_bytes 和 backlog，写入 current_G
+      vprint("[Monitor] Syncing physical network state to Graph...")
+      for _ in range(3):
+        current_G = monitor.sync_state_to_graph(current_G, duration=0.5)
+      vprint_network_status(current_G)
+
       with tqdm(total=CONFIG.BATCH_SIZE, desc=f"Ep {epoch+1}/{num_epochs} [Load {curr_load:.0f}]", leave=False) as pbar:
         for _ in range(CONFIG.BATCH_SIZE):
-          current_G = monitor.sync_state_to_graph(current_G, duration=0.1)
+          current_G = monitor.sync_state_to_graph(current_G, duration=0.5)
           vp.CURRENT_PBAR = pbar
           max_try = 10
           valid_scenario = False
@@ -341,36 +350,39 @@ def train():
               G_fallback=current_G, max_steps=30 )
             
             # C. 执行与奖励
-            reward = -2.0 # 默认惩罚
+            reward = -1.0 # 默认惩罚
             
-            if path_complete and len(path) > 1:
-              # 下发规则 (Cookie=AGENT_COOKIE)
-              install_path_rules(net, path, cookie=AGENT_COOKIE, do_ping=False)
+            if ai_success and path_complete:
+              # === 情况 1: AI 成功 ===
+              # 只有 AI 真正成功时，我们才花费昂贵的物理时间去测量 QoS
               
-              # 获取 Host 对象
+              # 1. 下发规则
+              install_path_rules(net, path, cookie=AGENT_COOKIE, do_ping=False)
               h_src = net.get(f'h{path[0]}')
               h_dst = net.get(f'h{path[-1]}')
               
-              # D. 物理测量 (Sim-to-Real 核心)
-              # 这会在真实的拥塞背景流中发送探测包
+              # 2. 物理测量 (Sim-to-Real)
               r_measure = measure_path_qos(
                 h_src, h_dst, path, 
                 flow_type=selected_flow_type
               )
               
-              # 奖励逻辑
-              if ai_success:
-                reward = r_measure
-              else:
-                # 兜底惩罚 (虽然通了，但是是 Dijkstra 救的)
-                reward = r_measure - 0.5 
+              # 3. 赋值奖励
+              # 如果 r_measure 返回 -1 (物理发包失败)，我们也认，视为环境噪声或严重拥塞
+              reward = r_measure
               
-              # 清理刚才下发的规则 (不影响背景流)
+              # 4. 清理规则
               clean_flow_rules(net, cookie=AGENT_COOKIE, mask=0xFFFF)
-              time.sleep(1)
+              
             else:
-              # 寻路失败 (死胡同或断路)
-              reward = -2.0
+              # === 情况 2: AI 失败 (断路 或 依赖 Dijkstra) ===
+              # [关键修正]
+              # 即使 sample_path 用 Dijkstra 补全了路径 (path_complete=True)，
+              # 我们也必须惩罚 Agent，因为 log_prob 对应的是 Agent 输出的"错误动作"。
+              # 绝对不能测量 Dijkstra 的路径并把奖励给 Agent！
+              
+              reward = -1.0 
+              vprint(f"[Penalty] AI failed to route independently.")
             
             # E. 记录 Loss
             r_tensor = torch.tensor(reward, dtype=torch.float32).to(device)

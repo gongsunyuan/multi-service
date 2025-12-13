@@ -1,3 +1,4 @@
+import pickle
 import networkx as nx
 import random
 import torch
@@ -43,8 +44,8 @@ class TopologyGenerator:
         G = pickle.load(f)
     else:
       raise ValueError(f"Unsupported format: {loadpath}")
-    
-    G = self.scale_topology_bandwidth(G, 0.15)
+
+
     self.G = G
     vprint(f"[Graph] Loaded Fixed Topo: {loadpath} | Nodes: {len(G.nodes())}")
     return G
@@ -232,7 +233,7 @@ def get_pyg_data_from_nx(G: nx.Graph, S_node: int, D_node: int, config):
     # [FIX] 必须把特征加到列表里！
     node_features_list.append(basic_feat)
     
-  # [FIX] 在循环外将列表转为 Tensor
+  # 在循环外将列表转为 Tensor
   x = torch.tensor(node_features_list, dtype=torch.float)
   
   return Data(x=x, edge_index=edge_index, edge_attr=edge_attr), G

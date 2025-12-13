@@ -45,6 +45,7 @@ def parse_ditg_output(output_str: str) -> dict:
   解析 ITGDec 的标准输出文本，提取关键 QoS 指标。
   处理包括正常数值和异常值 (如 nan) 的情况。
   """
+
   metrics = {
     'delay': 0.0,      # 单位: ms
     'jitter': 0.0,     # 单位: ms
@@ -58,7 +59,7 @@ def parse_ditg_output(output_str: str) -> dict:
     return metrics
 
   vprint("[Parse] parsing ditg output ...")
-  # print(output_str)
+  # vprint(output_str)
   try:
     # --- 1. 提取平均延迟 (Average delay) ---
     # 示例行: Average delay            =     0.000234 s
@@ -97,7 +98,7 @@ def parse_ditg_output(output_str: str) -> dict:
     if loss_match:
       val = loss_match.group(1)
       if 'nan' not in val.lower():
-        metrics['loss_rate'] = float(val) 
+        metrics['loss_rate'] = float(val)/100.0
     else: 
       vprint("[Error Parse] no loss found")
 
@@ -206,33 +207,29 @@ def measure_path_qos(server, client, path_route, flow_type, resend = False):
   # 使用 uuid 防止文件名冲突
   random_id = uuid.uuid4().hex[:8]
   log_prefix = f"/dev/shm/itg_{client.name}_{server.name}_{random_id}"
-  recv_log = f"{log_prefix}.recv"  # D-ITG 会自动加上后缀，但我们在命令里显式指定更安全
+  recv_log = f"{log_prefix}.recv"  
   
-  duration_sec = 6 if flow_type==FlowType.STREAMING else 2
-  # 构建命令
-  cmd = get_flow_command(
-    flow_type=flow_type,
-    target_ip=server.IP(),
+  target_duration = 6 if flow_type==FlowType.STREAMING else 2
+
+  if flow_type == FlowType.STREAMING:
+    # TCP 给 2.5 倍余量，防止拥塞误杀
+    safe_timeout = target_duration* 2.5 + 2  # 6*2.5 + 2 = 17s
+  else:
+    # UDP 给 2 秒余量即可
+    safe_timeout = target_duration + 2
+  
+  success = run_itg_safe(
+    client_node=client,
+    server_node=server,
     log_file=recv_log,
-    duration_sec=duration_sec)
-  
-  
-  try:
-    # 启动接听命令
-    server_proc = server.popen("nice -n 2 ITGRecv -Sp 9001")
-    stdout, stderr = run_itg_safe(client, cmd, timeout_sec=duration_sec+2)
-  except Exception as e:
-    vprint(f"[Error Send] 实验执行出错: {e}")
-  finally:
-    # 清理服务端
-    if server_proc:
-      try:
-        server_proc.terminate()
-        server_proc.wait(timeout=1)
-      except:
-        server_proc.kill()
-      sleep(1)
-  
+    flow_type=flow_type,
+    duration_sec =target_duration,
+    timeout_sec=int(safe_timeout))
+
+  if not success:
+    # 如果 run_itg_safe 返回 False (连接彻底失败)，直接返回 -1
+    return -1.0
+
   # if stderr: return 0
   # 检查文件是否存在 (防止传输完全失败导致无日志)
   check_log = server.cmd(f"ls {recv_log}")
@@ -240,7 +237,7 @@ def measure_path_qos(server, client, path_route, flow_type, resend = False):
     vprint("[Error Send] No log generated. resend same cmd again...")
     client.cmd(f"rm -f {recv_log}")
     return measure_path_qos(server, client, path_route, flow_type)
-      
+
   # 运行解码器拿到文本结果 
   # 解析结果 
   # Meta-DRL 
@@ -271,6 +268,7 @@ def measure_path_qos(server, client, path_route, flow_type, resend = False):
     vprint("[Decoder Error] ITGDec Timed out!")
     dec_proc.kill()
     dec_output = ""
+
   finally:
     # 移除临时日志文件
     client.cmd(f"rm -f {recv_log}")
@@ -280,10 +278,10 @@ def measure_path_qos(server, client, path_route, flow_type, resend = False):
   qos_metrics, no_packet_arrive = parse_ditg_output(dec_output)    
   if no_packet_arrive:
     if not resend :
-      vprint(f"No packet arrive : Resend cmd ...")
+      vprint(f"[Sender] No packet arrive : Resend cmd ...")
       return measure_path_qos(server, client, path_route, flow_type, True)
     else :
-      vprint(f"Fail to send packet, bad path")
+      vprint(f"[Sender] Fail to send packet, bad path")
       return -1
 
   vprint(f"[QoS] successfully get {flow_type} QoS: ")
@@ -299,23 +297,38 @@ def measure_path_qos(server, client, path_route, flow_type, resend = False):
   return reward
 
 def vprint_network_status(G):
-  """打印全网高负载链路"""
-  vprint("-" * 60)
-  vprint(f"📊 [Global] High Load Links (>10%):")
-  vprint(f"  {'Link':<12} | {'Cap (Mbps)':<10} | {'Util %':<8} | {'Status'}")
-  vprint("-" * 60)
+  """打印全网链路状态（按利用率从高到低排序，显示所有链路）"""
+  vprint("-" * 65)
+  vprint(f"[Global] Network Link Status (Sorted by Utilization):")
+  vprint(f" {'Link':<12} | {'Cap (Mbps)':<10} | {'Util %':<8} | {'Status'}")
+  vprint("-" * 65)
   
-  count = 0
+  # 1. 收集所有链路数据
+  link_stats = []
   for u, v, data in G.edges(data=True):
     util = data.get('utilization', 0.0)
     cap = data.get('capacity', 100.0)
-    if util > 0.1: # 只显示活跃链路
-      status = "\033[91mFULL\033[0m" if util > 0.9 else "BUSY"
-      vprint(f"  {u:<2} <-> {v:<2}    | {cap:<10.1f} | {util:<8.2%} | {status}")
-      count += 1
-  if count == 0:
-    vprint("  (No congested links found)")
-  vprint("-" * 60)
+    
+    # 简单的状态判定逻辑
+    if util > 0.90:
+      status = "FULL"  # 红色预警
+    elif util > 0.50:
+      status = "BUSY"  # 黄色繁忙
+    else:
+      status = "IDLE"  # 绿色空闲
+      
+    link_stats.append((u, v, cap, util, status))
+
+  # 2. 排序：按 util (第4个元素，索引3) 从大到小排序
+  # key=lambda x: x[3] 表示取元组中的 util 字段作为排序依据
+  # reverse=True 表示降序（最堵的排前面）
+  link_stats.sort(key=lambda x: x[3], reverse=True)
+
+  # 3. 打印
+  for u, v, cap, util, status in link_stats:
+    vprint(f" {u:<2} <-> {v:<2}    | {cap:<10.1f} | {util:<8.2%} | {status}")
+
+  vprint("-" * 65)
 
 # Generator :
 # 生成一个mininet网络
@@ -335,11 +348,12 @@ class GraphTopo(Topo):
       bw = data.get('bandwidth', 200)
       delay = f"{data.get('delay', 1)}ms"
       loss = data.get('loss', 0)
-      q_limit = data.get('queue_size', 20)
+      q_limit = data.get('queue_size', 2000)
       rate_bytes = bw * 1000000 / 8
       # 2. 计算最佳 r2q (确保 quantum ≈ 1500)
       r2q = int(max(1, rate_bytes / 1500))
       # 这里沿用 Mininet 构造函数中设置的 r2q
+      vprint(f"[Topo] Adding link: {u} <-> {v} | bw: {bw} Mbps | delay: {delay} | loss: {loss}% | r2q: {r2q} | qlimit: {q_limit}")
       self.addLink(f'{test_str}s{u}', f'{test_str}s{v}', cls=TCLink, bw=bw, delay=delay, loss=loss, r2q = r2q, use_htb=True, max_queue_size=q_limit) 
 
 # mininet 启动
@@ -351,7 +365,7 @@ def get_a_mininet(g: nx.Graph, is_test=False, remote_port=None):
     controller = None
 
   # if not vp.MININET_VERBOSE:
-  setLogLevel('critical')
+  # setLogLevel('critical')
 
   net = Mininet(
     topo=GraphTopo(g, is_test),
@@ -400,7 +414,6 @@ def get_a_fingerprint(
     n_packets_to_capture=n_packets_to_capture)
   
   while final_tensor.size(0) < 30:
-    # vprint(f"{flow_type.name}====={final_tensor.size(0)}")
     sleep(1)
     final_tensor = send_packet_and_capture(
       server=server,
@@ -419,29 +432,18 @@ def send_packet_and_capture(
   duration_sec=15, 
   n_packets_to_capture=30, 
   **flow_params):
-  # 发送流并抓包
   """
   在 Mininet 中运行 D-ITG 流量, 并同时使用 tshark 管道实时捕获特征。
-
-  参数:
-    net: Mininet 网络对象。
-    flow_type (str): 'voip', 'gaming', 'streaming'.
-    duration_sec (int): D-ITG 流量的*总*运行时长。
-    n_packets_to_capture (int): tshark 在捕获 N 个包后自动停止。
-    **flow_params: 传递给 generate_ditg_command 的额外参数。
-  
-  返回:
-    torch.tensor: 形状为 (N, 3) 的特征矩阵 [[Size, IAT], ...]。
+  [Fix] 集成了 ensure_server_surgical 以防止端口冲突。
   """
 
   server_ip = server.IP()
   client_ip = client.IP()
   
-  # print(f"server ip: {server_ip} client_ip: {client_ip}")
-  # 2. 找到要监听的接口 (s1-eth1)
+  # 1. 查找监听接口
   server_intf = None
   for intf in server.intfList():
-    if intf.name != 'lo' and intf.link: # 确保它不是 'lo' 并且已连接
+    if intf.name != 'lo' and intf.link:
       server_intf = intf
       break
   if server_intf is None:
@@ -450,39 +452,45 @@ def send_packet_and_capture(
   switch_intf = server_intf.link.intf2 if server_intf.link.intf1 == server_intf else server_intf.link.intf1
   switch_intf_name = switch_intf.name
   
-  # 3. [Action 1] 获取 D-ITG 命令
-  client_cmd = get_flow_command(
-    flow_type=flow_type,
-    target_ip=server_ip,
-    duration_sec=duration_sec,
-    **flow_params)
-  MARK_TOS = 32
-  # 4. 准备 tshark 命令 (这是最快的方法)
-  display_filter = f"src host {client_ip} and dst host {server_ip} and ip[1] == {MARK_TOS}"
-  timeout_duration = duration_sec+5
-
-  tshark_cmd = [
-    'sudo',
-    'tshark',
-    '-c', str(n_packets_to_capture), # 抓 N 个包后停止
-    '-a', f'duration:{timeout_duration}',
-    '-i', switch_intf_name,
-    '-l', # 行缓冲 (实时)
-    '-T', 'fields',
-    '-e', 'frame.len',        # 特征 1: Size
-    '-e', 'frame.time_delta', # 特征 2: IAT
-    '-e', 'ip.src',
-    '-e', 'ip.dst',
-    '-E', 'separator=,',
-    '-f', display_filter]
-  
   feature_matrix = []
   client_proc = None
   tshark_proc = None
   server_proc = None
 
   try:
-    # print(f"[Capture] 启动 tshark 管道: {' '.join(tshark_cmd)}")
+    # 2. [Action 1] 安全启动服务端 (获取动态端口)
+    # 这会清理旧进程并返回一个干净的端口
+    server_proc, actual_port = ensure_server_surgical(server)
+
+    # 3. [Action 2] 获取客户端命令 (使用动态端口)
+    client_cmd = get_flow_command(
+      flow_type=flow_type,
+      target_ip=server_ip,
+      duration_sec=duration_sec,
+      sig_port=actual_port, # [Fix] 使用实际端口
+      **flow_params)
+
+    MARK_TOS = 32
+    
+    # 4. [Action 3] 启动 tshark
+    display_filter = f"src host {client_ip} and dst host {server_ip} and ip[1] == {MARK_TOS}"
+    # 增加一点超时余量
+    timeout_duration = duration_sec + 5
+
+    tshark_cmd = [
+      'sudo', 'tshark',
+      '-c', str(n_packets_to_capture),
+      '-a', f'duration:{timeout_duration}',
+      '-i', switch_intf_name,
+      '-l', 
+      '-T', 'fields',
+      '-e', 'frame.len',
+      '-e', 'frame.time_delta',
+      '-e', 'ip.src',
+      '-e', 'ip.dst',
+      '-E', 'separator=,',
+      '-f', display_filter]
+  
     tshark_proc = subprocess.Popen(
       tshark_cmd, 
       stdout=subprocess.PIPE, 
@@ -490,57 +498,61 @@ def send_packet_and_capture(
       text=True
     )
 
-    # 5. [Action 2] 启动流量
-    # print(f"[Net] 启动 D-ITG 接收端 (h1)...")
-    server_proc = server.popen('ITGRecv')
-  
-    # 6. [Action 3] 启动 tshark 捕获管道
-    sleep_time= 1.2 if flow_type==FlowType.STREAMING else 0.1
+    # 5. [Action 4] 启动客户端流量
+    sleep_time = 1.0 # 给 tshark 一点启动时间
     sleep(sleep_time)
-    # print(f"[Net] 启动 D-ITG 发送端 (h2): {client_cmd}")
-    client_proc = client.popen(client_cmd)
-    # 7. [核心] 实时从管道读取并封装向量
+    
+    # 使用 popen 启动客户端
+    client_proc = client.popen(client_cmd, shell=True)
+
+    # 6. [核心] 实时读取
     for line in tshark_proc.stdout:
       line = line.strip()
-      if not line:
-        continue
-      # print(f"[RAW CAPTURE] 抓到了: {line}")
+      if not line: continue
       try:
-
         size_str, iat_str, src_ip, dst_ip = line.split(',')
-        
         size = float(size_str)
-        
-        # 处理第一个包 (IAT 不是数字)
         try:
           iat = float(iat_str)
         except ValueError:
-          iat = 0.0 # 第一个包的 IAT 为 0
+          iat = 0.0
         
-        # 实时封装成向量
         feature_vector = [size, iat]
         feature_matrix.append(feature_vector)
-      except ValueError as e:
-        print(f"[Parser] 跳过 tshark 行: {line}. 错误: {e}")
+      except ValueError:
+        pass # 忽略解析错误
       
   except Exception as e:
-    print(f"[Error] 实验执行出错: {e}")
+    vprint(f"[Error] 采集指纹出错: {e}")
+  
   finally:
-    # print("[Net] 清理进程...")
-    # 清理 tshark
+    # [Fix] 统一清理资源
     if tshark_proc:
       tshark_proc.kill()
     
-    # 清理客户端
     if client_proc:
-      client_proc.kill() # 确保杀死
-    # 清理服务端
+      # 向进程组发送信号，确保杀死 chrt 启动的子进程
+      try:
+        client_proc.kill()
+        # 如果使用了 os.setsid (虽然这里没显式用，但为了保险)
+        # os.killpg(os.getpgid(client_proc.pid), signal.SIGKILL)
+      except:
+        pass
+          
     if server_proc:
-      server_proc.kill()
+      try:
+        server_proc.terminate()
+        server_proc.wait(timeout=0.5)
+      except:
+        server_proc.kill()
 
-  # print(f"[Capture] 捕获完成. 获得 {len(feature_matrix)} 个向量。")
+  # 如果没抓到包，返回全0或者随机噪声防止报错，但在训练初期这可能导致冷启动问题
+  if len(feature_matrix) == 0:
+    # vprint("[Warning] No packets captured for fingerprint!")
+    # 返回一个全0的伪指纹，防止下游 Tensor 报错
+    return torch.zeros((n_packets_to_capture, 2), dtype=float)
+
   fingerprint_tensor = torch.tensor(feature_matrix, dtype=float)
-
   return fingerprint_tensor
 
 # 根据流类型，返回不同的 D-ITG 命令。
@@ -548,88 +560,205 @@ def get_flow_command(
   flow_type: str, 
   target_ip: str, 
   duration_sec: int, 
-  log_file: str=None,
-  **kwargs) -> str:
-    """
-    根据流量模式和参数, 生成一个 D-ITG (ITGSend) 命令字符串。
-    所有命令均使用 D-ITG (ITGSend) 工具。
+  sig_port: int = 9001,
+  log_file: str = None,
+  **kwargs
+  ) -> str:
+  """
+  Generates a high-priority D-ITG command string.
+  Supports both TCP (Streaming) and UDP (VoIP/Gaming).
+  """
+  # Map friendly names to FlowType Enum or dict keys
+  # Assuming FLOW_PROFILES is a global dict defined elsewhere
+  profile = FLOW_PROFILES.get(flow_type, FLOW_PROFILES.get('voip')) 
+  
+  protocol = profile['protocol'] # 'UDP' or 'TCP'
+  duration_ms = int(duration_sec * 1000)
+  
+  # Log file argument
+  log_str = f"-x {log_file}" if log_file else ""
+  
+  # 1. Base ITGSend Arguments
+  # -a: Target IP
+  # -rp: Remote Port (Must match server!)
+  # -Sdp: Signaling Port (Must match server!)
+  # -t: Duration in ms
+  # -T: Transport Protocol
+  itg_args = (
+    f"-a {shlex.quote(target_ip)} "
+    f"-rp 12000 "
+    f"-Sdp {sig_port} "  # Use same port for signaling to keep it simple
+    f"{log_str} "
+    f"-t {duration_ms} "
+    f"-T {protocol}")
 
-    参数:
-      flow_type (str): 流量模式。支持: 'voip', 'gaming', 'streaming'.
-      target_ip (str): 目标服务器的 IP 地址 (例如: '10.0.0.1').
-      duration_sec (int): 流量的总持续时间 (秒).
-    
-    返回:
-      str: 一个完整的、可在 Mininet 主机上运行的 ITGSend 命令字符串。
-    """
-    MARK_TOS = 32
-    profile = FLOW_PROFILES[flow_type]
+  # 2. Add Payload Parameters (Size/Rate)
+  # Priority: Manual args > Preset profile > Default
+  if 'ditg_manual' in profile:
+    specific_args = profile['ditg_manual']
+  elif 'ditg_preset' in profile:
+    specific_args = profile['ditg_preset']
+  else:
+    specific_args = "-C 100 -c 100 " # Safe default
 
-    protocol = profile['protocol']
-    duration_ms = duration_sec * 1000
-    if not log_file == None: 
-      log_str = f"-x {log_file}"
-    else :
-      log_str = ""
-      
-    base_cmd = f"nice -n -1 ITGSend -a {shlex.quote(target_ip)} {log_str} -rp 12000 -Sdp 9001 -t {duration_ms} -b {MARK_TOS} -T {protocol}"
-    
-    if 'ditg_preset' in profile:
-      # 使用预设 (VoIP, Gaming)
-      specific_args = profile['ditg_preset']
-    elif 'ditg_manual' in profile:
-      # 使用手动参数 (Streaming)
-      specific_args = profile['ditg_manual']
-    else:
-      raise ValueError("Profile 配置不完整")
-   
-
-    # 组合命令, 并在末尾添加 '&' 使其在后台运行
-    final_cmd = f"{base_cmd} {specific_args}"
-    
-    return final_cmd
+  # 3. Apply "Nuclear Option" (Real-Time Priority)
+  # chrt -r 99: Run as Real-Time Round-Robin process with max priority
+  # This ensures the marker flow isn't starved by background traffic.
+  wrapper = "chrt -r 99" 
+  
+  # 4. Construct Final Command
+  final_cmd = f"{wrapper} ITGSend {itg_args} {specific_args}"
+  
+  return final_cmd
 
 # 启动itg命令
-def run_itg_safe(h_src, cmd, timeout_sec=20):
+def ensure_server_surgical(host_node, start_port=9001, max_retries=3):
   """
-  安全运行 ITGSend：如果超时，发送 SIGINT 让其写入日志后退出。
+  Ensures an ITGRecv instance is listening on a specific port.
+  If the port is busy (TIME_WAIT), it tries the next one (9002, 9003...).
+  Does NOT kill all ITGRecv processes, preserving background traffic.
   """
-  vprint(f"[Sender] 启动命令 {cmd} (超时限制 {timeout_sec}s)...")
+  current_port = start_port
   
-  # 注意：这里我们使用 h_src.popen 的底层 subprocess 对象
-  # start_new_session=True 是为了能够向进程组发送信号 (可选，视 Mininet 实现而定)
-  proc = h_src.popen(cmd.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-  
-  try:
-    # 1. 正常等待 (Wait)
-    # 如果 D-ITG 在规定时间内跑完，这里会正常返回
-    stdout, stderr = proc.communicate(timeout=timeout_sec)
-      
-  except subprocess.TimeoutExpired:
-    # 2. 发生超时 (Hang) -> 触发熔断
-    vprint(f"[Timeout] ITFSend 发送卡死 (> {timeout_sec}s)！正在强制结算...")
+  for attempt in range(max_retries):
+    # A. Surgical Clean: Kill only the process holding this port
+    # netstat flags: -n(numeric) -l(listening) -p(show pid)
+    # awk vprints the "PID/ProgramName" column
+    check_cmd = f"netstat -nlp | grep :{current_port} | awk '{{print $7}}'"
+    pid_info = host_node.cmd(check_cmd).strip()
     
-    # 【关键步骤】发送 SIGINT (Ctrl+C)
-    # 这告诉 D-ITG: "别发了，赶紧写日志收工！"
-    proc.send_signal(signal.SIGINT)
-      
+    if pid_info:
+      pid = pid_info.split('/')[0]
+      if pid.isdigit():
+        vprint(f"[Server] Port {current_port} busy by PID {pid}. Cleaning...")
+        host_node.cmd(f"kill -9 {pid}")
+        sleep(0.1) # Yield to OS
+
+    # B. Start New Server (High Priority)
     try:
-      # 给它 1-2 秒时间处理后事 (写文件)
-      stdout, stderr = proc.communicate(timeout=2)
-      vprint("[Safe Kill] 进程已优雅退出，日志应已保存。")
-    except subprocess.TimeoutExpired:
-      # 3. 敬酒不吃吃罚酒 -> 强杀
-      vprint("[Force Kill] 进程无响应，执行 SIGKILL。")
-      proc.kill()
-      stdout, stderr = proc.communicate()
-          
-  # 打印输出以便调试
-  if stderr:
-    vprint(f"[Error] Stderr: {stderr.decode('utf-8')}")
-    vprint(f"[Send ] resend same cmd...")
-    return run_itg_safe(h_src, cmd, timeout_sec)
+      # Note: -Sp defines the signaling port. ITGRecv uses this for setup.
+      # chrt is used here too so the receiver doesn't drop packets due to CPU load.
+      cmd = f"chrt -r 99 ITGRecv -Sp {current_port}"
       
-  return stdout, stderr
+      # Start process via Mininet's popen
+      proc = host_node.popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+      
+      # C. Verification (The most important step)
+      sleep(0.2) # Allow bind
+      
+      # Check 1: Is process alive?
+      if proc.poll() is not None:
+        # Process died immediately
+        continue 
+
+      # Check 2: Is port actually listening?
+      # -u (udp) -t (tcp) -l (listening) -n (numeric)
+      out = host_node.cmd(f"netstat -an | grep :{current_port}")
+      if str(current_port) in out:
+        return proc, current_port # Success!
+      
+      # If we got here, process is alive but port isn't open? Kill and retry.
+      proc.kill()
+        
+    except Exception as e:
+      vprint(f"[Server] Start failed on {current_port}: {e}")
+        
+    # Increment port and retry
+    current_port += 1
+
+  raise RuntimeError(f"Failed to start ITGRecv on {host_node.name} after {max_retries} attempts.")
+
+# --- 3. Safe Client Execution ---
+def run_itg_safe(client_node, server_node, log_file, flow_type, duration_sec, timeout_sec, retry_count=0):
+  """
+  Orchestrates the measurement:
+  1. Starts Server (Surgical) -> Gets Port
+  2. Starts Client (Safe Popen) -> Sends to that Port
+  3. Handles Timeouts -> Sends SIGINT to save logs
+  """
+  server_proc = None
+
+  try:
+    # --- Step 1: Start Server ---
+    server_proc, actual_port = ensure_server_surgical(server_node)
+    vprint(f"[System] Server {server_node.name} listening on {actual_port}")
+
+    # --- Step 2: Generate Client Command ---
+    # Crucial: Client must send to 'actual_port'
+    target_ip = server_node.IP()
+    cmd = get_flow_command(
+      flow_type=flow_type,
+      target_ip=target_ip,
+      duration_sec=duration_sec,
+      sig_port=actual_port, # Sync ports!
+      log_file=log_file
+    )
+    
+    vprint(f"[Sender] {client_node.name} -> {target_ip}:{actual_port} ({flow_type}); Timeout: {timeout_sec}")
+    vprint(f"[Sender] send command: {cmd}")
+    # --- Step 3: Start Client ---
+    # os.setsid creates a new process group, allowing us to kill the whole tree later
+    client_proc = client_node.popen(
+      cmd, 
+      shell=True, 
+      stdout=subprocess.PIPE, 
+      stderr=subprocess.PIPE,
+      preexec_fn=os.setsid 
+    )
+
+    # --- Step 4: Wait with Timeout ---
+    try:
+      stdout, stderr = client_proc.communicate(timeout=timeout_sec)
+      vprint(f"[STDOUT]: {stdout}")
+      # Check for immediate D-ITG errors in stderr
+      if stderr:
+        err_str = stderr.decode('utf-8', errors='ignore')
+        if "Connection refused" in err_str or "Connect error" in err_str:
+          raise ConnectionError(err_str)
+      
+      return True # Success
+
+    except subprocess.TimeoutExpired:
+      vprint(f"[Timeout] Flow timed out (> {timeout_sec}s). Saving logs...")
+      
+      # Graceful Shutdown: Send SIGINT to the Process Group
+      # This tells D-ITG to stop sending and flush logs to disk
+      try:
+        os.killpg(os.getpgid(client_proc.pid), signal.SIGINT)
+        client_proc.communicate(timeout=2) # Give it 2s to write file
+      except:
+        vprint("[Force Kill] Process unresponsive.")
+        os.killpg(os.getpgid(client_proc.pid), signal.SIGKILL)
+      
+      # For TCP, a timeout is a valid result (congestion), not necessarily a crash.
+      # We return True so the log parser can see the packet loss/delay.
+      return True 
+
+  except ConnectionError as e:
+    # --- Step 5: Retry Logic ---
+    if retry_count < 2: # Retry once
+      vprint(f"[Retry] Connection failed. Retrying...")
+      # Clean up server before retrying
+      if server_proc: 
+        server_proc.terminate()
+        server_proc.wait()
+      return run_itg_safe(client_node, server_node, log_file, flow_type, duration_sec, timeout_sec, retry_count + 1)
+    else:
+      vprint(f"[Fail] Connection refused after retries.")
+      return False
+
+  except Exception as e:
+    vprint(f"[Error] Execution failed: {e}")
+    return False
+
+  finally:
+    # --- Step 6: Cleanup Server ---
+    if server_proc:
+      try:
+        server_proc.terminate()
+        server_proc.wait(timeout=1)
+      except:
+        server_proc.kill()
 
 # 将特征向量归一化
 def normalize_fingerprint(tensor: torch.Tensor) -> torch.Tensor:
@@ -756,7 +885,7 @@ def install_path_rules(net, path_nodes, tos=None, dst_port=None, cookie=0x1234, 
         out_port = switch.ports[out_intf]
     
     if out_port is None:
-      print(f"❌ Error: Cannot find link from {sw_name}")
+      vprint(f"[Error] : Cannot find link from {sw_name}")
       continue
 
     # ==========================================
@@ -821,7 +950,7 @@ def install_path_rules(net, path_nodes, tos=None, dst_port=None, cookie=0x1234, 
         rev_port = switch.ports[rev_intf]
 
     if rev_port is None:
-      print(f"[Error] : Cannot find reverse link from {sw_name}")
+      vprint(f"[Error] : Cannot find reverse link from {sw_name}")
       continue
 
     # ==========================================
@@ -985,7 +1114,7 @@ class NetworkMonitor:
       return tx_len
         
     except Exception as e:
-      print(f"Error reading queue limit: {e}")
+      vprint(f"Error reading queue limit: {e}")
       return 100 # 兜底默认值
 
   def _get_all_interfaces_stats(self, G):
@@ -1058,7 +1187,9 @@ class NetworkMonitor:
       util = min(speed_mbps / (capacity + 1e-6), 1.0)
       
       # 写入图
-      data['utilization'] = util
+      # 更新 (平滑一点)
+
+      data['utilization'] = 0.3 * data.get('utilization', util) + 0.7 * util
       data['measured_speed'] = speed_mbps
       # --- B. 获取瞬时队列 (Buffer) ---
       # 队列长度只需要读一次（取最新状态）
@@ -1082,7 +1213,6 @@ class NetworkMonitor:
       # 简单估算 Proc Delay
       proc_delay = 0.01 * (1 + 5 * util**2) # 拥塞时 CPU 处理变慢
       
-      # 更新 (平滑一点)
       node_u['buffer_occupancy'] = 0.3 * node_u.get('buffer_occupancy', 0) + 0.7 * buf_occ
       node_u['proc_delay'] = 0.3 * node_u.get('proc_delay', 0) + 0.7 * proc_delay
 

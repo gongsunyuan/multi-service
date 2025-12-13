@@ -3,11 +3,12 @@
 # --- Project Paths ---
 PATHS:
   MODEL_DIR: "trained_model"
-  SAVE_PATH: "trained_agent_sdn.pth"
+  SAVE_PATH: "trained_agent_pure_sdn.pth"
   PRETRAINED_LSTM: "trained_lstm.pth"
   PRETRAINED_GNN: "trained_gnn_recall_ospf.pth"
-  PRETRAINED_MM1: "trained_agent_mm1.pth"
+  PRETRAINED_MM1: None 
   FINGERPRINT_BANK: "dataset/fingerprint_bank.pt"
+  CHECKPOINT_PATH: "trained_model/checkpoints/sdn/pure_checkpoint.pth"
   LOG_DIR: "train_log/sdn/"
 # --- Model Dimensions ---
 MODEL:
@@ -18,7 +19,7 @@ MODEL:
 
 # --- Training Hyperparameters ---
 TRAINING:
-  EPOCH: 4000
+  EPOCH: 400
   EPISODES_PER_TOPO: 32
   BATCH_SIZE: 32
   ENTROPY_COEF: 0.01
@@ -27,6 +28,8 @@ TRAINING:
   GAMMA: 0.99
   CRITIC_LOSS_COEF: 0.5
   MAX_GRAD_NORM: 0.5
+  START_LOAD: 3000
+  END_LOAD: 1800
 
 # --- Environment & QoS Constraints ---
 ENV:

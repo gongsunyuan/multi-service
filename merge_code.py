@@ -54,8 +54,8 @@ def consolidate_project(source_dir, output_filename):
   主函数：生成结构图 + 合并代码内容
   """
   # 定义排除列表
-  exclude_dirs = ['.git', '__pycache__', '.idea', '.vscode', 'venv', 'build', 'train_log']
-  exclude_extensions = ['.pyc', '.png', '.jpg', '.jpeg', '.gif', '.exe', '.bin', '.pkl', '.pth', 'igest']
+  exclude_dirs = ['.git', '__pycache__', '.idea', '.vscode', 'venv', 'build', 'train_log', 'tmp', 'trained_model', 'data', 'Test']
+  exclude_extensions = ['.pyc', '.png', '.jpg', '.jpeg', '.gif', '.exe', '.bin', '.pkl', '.pth', 'igest', 'log']
 
   # 确保输出目录存在
   output_dir = os.path.dirname(output_filename)

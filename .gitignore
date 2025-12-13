@@ -4,9 +4,10 @@
 *.ingest
 *.log
 
+**log**
+**log
+log**
 
-temp.log
-vllm_server.log
 __pycache__/
 checkpoints/
 dataset/
