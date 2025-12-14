@@ -346,7 +346,7 @@ class GraphTopo(Topo):
 
     for u, v, data in blueprint_g.edges(data=True):
       bw = data.get('bandwidth', 30.0) # Mbps
-      delay = f"{data.get('delay', 1)}ms"
+      delay = f"{data.get('delay', 10)}ms"
       loss = data.get('loss', 0)
       q_limit = data.get('queue_size', 2000)
       rate_bytes = bw * 1000000 / 8
@@ -907,7 +907,7 @@ def install_path_rules(net, path_nodes, tos=None, dst_port=None, cookie=0x1234, 
                  f'nw_proto=6,tp_dst=9001,nw_dst={dst_ip},actions=output:{out_port}"')
       switch.cmd(cmd_sig_vip)
       
-      # [规则 2]: 业务数据流 (UDP) - 优先级 150
+      # [规则 2]: 业务数据流 - 优先级 150
       # 动态构建匹配条件
       match_str = (f"cookie={cookie},priority=150,dl_type=0x0800,"
                    f"nw_proto=17,nw_tos={tos},nw_dst={dst_ip}")

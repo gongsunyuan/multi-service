@@ -122,7 +122,7 @@ def run_survival_test():
     clean_flow_rules(net, cookie=0xA001, mask=0xFFFF)
     
     # --- Step 1: 制造拥塞 ---
-    LOAD_FLOW=600.0  # 背景流总量 (Mbps)
+    LOAD_FLOW=100.0  # 背景流总量 (Mbps)
     print(f"\n[Step 1] 注入背景流 (Target: {LOAD_FLOW} Mbps)...")
     tm = flow_gen.generate_traffic_matrix(G_nx.nodes(), G_nx=G_nx, total_load_mbps=LOAD_FLOW)
     
