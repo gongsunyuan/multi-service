@@ -44,44 +44,147 @@ class FlowGenerator:
   # [核心模块] 背景流量生成 (Gravity Model + Aggregation)
   # =========================================================================
 
-  def generate_traffic_matrix(self, nodes, total_load_mbps=500.0):
+  def generate_traffic_matrix(self, nodes, G_nx, total_load_mbps=500.0):
     """
-    [Step 1: Generate]
-    使用重力模型生成流量矩阵，并进行聚合优化。
+    [终极完整版] 基于等级重力 + 瓶颈约束 + 信令保留的流量生成算法
+    
+    Args:
+      nodes: 节点列表
+      G_nx: NetworkX 图对象 (必须包含 'capacity' 和 'tier' 属性)
+      total_load_mbps: 期望生成的全网总流量
     """
-    # 1. 分配随机权重
-    node_weights = {node: random.uniform(0.1, 5.0) for node in nodes}
-    total_weight = sum(node_weights.values())
     tm = {}
     
-    # 2. 计算原始矩阵
+    # ==========================================
+    # 1. 配置参数
+    # ==========================================
+    # [信令保护] 预留 0.5 Mbps 给 LLDP/OpenFlow/心跳包
+    SIGNALING_RESERVE = 0.5 
+    
+    # [等级重力] 定义不同等级节点的权重范围
+    # Tier 1 (Core): 权重 20-30 (引力极大)
+    # Tier 2 (Agg) : 权重 5-10  (引力中等)
+    # Tier 3 (Edge): 权重 1-3   (引力小)
+    TIER_MULTIPLIERS = {
+        1: (20.0, 30.0),
+        2: (5.0, 10.0),
+        3: (1.0, 3.0)
+    }
+
+    # ==========================================
+    # 2. 预计算路径瓶颈 (Bottleneck Calculation)
+    # ==========================================
+    # 目的：找出两点之间最窄的那段路，作为流量上限
+    path_bottlenecks = {}
+    
     for u in nodes:
       for v in nodes:
         if u == v: continue
-        interaction = node_weights[u] * node_weights[v]
-        bw = (interaction / (total_weight ** 2)) * total_load_mbps
-        # 过滤掉微小流
-        if bw > 1:
-          tm[(u, v)] = bw
+        try:
+          # 假设背景流走最短路 (Shortest Path)
+          path = nx.shortest_path(G_nx, u, v)
+          
+          min_bw = float('inf')
+          for i in range(len(path) - 1):
+            u_curr, v_next = path[i], path[i+1]
+            
+            # 获取物理容量，默认为 100.0
+            raw_cap = G_nx[u_curr][v_next].get('capacity', 100.0)
+            
+            # [关键] 强制扣除信令保留带宽
+            usable_cap = max(0.0, raw_cap - SIGNALING_RESERVE)
+            
+            if usable_cap < min_bw:
+              min_bw = usable_cap
+            
+          path_bottlenecks[(u, v)] = min_bw
+              
+        except nx.NetworkXNoPath:
+          path_bottlenecks[(u, v)] = 0.0
 
-    # 3. [流量聚合] 限制最大并发数，保护 CPU
-    MAX_BG_FLOWS = 80
+    # ==========================================
+    # 3. 计算节点权重 (Tier-Aware Gravity)
+    # ==========================================
+    node_weights = {}
+    for node in nodes:
+      # 获取节点等级，默认为 3 (Edge)
+      # 注意：请确保你的图是通过 apply_gravity_bandwidth_model 处理过的
+      tier = G_nx.nodes[node].get('tier', 3)
+      
+      # 根据等级获取权重范围
+      min_w, max_w = TIER_MULTIPLIERS.get(tier, (1.0, 3.0))
+      node_weights[node] = random.uniform(min_w, max_w)
+
+    total_weight_score = sum(node_weights.values())
+
+    # ==========================================
+    # 4. 生成初步流量 (Initial Allocation)
+    # ==========================================
+    potential_flows = []
+    total_interaction_score = 0.0
+    
+    for u in nodes:
+      for v in nodes:
+        if u == v: continue
+        
+        bottleneck = path_bottlenecks.get((u, v), 0)
+        if bottleneck <= 0.1: continue # 路不通或带宽太小，跳过
+
+        # 重力公式：流量 ~ 权重u * 权重v
+        # Tier 1 <-> Tier 1 的得分将远高于 Edge <-> Edge
+        score = node_weights[u] * node_weights[v]
+        
+        # 加入随机扰动 (0.8 - 1.2)
+        score *= random.uniform(0.8, 1.2)
+        
+        potential_flows.append({
+          'src': u,
+          'dst': v,
+          'score': score,
+          'limit': bottleneck # 携带物理上限
+        })
+        total_interaction_score += score
+
+    if total_interaction_score == 0: return {}
+
+    # ==========================================
+    # 5. 分配实际带宽 (Apply Constraints)
+    # ==========================================
+    for flow in potential_flows:
+      # 按比例瓜分总负载
+      # 乘以 1.5 是因为后面会有截断，为了让总流量接近预期，稍微给点盈余
+      target_bw = (flow['score'] / total_interaction_score) * total_load_mbps * 1.5
+      
+      # [铁律] 绝对截断：不超过路径瓶颈的 95%
+      # 既留出了信令空间，又防止了单流撑爆链路
+      safe_max = flow['limit'] * 0.95
+      
+      final_bw = min(target_bw, safe_max)
+      
+      # 过滤掉小于 0.1M 的无意义微小流
+      if final_bw > 0.1:
+        tm[(flow['src'], flow['dst'])] = final_bw
+
+    # ==========================================
+    # 6. 聚合优化 (Aggregation)
+    # ==========================================
+    MAX_BG_FLOWS = 40 # 限制总流数，防止 Mininet 卡死
 
     if len(tm) > MAX_BG_FLOWS:
-      # 选出 Top N 大流
-      top_flows = heapq.nlargest(MAX_BG_FLOWS, tm.items(), key=lambda x: x[1])
-      
-      # 计算缩放因子，保持总负载不变
-      total_original = sum(tm.values())
-      total_top = sum([bw for _, bw in top_flows])
-      scale = total_original / total_top if total_top > 0 else 1.0
-      
-      # 重构矩阵
-      final_tm = {k: v * scale for k, v in top_flows}
-      vprint(f"[TM] Aggregated: {len(tm)} -> {len(final_tm)} flows (Scale x{scale:.2f})")
-      return final_tm
-    else:
-      return tm
+        # 选出 Top N 大流
+        top_flows = heapq.nlargest(MAX_BG_FLOWS, tm.items(), key=lambda x: x[1])
+        
+        # [注意] 这里不再进行 Scale Up (放大)
+        # 原因：如果放大，可能会导致原本被 limit 限制住的流再次突破瓶颈
+        # 我们宁愿流量少一点，也要保证物理安全
+        final_tm = dict(top_flows)
+        
+        # 简单打印一下统计信息
+        # self.vprint 是假设你在类里面，如果不是请改成 print
+        print(f"[TM] Optimized: kept top {MAX_BG_FLOWS} flows. Max flow: {top_flows[0][1]:.2f} Mbps")
+        return final_tm
+    
+    return tm
 
   def simulate_tm_on_graph(self, G, tm_dict):
     """
@@ -105,7 +208,7 @@ class FlowGenerator:
     for u, v, data in G.edges(data=True):
       capacity = float(data.get('capacity', 100.0))
       prop_delay = float(data.get('base_delay', 5.0)) # 假设原始延迟存为 base_delay
-
+      
       current_load = edge_loads.get((u, v), 0.0) + edge_loads.get((v, u), 0.0)
       rho = min(current_load / (capacity + 1e-6), 0.999)
       
@@ -208,7 +311,6 @@ class FlowGenerator:
       # ITGSend 命令
       # 使用 nohup 或直接后台运行，并将输出重定向到文件
       cmd_send = (
-        f"nice -n 2 "
         f"ITGSend -a {dst_ip} "
         f"-T UDP "
         f"-C {pps} "

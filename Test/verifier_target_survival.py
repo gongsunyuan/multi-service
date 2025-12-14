@@ -13,12 +13,13 @@ from mininet.cli import CLI
 # 确保路径正确
 sys.path.append(os.getcwd())
 
-from MS.Env.FlowGenerator import FlowGenerator
+from MS.Env.FlowGenerator import FlowGenerator, FlowType
 from MS.Env.NetworkGenerator import TopologyGenerator
-from MS.Env.MininetController import get_a_mininet, install_path_rules, clean_flow_rules, NetworkMonitor, run_itg_safe
+from MS.Env.MininetController import get_a_mininet, install_path_rules, clean_flow_rules, NetworkMonitor, run_itg_safe, vprint_network_status
 from MS.Env import VerbosePrint as vp
 
 vprint = vp.vprint
+vp.MININET_VERBOSE = True  # 在测试中启用详细输出
 
 class Config:
   MAX_BW = 90.0
@@ -55,25 +56,6 @@ def verify_offload_status(net):
       print(f"    Raw: {result}") # 如果需要详细信息可取消注释
 
   print("="*40 + "\n")
-
-def print_network_status(G):
-  """打印全网高负载链路"""
-  print("-" * 60)
-  print(f"📊 [Global] High Load Links (>10%):")
-  print(f"  {'Link':<12} | {'Cap (Mbps)':<10} | {'Util %':<8} | {'Status'}")
-  print("-" * 60)
-  
-  count = 0
-  for u, v, data in G.edges(data=True):
-    util = data.get('utilization', 0.0)
-    cap = data.get('capacity', 100.0)
-    if util > 0.1: # 只显示活跃链路
-      status = "\033[91mFULL\033[0m" if util > 0.9 else "BUSY"
-      print(f"  {u:<2} <-> {v:<2}    | {cap:<10.1f} | {util:<8.2%} | {status}")
-      count += 1
-  if count == 0:
-    print("  (No congested links found)")
-  print("-" * 60)
 
 def print_path_status(G, path):
   """打印特定路径的详细状态"""
@@ -123,13 +105,16 @@ def run_survival_test():
   
   try:
     # 加载拓扑 (不使用 copy，我们需要实时更新 G_nx 的属性)
-    G_nx = topo_gen.load_topology("nsfnet.graphml")
+    G_nx = topo_gen.load_topology("nsfnet_gravity.graphml")
   except:
-    print("❌ 未找到 nsfnet.graphml")
+    print("❌ 未找到 nsfnet_gravity.graphml")
     return
+  # for u, v, data in G_nx.edges(data=True):
+  #   vprint(f"[{u}, {v}] {data}")
 
   with get_a_mininet(G_nx) as net:
-    verify_offload_status(net)
+    net.staticArp()
+    # verify_offload_status(net)
     print("[System] Mininet started.")
     monitor = NetworkMonitor(net) # 1. 初始化 Monitor
     
@@ -137,12 +122,16 @@ def run_survival_test():
     clean_flow_rules(net, cookie=0xA001, mask=0xFFFF)
     
     # --- Step 1: 制造拥塞 ---
-    LOAD_FLOW=100
+    LOAD_FLOW=100.0  # 背景流总量 (Mbps)
     print(f"\n[Step 1] 注入背景流 (Target: {LOAD_FLOW} Mbps)...")
-    tm = flow_gen.generate_traffic_matrix(G_nx.nodes(), total_load_mbps=LOAD_FLOW)
+    tm = flow_gen.generate_traffic_matrix(G_nx.nodes(), G_nx=G_nx, total_load_mbps=LOAD_FLOW)
     
+    simG = flow_gen.simulate_tm_on_graph(G_nx.copy(), tm)
+    vprint("[Simulation] Traffic Matrix Simulated on Graph:")
+    vprint_network_status(simG)
+
     proccesses = flow_gen.apply_traffic_matrix_to_mininet(
-      net, tm, G_nx, install_path_rules, duration=100
+      net, tm, G_nx, install_path_rules, duration=1000
     )
     
     print(f"[Ghost] There is {len(proccesses)} num of proc")
@@ -150,11 +139,17 @@ def run_survival_test():
     time.sleep(5)
     
     # --- [NEW] Step 1.5: 感知与输出状态 ---
-    print("\n[Monitor] 同步网络状态...")
-    monitor.sync_state_to_graph(G_nx) # 读取真实物理状态写入 G_nx
+    vprint("[Monitor] 同步网络状态...")
+    for _ in range(1000):
+      for _ in range(3):
+        monitor.sync_state_to_graph(G_nx) # 读取真实物理状态写入 G_nx
+        time.sleep(0.2)
+      break
+      vprint_network_status(G_nx)
+      time.sleep(0.3)
     
     # 1. 打印全网状态 (看看是不是真的堵了)
-    print_network_status(G_nx)
+    vprint_network_status(G_nx)
     # CLI(net)
     # --- Step 2: 发送目标流 ---
     s, d = 0, 13
@@ -194,8 +189,8 @@ def run_survival_test():
 
     # 2.2 下发规则 & 启动接收端
     
-    send_log = "/tmp/sender_output.log"
-    recv_log = "/tmp/receiver_output.log"
+    recv_log = "receiver_output"
+    send_log = "sender_output"
     if os.path.exists(recv_log): os.remove(recv_log)
     
     time.sleep(0.5)
@@ -211,17 +206,19 @@ def run_survival_test():
       f"-T TCP "
       f"-C 750 -c 1000 -t 6000 "
       f"-x {recv_log} "
-      # f"-l {send_log} "
+      f"-l {send_log} "
       ) # 护身符
-           
-    run_itg_safe(h_src, cmd, timeout_sec=100)
 
-    time.sleep(2)
+    # run_itg_safe(h_src, h_dst, recv_log, FlowType.GAMING, duration_sec=8, timeout_sec=20)
+    output = h_src.cmd(cmd)
+    print(f"[ITGSend Output] {output}")
+    time.sleep(5)
+
     # --- Step 3: 验证结果 ---
     print(f"[Ghost] There is {len(proccesses)} num of proc")
     monitor.sync_state_to_graph(G_nx) # 读取真实物理状态写入 G_nx
     # 1. 打印全网状态 (看看是不是真的堵了)
-    print_network_status(G_nx)
+    vprint_network_status(G_nx)
     print("\n[Step 3] 验证 D-ITG 接收结果:")
     print(f"[Ghost] There is {len(proccesses)} num of proc")
     
@@ -253,14 +250,16 @@ def run_survival_test():
         
         if total > 0:
             print("\n🎉 结论: 目标流存活！双流隔离有效。")
-            if loss > 0 or delay > 20:
+            if loss > 0 or delay > 40:
                 print("💪 效果: 目标流受到了背景流的真实干扰 (符合预期)。")
             else:
                 print("🤔 效果: 目标流未受干扰 (路径太顺了？建议加大背景负载)。")
       else:
         print(f"❌ 解析失败。")
-      
-      
+    for _ in range(3):
+      monitor.sync_state_to_graph(G_nx) # 读取真实物理状态写入 G_nx
+      time.sleep(0.2)
+    vprint_network_status(G_nx)
     os.system("sudo killall -9 ITGSend ITGRecv > /dev/null 2>&1")
 
 if __name__ == "__main__":

@@ -300,7 +300,7 @@ def vprint_network_status(G):
   """打印全网链路状态（按利用率从高到低排序，显示所有链路）"""
   vprint("-" * 65)
   vprint(f"[Global] Network Link Status (Sorted by Utilization):")
-  vprint(f" {'Link':<12} | {'Cap (Mbps)':<10} | {'Util %':<8} | {'Status'}")
+  vprint(f" {'Link':<12} | {'Cap (Mbps)':<10} | {'Load (Mbps)':<10} | {'Util %':<8} | {'Status'}")
   vprint("-" * 65)
   
   # 1. 收集所有链路数据
@@ -308,7 +308,7 @@ def vprint_network_status(G):
   for u, v, data in G.edges(data=True):
     util = data.get('utilization', 0.0)
     cap = data.get('capacity', 100.0)
-    
+    load = data.get('measured_speed', 0.0) # 使用真实值
     # 简单的状态判定逻辑
     if util > 0.90:
       status = "FULL"  # 红色预警
@@ -316,17 +316,17 @@ def vprint_network_status(G):
       status = "BUSY"  # 黄色繁忙
     else:
       status = "IDLE"  # 绿色空闲
-      
-    link_stats.append((u, v, cap, util, status))
+
+    link_stats.append((u, v, cap, load, util, status))
 
   # 2. 排序：按 util (第4个元素，索引3) 从大到小排序
-  # key=lambda x: x[3] 表示取元组中的 util 字段作为排序依据
+  # key=lambda x: x[4] 表示取元组中的 util 字段作为排序依据
   # reverse=True 表示降序（最堵的排前面）
-  link_stats.sort(key=lambda x: x[3], reverse=True)
+  link_stats.sort(key=lambda x: x[4], reverse=True)
 
   # 3. 打印
-  for u, v, cap, util, status in link_stats:
-    vprint(f" {u:<2} <-> {v:<2}    | {cap:<10.1f} | {util:<8.2%} | {status}")
+  for u, v, cap, load, util, status in link_stats:
+    vprint(f" {u:<2} <-> {v:<2}    | {cap:<10.1f} | {load:<10.2f} | {util:<8.2%} | {status}")
 
   vprint("-" * 65)
 
@@ -345,7 +345,7 @@ class GraphTopo(Topo):
       self.addLink(f'{test_str}h{node_id}', f'{test_str}s{node_id}', delay='0ms')
 
     for u, v, data in blueprint_g.edges(data=True):
-      bw = data.get('bandwidth', 200)
+      bw = data.get('bandwidth', 30.0) # Mbps
       delay = f"{data.get('delay', 1)}ms"
       loss = data.get('loss', 0)
       q_limit = data.get('queue_size', 2000)
@@ -385,7 +385,6 @@ def get_a_mininet(g: nx.Graph, is_test=False, remote_port=None):
     for sw in net.switches:
       for intf in sw.intfList():
         if intf.name != 'lo':
-          # 使用 ethtool 关闭卸载
           sw.cmd(f"ethtool -K {intf.name} tso off gso off gro off > /dev/null 2>&1")
           
     net.start()
@@ -709,8 +708,8 @@ def run_itg_safe(client_node, server_node, log_file, flow_type, duration_sec, ti
     # --- Step 4: Wait with Timeout ---
     try:
       stdout, stderr = client_proc.communicate(timeout=timeout_sec)
-      vprint(f"[STDOUT]: {stdout}")
       # Check for immediate D-ITG errors in stderr
+      vprint(f"[STDOUT]: {stdout}")
       if stderr:
         err_str = stderr.decode('utf-8', errors='ignore')
         if "Connection refused" in err_str or "Connect error" in err_str:
@@ -720,7 +719,7 @@ def run_itg_safe(client_node, server_node, log_file, flow_type, duration_sec, ti
 
     except subprocess.TimeoutExpired:
       vprint(f"[Timeout] Flow timed out (> {timeout_sec}s). Saving logs...")
-      
+      vprint(f"[STDOUT]: {stdout}")
       # Graceful Shutdown: Send SIGINT to the Process Group
       # This tells D-ITG to stop sending and flush logs to disk
       try:
@@ -1183,7 +1182,8 @@ class NetworkMonitor:
       # 速率 (Mbps)
       speed_mbps = ((b2 - b1) * 8) / (delta_t * 1_000_000)
       
-      capacity = data.get('bandwidth', 10.0)
+      capacity = data.get('capacity', 30.0)
+      assert(capacity >= 30)
       util = min(speed_mbps / (capacity + 1e-6), 1.0)
       
       # 写入图
@@ -1207,7 +1207,7 @@ class NetworkMonitor:
       # 写入节点特征 (源节点 Buffer)
       # 更新源节点 u 的状态
       node_u = G.nodes[u]
-      max_q = 50.0
+      max_q = 2000  # 假设最大队列长度为 2000 packets
       buf_occ = min(q_len / max_q, 1.0)
       
       # 简单估算 Proc Delay

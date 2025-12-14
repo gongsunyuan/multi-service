@@ -45,7 +45,8 @@ class TopologyGenerator:
     else:
       raise ValueError(f"Unsupported format: {loadpath}")
 
-
+    # --- 3. 初始化动态属性 ---
+    self.scale_topology_bandwidth(G, scale=0.1)  # 默认不缩放
     self.G = G
     vprint(f"[Graph] Loaded Fixed Topo: {loadpath} | Nodes: {len(G.nodes())}")
     return G
