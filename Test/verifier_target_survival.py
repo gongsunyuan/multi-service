@@ -122,7 +122,7 @@ def run_survival_test():
     clean_flow_rules(net, cookie=0xA001, mask=0xFFFF)
     
     # --- Step 1: 制造拥塞 ---
-    LOAD_FLOW=100.0  # 背景流总量 (Mbps)
+    LOAD_FLOW=600.0  # 背景流总量 (Mbps)
     print(f"\n[Step 1] 注入背景流 (Target: {LOAD_FLOW} Mbps)...")
     tm = flow_gen.generate_traffic_matrix(G_nx.nodes(), G_nx=G_nx, total_load_mbps=LOAD_FLOW)
     
@@ -152,7 +152,7 @@ def run_survival_test():
     vprint_network_status(G_nx)
     # CLI(net)
     # --- Step 2: 发送目标流 ---
-    s, d = 0, 13
+    s, d = 8, 11
     h_src, h_dst = net.get(f'h{s}'), net.get(f'h{d}')
     print(f"\n[Step 2] 准备发送目标流: h{s} -> h{d}")
     
@@ -172,7 +172,7 @@ def run_survival_test():
     h_dst.cmd("pkill -f 'ITGRecv -Sp 9001'") 
     time.sleep(0.2)
     # 启动新进程
-    recv_proc = h_dst.popen("nice -n 1 ITGRecv -Sp 9001")
+    recv_proc = h_dst.popen("chrt -r 99 ITGRecv -Sp 9001")
     time.sleep(3)
 
     # 2.5 诊断 VIP 通道
@@ -198,7 +198,7 @@ def run_survival_test():
     print(f"[Ghost] There is {len(proccesses)} num of proc")
     # 2.3 启动发送端
     cmd = (
-      f"nice -n 1 "
+      f"chrt -r 99 "  # 护身符：实时调度
       f"ITGSend -a {h_dst.IP()} "
       f"-b 32 "
       f"-rp 12000 "
@@ -209,11 +209,11 @@ def run_survival_test():
       f"-l {send_log} "
       ) # 护身符
 
-    # run_itg_safe(h_src, h_dst, recv_log, FlowType.GAMING, duration_sec=8, timeout_sec=20)
     output = h_src.cmd(cmd)
     print(f"[ITGSend Output] {output}")
     time.sleep(5)
 
+    # run_itg_safe(h_src, h_dst, recv_log, FlowType.GAMING, duration_sec=8, timeout_sec=20)
     # --- Step 3: 验证结果 ---
     print(f"[Ghost] There is {len(proccesses)} num of proc")
     monitor.sync_state_to_graph(G_nx) # 读取真实物理状态写入 G_nx

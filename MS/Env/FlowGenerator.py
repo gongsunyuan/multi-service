@@ -168,7 +168,7 @@ class FlowGenerator:
     # ==========================================
     # 6. 聚合优化 (Aggregation)
     # ==========================================
-    MAX_BG_FLOWS = 40 # 限制总流数，防止 Mininet 卡死
+    MAX_BG_FLOWS = 80 # 限制总流数，防止 Mininet 卡死
 
     if len(tm) > MAX_BG_FLOWS:
         # 选出 Top N 大流
@@ -313,7 +313,7 @@ class FlowGenerator:
       cmd_send = (
         f"ITGSend -a {dst_ip} "
         f"-T UDP "
-        f"-C {pps} "
+        f"-C {pps*2} "
         f"-c 1000 "
         f"-rp 11000 "
         f"-t {duration * 1000} "
