@@ -638,7 +638,8 @@ def get_flow_command(
   # 3. Apply "Nuclear Option" (Real-Time Priority)
   # chrt -r 99: Run as Real-Time Round-Robin process with max priority
   # This ensures the marker flow isn't starved by background traffic.
-  wrapper = "chrt -r 99" 
+  # wrapper = "chrt -r 99" 
+  wrapper = "" 
   
   # 4. Construct Final Command
   final_cmd = f"{wrapper} ITGSend {itg_args} {specific_args}"

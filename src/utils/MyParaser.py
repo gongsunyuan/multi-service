@@ -36,6 +36,12 @@ class TopoParaser(ArgumentParser):
       action='store_true',
       help='Enable verbose output for debugging'
     )
+    self.add_argument(
+      '--load_flow',
+      type=int,
+      default=0,
+      help='Load flow rate in Mbps for evaluation (default: 0)'
+    )
     
 
 
