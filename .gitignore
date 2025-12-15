@@ -1,4 +1,5 @@
 # Python bytecode files
+*.pt
 *.pth 
 *.pyc
 *.ingest
@@ -11,7 +12,9 @@ log**
 __pycache__/
 checkpoints/
 dataset/
+workspace/
 trained_model/
 train_log/
 curve/
+data/
 tmp/
