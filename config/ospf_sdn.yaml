@@ -16,7 +16,7 @@ MODEL:
 
 # --- Training Hyperparameters ---
 TRAINING:
-  EPOCH: 10
+  EPOCH: 480
   EPISODES_PER_TOPO: 32
   BATCH_SIZE: 32
   ENTROPY_COEF: 0.01
@@ -25,8 +25,8 @@ TRAINING:
   GAMMA: 0.99
   CRITIC_LOSS_COEF: 0.5
   MAX_GRAD_NORM: 0.5
-  START_LOAD: 80
-  END_LOAD: 120
+  START_LOAD: 60
+  END_LOAD: 300
 
 # --- Environment & QoS Constraints ---
 ENV:

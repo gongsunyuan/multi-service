@@ -3,8 +3,8 @@
 # ==============================================================================
 EVALUATING:
   VALIDATION_LOAD: 60.0
-  VALIDATION_EPISODES_PER_FLOW: 300
-  VALIDATION_BATCH_SIZE: 20
+  VALIDATION_EPISODES_PER_FLOW: 120
+  VALIDATION_BATCH_SIZE: 10
   VALIDATION_FLOW_TYPES:
     - "VOIP"      # 测延迟
     - "GAMING"    # 测综合

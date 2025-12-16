@@ -1,4 +1,5 @@
 import os
+import math
 import subprocess
 from time import sleep, time
 import re 
@@ -199,7 +200,61 @@ def calculate_qoe_reward(qos_metrics: dict, flow_profile: dict) -> float:
   # 确保数值稳定，截断在 [-1.0, 1.0]
   return float(np.clip(final_reward, -1.0, 1.0))
 
-def measure_path_qos(server, client, path_route, flow_type, resend = False):
+def calculate_qos_reward(delay_ms, loss_percent, jitter_ms, bw_mbps, flow_type, config=None) -> float:
+  """
+  计算基于 QoS 的奖励函数 (对梯度友好版)
+  """
+  # 1. 定义基准值 (Normalization Anchors)
+  # 超过这个值就开始重罚，或者用来做分母
+  MAX_DELAY = config.MAX_DELAY  # ms
+  MAX_JITTER = config.MAX_JITTER  # ms
+  MAX_LOSS = config.MAX_LOSS    # 5%
+  REQUIRED_BW = config.REQUIRED_BW # Mbps (假设业务需求)
+
+  # 2. 归一化计算 (映射到 0~1 或 类似范围)
+  
+  # [延迟惩罚]: 线性惩罚，平滑
+  # r_delay 范围: 0.0 ~ >1.0
+  r_delay = delay_ms / MAX_DELAY
+  
+  # [丢包惩罚]: 指数惩罚 (丢包比延迟更严重)
+  # 小丢包有惩罚，大丢包重罚
+  # loss_percent: 0.0 ~ 1.0
+  r_loss = loss_percent / 0.01  # 每 1% 丢包算一个单位
+  
+  # [抖动惩罚]
+  r_jitter = jitter_ms / MAX_JITTER
+  
+  # [带宽奖励]: 对数奖励 (Diminishing Returns)
+  # 带宽从 1M 到 10M 提升很大，从 100M 到 110M 提升很小
+  # 加上 1e-6 防止 log(0)
+  r_bw = math.log(bw_mbps + 1.0) / math.log(REQUIRED_BW + 1.0)
+  r_bw = min(r_bw, 1.2) # 截断，防止带宽无限大导致 Reward 虚高
+
+  # 3. 根据业务类型动态加权 (这正是你的 FiLM 擅长的！)
+  if flow_type == 'VOIP':
+    # VoIP: 痛恨延迟和抖动，带宽够用就行
+    w_bw, w_d, w_l, w_j = 0.1, 2.0, 5.0, 1.0
+  elif flow_type == 'STREAMING':
+    # 视频: 需要大带宽，对延迟稍宽容
+    w_bw, w_d, w_l, w_j = 2.0, 0.5, 2.0, 0.1
+  elif flow_type == 'GAMING':
+    # 游戏: 痛恨延迟，对丢包极其敏感
+    w_bw, w_d, w_l, w_j = 0.1, 3.0, 10.0, 0.5
+  else:
+    w_bw, w_d, w_l, w_j = 1.0, 1.0, 1.0, 1.0
+
+  # 4. 最终合成
+  # 基础分 1.0，扣分制
+  reward = 1.0 + (w_bw * r_bw) - (w_d * r_delay) - (w_l * r_loss) - (w_j * r_jitter)
+  
+  # 5. [Trick] 奖励截断 (Reward Clipping)
+  # 防止极端情况（如网络断了，延迟 10000ms）导致梯度爆炸
+  reward = max(min(reward, 10.0), -10.0)
+  
+  return reward
+
+def measure_path_qos(server, client, path_route, flow_type, config, resend = False):
   """
   使用 D-ITG 测量路径 QoS (基于内存文件系统 /dev/shm)
   """
@@ -293,77 +348,152 @@ def measure_path_qos(server, client, path_route, flow_type, resend = False):
   vprint(f"      loss_rate: {qos_metrics['loss_rate']}")
 
   # 计算 Reward
-  reward = calculate_qoe_reward(qos_metrics, FLOW_PROFILES[flow_type])
+  # reward = calculate_qoe_reward(qos_metrics, FLOW_PROFILES[flow_type])
+  reward = calculate_qos_reward(
+    delay_ms=qos_metrics['delay'],
+    loss_percent=qos_metrics['loss_rate'],
+    jitter_ms=qos_metrics['jitter'],
+    bw_mbps=qos_metrics['bandwidth'],
+    flow_type=flow_type,
+    config=config
+  )
 
   vprint(f"[QoE] calculate reward: {reward}")
   return reward
 
 def vprint_network_status(G):
-  """打印全网链路状态（按利用率从高到低排序，显示所有链路）"""
-  vprint("-" * 65)
-  vprint(f"[Global] Network Link Status (Sorted by Utilization):")
-  vprint(f" {'Link':<12} | {'Cap (Mbps)':<10} | {'Load (Mbps)':<10} | {'Util %':<8} | {'Status'}")
-  vprint("-" * 65)
+  """
+  打印全网状态，包含所有 GNN 输入特征：
+  1. 链路特征 (Edge Features): Bandwidth, Util, AvailBW, Delay, Loss
+  2. 节点特征 (Node Features): Degree, Centrality, Buffer, ProcDelay, etc.
+  """
+  # ==============================
+  # Part 1: 链路状态 (Edge Features)
+  # ==============================
+  vprint("-" * 110)
+  vprint(f"[Global] Edge Status (Sorted by Utilization):")
+  vprint(f" {'Link':<10} | {'Cap(M)':<8} | {'Load(M)':<8} | {'Util%':<7} | {'Avail(M)':<8} | {'Delay':<8} | {'Loss%':<7} | {'Status'}")
+  vprint("-" * 110)
   
-  # 1. 收集所有链路数据
   link_stats = []
   for u, v, data in G.edges(data=True):
-    util = data.get('utilization', 0.0)
-    cap = data.get('capacity', 100.0)
-    load = data.get('measured_speed', 0.0) # 使用真实值
-    # 简单的状态判定逻辑
-    if util > 0.90:
-      status = "FULL"  # 红色预警
-    elif util > 0.50:
-      status = "BUSY"  # 黄色繁忙
-    else:
-      status = "IDLE"  # 绿色空闲
+    # 提取边特征
+    cap = data.get('bandwidth')      # Bandwidth
+    util = data.get('utilization')     # Utilization
+    delay = data.get('delay')          # Delay
+    loss = data.get('loss')            # Loss
+    
+    # 计算衍生特征
+    load = cap * util                       # Load (近似或从 measured_speed 获取)
+    avail = cap * (1.0 - util)              # Available Bandwidth
+    
+    # 状态判定
+    if loss > 0.01: status = "LOSS"         # 有丢包最严重
+    elif util > 0.90: status = "FULL"       # 拥塞
+    elif util > 0.50: status = "BUSY"
+    else: status = "IDLE"
 
-    link_stats.append((u, v, cap, load, util, status))
+    link_stats.append((u, v, cap, load, util, avail, delay, loss, status))
 
-  # 2. 排序：按 util (第4个元素，索引3) 从大到小排序
-  # key=lambda x: x[4] 表示取元组中的 util 字段作为排序依据
-  # reverse=True 表示降序（最堵的排前面）
+  # 按利用率降序排序
   link_stats.sort(key=lambda x: x[4], reverse=True)
 
-  # 3. 打印
-  for u, v, cap, load, util, status in link_stats:
-    vprint(f" {u:<2} <-> {v:<2}    | {cap:<10.1f} | {load:<10.2f} | {util:<8.2%} | {status}")
+  for item in link_stats:
+    u, v, cap, load, util, avail, delay, loss, status = item
+    vprint(f" {u:<2}<->{v:<2}   | {cap:<8.1f} | {load:<8.2f} | {util:<7.2%} | {avail:<8.1f} | {delay:<6.2f}ms | {loss:<7.2%} | {status}")
 
-  vprint("-" * 65)
+  vprint("-" * 110)
+
+  # ==============================
+  # Part 2: 节点状态 (Node Features)
+  # ==============================
+  raw_node_data = []
+  for n, data in G.nodes(data=True):
+    deg = G.degree[n]
+    betw = data.get('betweenness')
+    clust = data.get('clustering')
+    pgrank = data.get('pagerank')
+    buff = data.get('buffer_occupancy', 0.0)
+    proc = data.get('proc_delay', 0.0)
+    
+    raw_node_data.append({
+      'n': n, 'deg': deg, 'betw': betw, 
+      'clust': clust, 'pgrank': pgrank, 
+      'buff': buff, 'proc': proc
+    })
+
+  # 2. 动态计算阈值 (Dynamic Thresholding)
+  # 找出介数中心性的最大值，或者用排序的前 20% 作为 Core
+  max_betw = max(d['betw'] for d in raw_node_data) if raw_node_data else 1.0
+  sorted_by_betw = sorted(raw_node_data, key=lambda x: x['betw'], reverse=True)
+  
+  # 简单的动态判定逻辑：
+  # 如果介数 > 最大值的 40%，认为是 Core
+  # 否则认为是 Edge
+  # (你也可以结合 PageRank: if pgrank > 0.15: Core)
+  
+  vprint(f"[Global] Node Status (Sorted by Importance/Betweenness):")
+  vprint(f" {'Node':<6} | {'Deg':<4} | {'Betw-C':<8} | {'PgRank':<8} | {'Buffer%':<8} | {'Proc(ms)':<8} | {'Role'}")
+  vprint("-" * 90)
+
+  for item in sorted_by_betw: # 打印所有节点，按重要性排序
+    role = "Edge"
+    # === 新的判断逻辑 ===
+    if item['betw'] > (max_betw * 0.4): 
+      role = "CORE"  # 绝对的主干
+    elif item['betw'] > (max_betw * 0.1):
+      role = "Aggr"  # 汇聚层
+    # ===================
+
+    vprint(f" {item['n']:<6} | {item['deg']:<4} | {item['betw']:<8.4f} | {item['pgrank']:<8.4f} | {item['buff']:<8.2%} | {item['proc']:<8.4f} | {role}")
+  
+  vprint("-" * 90)
 
 def vprint_path_status(G, path):
-  """打印特定路径的详细状态"""
-  vprint("-" * 60)
-  vprint(f"  {'Hop':<12} | {'Cap (Mbps)':<10} | {'Load':<8} |{'Util %':<9} | {'Delay':<8} | {'Status'}")
-  vprint("-" * 60)
+  """
+  打印路径详细状态，整合了沿途的 [节点特征] 和 [边特征]
+  """
+  vprint("-" * 130)
+  vprint(f"Path Detail: {path}")
+  vprint(f" {'Hop (u->v)':<12} | {'Cap':<6} | {'Util%':<7} | {'Avail':<6} | {'Delay':<8} | {'Loss%':<6} || {'[Node u] Buffer%':<16} | {'[Node u] Proc_D':<14} | {'Status'}")
+  vprint("-" * 130)
   
   total_delay = 0.0
-  is_bad = False
+  min_avail_bw = 99999.0
+  total_loss_prob = 0.0 # 估算路径总丢包概率
   
   for u, v in zip(path[:-1], path[1:]):
-    data = G[u][v]
-    util = data.get('utilization', 0.0)
-    cap = data.get('capacity', 100.0)
+    # --- 1. 获取边特征 ---
+    e_data = G[u][v]
+    cap = e_data.get('bandwidth', 100.0)
+    util = e_data.get('utilization', 0.0)
+    delay = e_data.get('delay', 1.0)
+    loss = e_data.get('loss', 0.0)
+    avail = cap * (1.0 - util)
     
-    # 估算延迟 (Prop + Queue)
-    prop_delay = data.get('delay', 5.0) # 注意: 这里假设 NetworkGenerator 还没把 delay 变成 total_delay
-    # 如果 NetworkGenerator 里的 delay 已经是 total_delay，直接用即可
-    # 这里为了保险，我们用 MM1 手算一下展示给用户看
-    if util > 0.99: queue = 100.0 
-    else: queue = 10.0 * util / (1.0 - util)
-    
-    delay = prop_delay + queue
-    total_delay += delay
-    
-    status = "OK"
-    if util > 0.8: 
-      status = "BAD"
-      is_bad = True
-    load = data.get('measured_speed', 0.0) # 使用真实值
-    vprint(f"  {u:<2} -> {v:<2}     | {cap:<10.1f} | {load:<8.2f} | {util:<8.2%} | {delay:<6.1f}ms | {status}")
+    # --- 2. 获取源节点特征 (Node u) ---
+    n_data = G.nodes[u]
+    buff = n_data.get('buffer_occupancy', 0.0)
+    proc = n_data.get('proc_delay', 0.0) # 这里的 proc_delay 是节点处理这一跳的耗时
 
-  vprint("-" * 60)
+    # --- 3. 统计 ---
+    total_delay += delay + proc # 路径总时延 = 链路时延 + 节点处理时延
+    min_avail_bw = min(min_avail_bw, avail)
+    # 路径不丢包概率 = (1-l1)*(1-l2)... => 丢包率 = 1 - product
+    # 这里简单相加近似展示 (loss 通常很小)
+    
+    # --- 4. 状态判定 ---
+    status = "OK"
+    if loss > 0.001: status = "PKT_DROP"
+    elif util > 0.95: status = "CONGEST"
+    elif buff > 0.80: status = "BUF_FULL"
+    
+    # 打印一行
+    vprint(f" {u:<2} -> {v:<2}      | {cap:<6.0f} | {util:<7.2%} | {avail:<6.1f} | {delay:<6.2f}ms | {loss:<6.2%} || {buff:<16.2%} | {proc:<14.4f} | {status}")
+
+  vprint("-" * 130)
+  vprint(f" >>> Path Summary: Total Delay ≈ {total_delay:.2f} ms | Bottleneck BW: {min_avail_bw:.2f} Mbps")
+  vprint("-" * 130)
 
 # Generator :
 # 生成一个mininet网络
@@ -1205,6 +1335,9 @@ class NetworkMonitor:
     delta_t = t2 - t1
     if delta_t <= 0: delta_t = 1e-6
 
+    node_stats_buffer = {n: [] for n in G.nodes()}
+    node_stats_util   = {n: [] for n in G.nodes()}
+
     # 4. 计算并更新
     for u, v, data in G.edges(data=True):
       key = (u, v)
@@ -1227,6 +1360,7 @@ class NetworkMonitor:
 
       data['utilization'] = 0.3 * data.get('utilization', util) + 0.7 * util
       data['measured_speed'] = speed_mbps
+
       # --- B. 获取瞬时队列 (Buffer) ---
       # 队列长度只需要读一次（取最新状态）
       # 解析 tc 输出
@@ -1239,17 +1373,33 @@ class NetworkMonitor:
         q_len = int(match.group(1)) if match else 0
       except:
         q_len = 0
-      
-      # 写入节点特征 (源节点 Buffer)
-      # 更新源节点 u 的状态
-      node_u = G.nodes[u]
       max_q = 2000  # 假设最大队列长度为 2000 packets
       buf_occ = min(q_len / max_q, 1.0)
-      
+      if u in node_stats_buffer:
+        node_stats_buffer[u].append(buf_occ)
+        node_stats_util[u].append(util)
+
+    # 写入节点特征 (源节点 Buffer)
+    # 更新源节点 u 的状态
+    for n in G.nodes():
+      # --- 聚合 Buffer (取最大值) ---
+      # 含义：如果有一个方向堵了，这个节点就标红
+      buffer_list = node_stats_buffer[n]
+      if buffer_list:
+        max_buffer = max(buffer_list) 
+      else:
+        max_buffer = 0.0
+        
+      util_list = node_stats_util[n]
+      if util_list:
+        max_util = max(util_list)
+      else:
+        max_util = 0.0
+
       # 简单估算 Proc Delay
-      proc_delay = 0.01 * (1 + 5 * util**2) # 拥塞时 CPU 处理变慢
-      
-      node_u['buffer_occupancy'] = 0.3 * node_u.get('buffer_occupancy', 0) + 0.7 * buf_occ
-      node_u['proc_delay'] = 0.3 * node_u.get('proc_delay', 0) + 0.7 * proc_delay
+      proc_delay = 0.01 * (1 + 5 * max_util**2) # 拥塞时 CPU 处理变慢
+
+      G.nodes[n]['buffer_occupancy'] = 0.3 * G.nodes[n].get('buffer_occupancy', 0) + 0.7 * max_buffer
+      G.nodes[n]['proc_delay'] = 0.3 * G.nodes[n].get('proc_delay', 0)             + 0.7 * proc_delay
 
     return G

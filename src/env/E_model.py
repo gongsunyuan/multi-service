@@ -76,6 +76,7 @@ class RigorousVideoEvaluator:
       final_mos = 1.0 + (mos_v - 1.0) * penalty
     else:
       final_mos = mos_v
+    
     return max(1.0, min(5.0, final_mos))
 
   def calculate_mos(self, loss_pct, rtt_ms, physical_bw_kbps, duration_sec, stateless_mode=True):

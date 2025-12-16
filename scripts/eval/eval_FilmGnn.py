@@ -72,7 +72,7 @@ def load_config(config_path):
   setattr(config, "LOG_FILE_DIR", os.path.join(log_dir, log_dir_name))
   p = Path(config.LOG_FILE_DIR)
   p.mkdir(parents=True, exist_ok=True)
-
+  os.chmod(config.LOG_FILE_DIR, 0o777)
   return config
 
 def refresh_background_traffic(net, topo_graph, load_mbps=600.0):
@@ -186,8 +186,8 @@ def validate_performance(CONFIG, agent, base_G_nx, fingerprint_bank):
       flow_type_enum = getattr(FlowType, flow_type_str.upper())
       vprint(f">>> Testing Flow Type: {flow_type_str}")
       
-      current_G = refresh_background_traffic(net, base_G_nx.copy(), load_mbps=curr_load)
-      for _ in range(3): current_G = monitor.sync_state_to_graph(current_G.copy(), duration=0.5)
+      refresh_background_traffic(net, base_G_nx.copy(), load_mbps=curr_load)
+      for _ in range(3): current_G = monitor.sync_state_to_graph(base_G_nx.copy(), duration=0.5)
       vprint_network_status(current_G)
       # 初始化数据容器
       metrics = {algo: [] for algo in algos}
@@ -199,9 +199,10 @@ def validate_performance(CONFIG, agent, base_G_nx, fingerprint_bank):
         # 每个 Batch 之前，刷新网络状态
         refresh_background_traffic(net, base_G_nx.copy(), load_mbps=curr_load)
         for _ in range(3):
-          current_G = monitor.sync_state_to_graph(current_G.copy(), duration=0.5)
-        vprint_network_status(current_G)
+          current_G = monitor.sync_state_to_graph(base_G_nx.copy(), duration=0.5)
         
+        vprint_network_status(current_G)
+
         with tqdm(total=CONFIG.VALIDATION_BATCH_SIZE, desc=f"[{flow_type_str}] Batch {batch_idx+1}/{total_batches}", leave=False) as pbar:
           for _ in range(CONFIG.VALIDATION_BATCH_SIZE):
             current_G = monitor.sync_state_to_graph(current_G.copy(), duration=0.2)

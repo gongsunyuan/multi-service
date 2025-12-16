@@ -16,7 +16,7 @@ class TopologyGenerator:
     加载固定的 GraphML 文件 (NSFNet)，并初始化 RL 环境所需的动态属性。
     自动搜索路径：当前目录 -> TopoGraph/ 目录
     """
-    
+
     #  传完整路径 "TopoGraph/nsfnet.graphml"
     if os.path.exists(filename):
       loadpath = filename
@@ -44,10 +44,38 @@ class TopologyGenerator:
 
     # --- 3. 初始化动态属性 ---
     self.scale_topology_bandwidth(G, scale=0.1)  # 默认不缩放
-    self.G = G
+    self.G = self.update_graph_metric(G)
     vprint(f"[Graph] Loaded Fixed Topo: {loadpath} | Nodes: {len(G.nodes())}")
-    return G
 
+    return G
+  
+  def update_graph_metric(self, G):
+    """
+    手动计算图的中心性指标，并更新到 NetworkX 节点属性中。
+    这样 vprint 函数才能读到非零值。
+    """
+    # 1. 计算介数中心性 (Betweenness Centrality)
+    # weight='delay' 表示计算基于延迟的最短路介数，比默认的跳数更准
+    bet_dict = nx.betweenness_centrality(G, weight='delay', normalized=True)
+    
+    # 2. 计算 PageRank
+    try:
+        pr_dict = nx.pagerank(G, weight='bandwidth')
+    except:
+        # 某些图如果不连通可能会报错，给个兜底
+        pr_dict = {n: 0.0 for n in G.nodes()}
+
+    # 3. 计算聚类系数
+    clust_dict = nx.clustering(G)
+
+    # 4. 赋值回图节点
+    for n in G.nodes():
+        G.nodes[n]['betweenness'] = bet_dict.get(n, 0.0)
+        G.nodes[n]['pagerank'] = pr_dict.get(n, 0.0)
+        G.nodes[n]['clustering'] = clust_dict.get(n, 0.0)
+    
+    return G
+  
   def scale_topology_bandwidth(self, G: nx.Graph, scale: float):
     """
     等比例缩放图中所有边的带宽。
@@ -145,15 +173,44 @@ class TopologyGenerator:
         return s, d
 
 def get_pyg_data_from_nx(G: nx.Graph, S_node: int, D_node: int, config):
+  """
+  get_pyg_data_from_nx 的 Docstring
+  
+  :param G: 要提取特征的图
+  :type G: nx.Graph
+  :param S_node: 源节点
+  :type S_node: int
+  :param D_node: 目的节点
+  :type D_node: int
+  :param config: 配置对象，包含归一化所需的最大/最小值
+
+  returns: PyG Data 对象和带有特征的 NetworkX 图
+  :rtype: tuple[Data, nx.Graph]
+  包括：
+    - 节点特征:
+      - Degree (归一化)
+      - Is_Source (0/1)
+      - Is_Destination (0/1)
+      - Dist_From_Source (归一化)
+      - Dist_To_Destination (归一化)
+      - Betweenness Centrality 介数中心数
+      - Clustering Coefficient 聚类系数
+      - PageRank
+      - Buffer Occupancy 
+      - Processing Delay
+    - 边特征: 
+      - Delay (归一化)
+      - Bandwidth (归一化)
+      - Loss (归一化)
+      - Utilization
+      - Available Bandwidth (归一化)
+  """
   # --- 1. 性能优化：结构特征缓存 ---
-  try:
-    if 'betweenness' not in G.graph:
-      G.graph['betweenness'] = nx.betweenness_centrality(G)
-    if 'pagerank' not in G.graph:
-      G.graph['pagerank'] = nx.pagerank(G, alpha=0.85)
-    if 'clustering' not in G.graph:
-      G.graph['clustering'] = nx.clustering(G)
-      
+  # G.graph['betweenness'] = nx.betweenness_centrality(G)
+  # G.graph['pagerank'] = nx.pagerank(G, alpha=0.85)
+  # G.graph['clustering'] = nx.clustering(G)
+  
+  try: 
     betweenness = G.graph['betweenness']
     pagerank = G.graph['pagerank']
     clustering = G.graph['clustering']
@@ -214,13 +271,12 @@ def get_pyg_data_from_nx(G: nx.Graph, S_node: int, D_node: int, config):
     deg = G.degree(i) / (deg_max + 1e-6)
     is_s = 1.0 if i == S_node else 0.0
     is_d = 1.0 if i == D_node else 0.0
-    
     ds = 1.0 * min(dist_from_s.get(i, 999), deg_max) / deg_max 
     dd = 1.0 * min(dist_to_d.get(i, 999), deg_max) / deg_max
     
-    betw = betweenness.get(i, 0.0)
-    clus = clustering.get(i, 0.0)
-    pr = pagerank.get(i, 0.0) * 10.0
+    betw = betweenness.get(i)
+    clus = clustering.get(i)
+    pr = pagerank.get(i) * 10.0
     
     bo = float(node_data.get('buffer_occupancy', 0.0))
     pd = float(node_data.get('proc_delay', 0.0))
