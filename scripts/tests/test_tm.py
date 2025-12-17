@@ -13,10 +13,10 @@ from mininet.cli import CLI
 # 确保路径正确
 sys.path.append(os.getcwd())
 
-from src.env.FlowGenerator import FlowGenerator, FlowType
-from src.env.NetworkGenerator import TopologyGenerator
-from src.env.MininetController import get_a_mininet, install_path_rules, clean_flow_rules, NetworkMonitor, run_itg_safe, vprint_network_status
-from src.utils import VerbosePrint as vp
+from env.flow_generator import FlowGenerator, FlowType
+from env.network_generator import TopologyGenerator
+from env.sdn_controller import get_a_mininet, install_path_rules, clean_flow_rules, NetworkMonitor, run_itg_safe, vprint_network_status
+from utils import verbose_logger as vp
 
 vprint = vp.vprint
 vp.MININET_VERBOSE = True  # 在测试中启用详细输出

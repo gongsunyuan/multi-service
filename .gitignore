@@ -5,16 +5,12 @@
 *.ingest
 *.log
 
-**log**
-**log
-log**
-
-__pycache__/
-checkpoints/
-dataset/
-workspace/
 trained_model/
+checkpoints/
+__pycache__/
 train_log/
+workspace/
+dataset/
 curve/
 data/
 tmp/

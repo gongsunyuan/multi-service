@@ -5,12 +5,88 @@ import torch
 import os
 import math
 from torch_geometric.data import Data
-from src.utils.VerbosePrint import vprint
+from ..utils import logger
 
 class TopologyGenerator:
   def __init__(self):
+    self.G = None
     pass
 
+  # [Insert into src/env/network_generator.py inside TopologyGenerator class]
+
+  def generate_topology(self, mode='random', min_nodes=10, max_nodes=20) -> nx.Graph:
+    """
+    生成拓扑的统一入口。
+    
+    Args:
+      mode (str): 'random' (随机生成) 或 'fixed' (返回固定的 NSFNet)
+      min_nodes (int): 随机生成的最小节点数
+      max_nodes (int): 随机生成的最大节点数
+    """
+    if mode == 'fixed':
+      # 如果还没有加载过固定图，就加载一次
+      if not hasattr(self, 'G') or self.G is None:
+        # 假设 config 里有 graph_path，或者硬编码默认路径
+        default_path = "nsfnet.graphml" 
+        self.load_topology(default_path)
+      
+      # 返回固定图的深拷贝，防止数据污染
+      G = self.G.copy()
+      # 刷新一下动态状态 (拥塞程度)
+      return self.refresh_dynamic_state(G, difficulty=0.5)
+
+    else:
+      # === 随机生成模式 (推荐预训练使用) ===
+      # 随机决定节点数量
+      n = random.randint(min_nodes, max_nodes)
+      
+      # 生成骨架
+      G = self._create_random_graph(n)
+      
+      # 计算中心性指标 (Betweenness, PageRank...)
+      G = self.update_graph_metric(G)
+      
+      # 初始化动态状态 (赋予随机的拥塞)
+      G = self.refresh_dynamic_state(G, difficulty=random.random())
+
+      self.G = G
+      
+      return G
+
+  def _create_random_graph(self, n_nodes) -> nx.Graph:
+    """
+    [内部方法] 使用 Barabási-Albert 模型生成无标度网络。
+    并初始化物理链路属性 (Bandwidth, Delay)。
+    """
+    # 1. 生成连通图骨架
+    # m=2 表示每个新加入的节点会连接 2 个旧节点 (保证稀疏性但连通)
+    while True:
+      G = nx.barabasi_albert_graph(n_nodes, m=2)
+      if nx.is_connected(G):
+        break
+
+    # 2. 初始化物理属性
+    for u, v in G.edges():
+      cap = random.choice([20.0, 40.0, 50.0, 100.0])
+      
+      # 1ms ~ 10ms 之间
+      delay = random.uniform(1.0, 10.0)
+      
+      # 写入属性 (注意: 必须与 refresh_dynamic_state 兼容)
+      G[u][v]['loss'] = 0.0         # 初始无丢包
+      G[u][v]['delay'] = delay      # 基础传播延迟 (refresh 时会加上排队延迟)
+      G[u][v]['capacity'] = cap     # 物理容量 (不变)
+      G[u][v]['bandwidth'] = cap    # 初始可用带宽 = 容量
+      G[u][v]['utilization'] = 0.0  # 初始空闲
+      G[u][v]['base_delay'] = delay # 备份基础延迟
+    
+    # 3. 初始化节点属性
+    for n in G.nodes():
+      G.nodes[n]['buffer_occupancy'] = 0.0
+      G.nodes[n]['proc_delay'] = 0.0
+
+    return G
+  
   def load_topology(self, filename: str) -> nx.Graph:
     """
     加载固定的 GraphML 文件 (NSFNet)，并初始化 RL 环境所需的动态属性。
@@ -29,7 +105,7 @@ class TopologyGenerator:
       try:
         G = nx.read_graphml(loadpath, node_type=int)
       except Exception as e:
-        vprint(f"Load Topology: {e}, trying default loader...", tag="Graph Err")
+        logger.log(f"Load Topology: {e}, trying default loader...", tag="Graph Err")
         G = nx.read_graphml(loadpath) # Fallback
 
       # [关键] 强制转换节点 Label 为连续整数 (0, 1, 2...)
@@ -45,34 +121,34 @@ class TopologyGenerator:
     # --- 3. 初始化动态属性 ---
     self.scale_topology_bandwidth(G, scale=0.1)  # 默认不缩放
     self.G = self.update_graph_metric(G)
-    vprint(f"Loaded Fixed Topo: {loadpath} | Nodes: {len(G.nodes())}", tag="Graph Init")
+    logger.log(f"Loaded Fixed Topo: {loadpath} | Nodes: {len(G.nodes())}", tag="Graph Init")
 
     return G
   
   def update_graph_metric(self, G):
-    """
-    手动计算图的中心性指标，并更新到 NetworkX 节点属性中。
-    这样 vprint 函数才能读到非零值。
-    """
-    # 1. 计算介数中心性 (Betweenness Centrality)
-    # weight='delay' 表示计算基于延迟的最短路介数，比默认的跳数更准
+    """ 
+    手动计算图的中心性指标，并更新到 NetworkX 节点属性中。 
+    这样 vprint 函数才能读到非零值。 
+    """ 
+    # 1. 计算介数中心性 (Betweenness Centrality) 
+    # weight='delay' 表示计算基于延迟的最短路介数，比默认的跳数更准 
     bet_dict = nx.betweenness_centrality(G, weight='delay', normalized=True)
     
     # 2. 计算 PageRank
     try:
-        pr_dict = nx.pagerank(G, weight='bandwidth')
+      pr_dict = nx.pagerank(G, weight='bandwidth')
     except:
-        # 某些图如果不连通可能会报错，给个兜底
-        pr_dict = {n: 0.0 for n in G.nodes()}
+      # 某些图如果不连通可能会报错，给个兜底
+      pr_dict = {n: 0.0 for n in G.nodes()}
 
     # 3. 计算聚类系数
     clust_dict = nx.clustering(G)
 
     # 4. 赋值回图节点
     for n in G.nodes():
-        G.nodes[n]['betweenness'] = bet_dict.get(n, 0.0)
-        G.nodes[n]['pagerank'] = pr_dict.get(n, 0.0)
-        G.nodes[n]['clustering'] = clust_dict.get(n, 0.0)
+      G.nodes[n]['pagerank'] = pr_dict.get(n, 0.0)
+      G.nodes[n]['betweenness'] = bet_dict.get(n, 0.0)
+      G.nodes[n]['clustering'] = clust_dict.get(n, 0.0)
     
     return G
   
@@ -172,54 +248,47 @@ class TopologyGenerator:
       if nx.has_path(self.G, s, d):
         return s, d
 
-def get_pyg_data_from_nx(G: nx.Graph, S_node: int, D_node: int, config):
+def get_pyg_data_from_nx(G: nx.Graph, Cur_node: int, D_node: int, config):
+  
   """
   get_pyg_data_from_nx 的 Docstring
   
   :param G: 要提取特征的图
-  :type G: nx.Graph
-  :param S_node: 源节点
-  :type S_node: int
+  :param Cur_node: 当前节点 (Agent 所在位置)
   :param D_node: 目的节点
-  :type D_node: int
-  :param config: 配置对象，包含归一化所需的最大/最小值
+  :param config: 配置对象
 
   returns: PyG Data 对象和带有特征的 NetworkX 图
   :rtype: tuple[Data, nx.Graph]
-  包括：
-    - 节点特征:
-      - Degree (归一化)
-      - Is_Source (0/1)
-      - Is_Destination (0/1)
-      - Dist_From_Source (归一化)
-      - Dist_To_Destination (归一化)
-      - Betweenness Centrality 介数中心数
-      - Clustering Coefficient 聚类系数
-      - PageRank
-      - Buffer Occupancy 
-      - Processing Delay
-    - 边特征: 
-      - Delay (归一化)
-      - Bandwidth (归一化)
-      - Loss (归一化)
-      - Utilization
-      - Available Bandwidth (归一化)
-  """
-  # --- 1. 性能优化：结构特征缓存 ---
-  # G.graph['betweenness'] = nx.betweenness_centrality(G)
-  # G.graph['pagerank'] = nx.pagerank(G, alpha=0.85)
-  # G.graph['clustering'] = nx.clustering(G)
   
+  特征维度说明：
+    - 节点特征 (8维):
+      0. Degree (归一化)
+      1. Is_Destination (0/1)
+      2. Dist_To_Destination (归一化)
+      3. Betweenness Centrality
+      4. Clustering Coefficient
+      5. PageRank
+      6. Buffer Occupancy 
+      7. Processing Delay
+    - 边特征 (4维): 
+      0. Delay (归一化)
+      1. Bandwidth (归一化)
+      2. Loss (归一化)
+      3. Utilization (直接使用 0-1)
+  """
+  
+  # --- 1. 结构特征缓存 (保持不变) ---
   try: 
-    betweenness = G.graph['betweenness']
     pagerank = G.graph['pagerank']
     clustering = G.graph['clustering']
+    betweenness = G.graph['betweenness']
   except:
     betweenness = nx.betweenness_centrality(G)
     pagerank = nx.pagerank(G, alpha=0.85)
     clustering = nx.clustering(G)
 
-  # --- 2. 边特征处理 ---
+  # --- 2. 边特征处理 (移除 Avail BW) ---
   source_nodes, target_nodes = [], []
   edge_attrs_raw = []
   
@@ -227,68 +296,76 @@ def get_pyg_data_from_nx(G: nx.Graph, S_node: int, D_node: int, config):
     source_nodes.extend([u, v])
     target_nodes.extend([v, u])
     
-    d = float(data.get('delay', 1.0))
     l = float(data.get('loss', 0.0))
+    d = float(data.get('delay', 1.0))
     b = float(data.get('bandwidth', 100.0))
     u_load = float(data.get('utilization', 0.0))
-    avail_bw = b * (1.0 - u_load)
 
-    attr = [d, b, l, u_load, avail_bw]
+    # [Change] 只保留 4 个核心特征
+    attr = [d, b, l, u_load]
     edge_attrs_raw.extend([attr, attr])
 
   edge_index = torch.tensor([source_nodes, target_nodes], dtype=torch.long) 
-  edge_attr_tensor = torch.tensor(edge_attrs_raw, dtype=torch.float)
-
-  # 归一化
-  edge_attr = torch.zeros_like(edge_attr_tensor)
-  # 假设 config 中有这些 MAX/MIN 常量，或者直接写死数值
-  # 这里为了稳健，加上 float() 强转
-  edge_attr[:, 0] = (edge_attr_tensor[:, 0] - config.MIN_DELAY) / (config.MAX_DELAY - config.MIN_DELAY + 1e-6)
-  edge_attr[:, 1] = (edge_attr_tensor[:, 1] - config.MIN_BW) / (config.MAX_BW - config.MIN_BW + 1e-6)
-  edge_attr[:, 2] = edge_attr_tensor[:, 2] / 5.0 # Loss (假设最大5%)
-  edge_attr[:, 3] = edge_attr_tensor[:, 3] # Util (0-1)
-  edge_attr[:, 4] = (edge_attr_tensor[:, 4] - config.MIN_BW) / (config.MAX_BW - config.MIN_BW + 1e-6)
-  edge_attr = edge_attr.clamp(0.0, 1.0)
-
-  # --- 3. 节点特征处理 ---
-  try:
-    dist_from_s = nx.single_source_shortest_path_length(G, S_node)
-  except:
-    dist_from_s = {n: 999 for n in G.nodes()}
+  
+  # 转换为 Tensor
+  if len(edge_attrs_raw) > 0:
+    edge_attr_tensor = torch.tensor(edge_attrs_raw, dtype=torch.float)
     
+    # 归一化
+    edge_attr = torch.zeros_like(edge_attr_tensor)
+    
+    # [Fix] 索引范围修正为 0~3
+    # 0: Delay
+    edge_attr[:, 0] = (edge_attr_tensor[:, 0] - config.env.min_delay) / (config.env.max_delay - config.env.min_delay + 1e-6)
+    # 1: Bandwidth
+    edge_attr[:, 1] = (edge_attr_tensor[:, 1] - config.env.min_bw) / (config.env.max_bw - config.env.min_bw + 1e-6)
+    # 2: Loss
+    edge_attr[:, 2] = edge_attr_tensor[:, 2] / config.env.max_loss # Loss (假设最大5%)
+    # 3: Utilization (本身就是 0-1，不需要额外归一化，Clamp一下即可)
+    edge_attr[:, 3] = edge_attr_tensor[:, 3].clamp(0.0, 1.0) 
+    
+    # [Removed] edge_attr[:, 4] = Avail_BW (已删除)
+    
+    edge_attr = edge_attr.clamp(0.0, 1.0)
+  else:
+    # 防止空图报错
+    edge_attr = torch.tensor([], dtype=torch.float)
+
+  # --- 3. 节点特征处理 (移除 Source 相关) ---
+  # [Removed] dist_from_s 计算块已删除
+
+  # 只保留 Dist_To_Destination
   try:
     dist_to_d = nx.single_source_shortest_path_length(G, D_node)
   except:
     dist_to_d = {n: 999 for n in G.nodes()}
 
   num_nodes = G.number_of_nodes()
-  node_features_list = [] # [FIX] 必须初始化这个列表
-  deg_max = config.MAX_NODES_NUM 
+  node_features_list = []
+  deg_max = config.env.max_nodes_num
 
   for i in range(num_nodes):
-    node_data = G.nodes[i] # [OK] 正确获取节点属性
+    node_data = G.nodes[i]
     
-    deg = G.degree(i) / (deg_max + 1e-6)
-    is_s = 1.0 if i == S_node else 0.0
+    # [Change] 这里的特征列表精简为 8 维
+    is_c = 1.0 if i == Cur_node else 0.0
     is_d = 1.0 if i == D_node else 0.0
-    ds = 1.0 * min(dist_from_s.get(i, 999), deg_max) / deg_max 
+    deg = G.degree(i) / (deg_max + 1e-6)
     dd = 1.0 * min(dist_to_d.get(i, 999), deg_max) / deg_max
     
-    betw = betweenness.get(i)
-    clus = clustering.get(i)
-    pr = pagerank.get(i) * 10.0
+    betw = betweenness.get(i, 0.0)
+    clus = clustering.get(i, 0.0)
+    pr = pagerank.get(i, 0.0) * 10.0
     
     bo = float(node_data.get('buffer_occupancy', 0.0))
     pd = float(node_data.get('proc_delay', 0.0))
 
-    # 基础特征 (10维)
-    basic_feat = [deg, is_s, is_d, ds, dd, betw, clus, pr, bo, pd]
+    # 基础特征 (8维)
+    # [Removed] is_s, ds (dist_from_src)
+    basic_feat = [deg, is_d, dd, is_c, betw, clus, pr, bo, pd]
     
-    # [FIX] 必须把特征加到列表里！
     node_features_list.append(basic_feat)
     
-  # 在循环外将列表转为 Tensor
   x = torch.tensor(node_features_list, dtype=torch.float)
   
   return Data(x=x, edge_index=edge_index, edge_attr=edge_attr), G
-

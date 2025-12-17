@@ -4,7 +4,7 @@ import numpy as np
 import random
 import math
 from torch.utils.data import IterableDataset
-from src.env.NetworkGenerator import TopologyGenerator, DEFAULT_CONFIG, get_pyg_data_from_nx
+from env.network_generator import TopologyGenerator, DEFAULT_CONFIG, get_pyg_data_from_nx
 
 # ==========================================
 # 1. M/M/1 排队延迟模型 (数学核心)
@@ -76,9 +76,9 @@ def generate_single_sample(topo_gen, fixed_G):
   # 4. 生成标签 (使用 Dijkstra 找理论最优路)
   # 我们希望 Agent 学会寻找 total_delay 最小的路径
   try:
-      path_nodes = nx.dijkstra_path(G, s, d, weight='delay')
+    path_nodes = nx.dijkstra_path(G, s, d, weight='delay')
   except nx.NetworkXNoPath:
-      return None
+    return None
 
   # 转换为边标签 (0/1)
   # 获取 edge_index (这一步调用 NetworkGenerator 的辅助函数)
@@ -87,17 +87,17 @@ def generate_single_sample(topo_gen, fixed_G):
   # 标记最短路上的边
   path_edges = set()
   for i in range(len(path_nodes) - 1):
-      u, v = path_nodes[i], path_nodes[i+1]
-      path_edges.add((u, v))
-      path_edges.add((v, u))
+    u, v = path_nodes[i], path_nodes[i+1]
+    path_edges.add((u, v))
+    path_edges.add((v, u))
 
   num_edges = pyg_data.edge_index.shape[1]
   labels = torch.zeros(num_edges, dtype=torch.float)
   for i in range(num_edges):
-      u = pyg_data.edge_index[0, i].item()
-      v = pyg_data.edge_index[1, i].item()
-      if (u, v) in path_edges:
-          labels[i] = 1.0
+    u = pyg_data.edge_index[0, i].item()
+    v = pyg_data.edge_index[1, i].item()
+    if (u, v) in path_edges:
+      labels[i] = 1.0
           
   pyg_data.y = labels
   return pyg_data

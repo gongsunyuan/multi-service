@@ -1,0 +1,53 @@
+# 路径配置
+name:
+  exp_name: "nsfnet_ppo_train"
+path:
+  graph_path: "data/nsfnet.graphml"
+  log_dir: "workspace/logs/ppo_train/"
+  ckpt_dir: "workspace/checkpoints/ppo_train/"
+
+# 网络架构
+model:
+  edge_dim: 4
+  node_dim: 9
+  gnn_heads: 4
+  gnn_layers: 3
+  hidden_dim: 128
+  fingerprint_dim: 2
+
+# 训练参数
+train:
+  lr: 0.0003
+  clip_eps: 0.2
+  max_steps: 20
+  batch_size: 16
+  ppo_epochs: 10
+  max_epochs: 500
+  save_interval: 10
+  entropy_coef: 0.01
+  checkpoint_keep_count: 2
+
+# 环境与背景流
+env:
+  bg_duration: 60
+  bg_cookie: 0xB000
+  flow_cookie: 0xA000
+  total_load_mbps: 300.0
+
+# QoS 奖励参数
+qos_reward:
+  GAMING:
+    ref_bw: 0.5
+    max_delay: 80.0
+    max_jitter: 20.0
+    w: [0.4, 0.1, 0.4, 0.1]
+  VOIP:
+    ref_bw: 0.1
+    max_delay: 150.0
+    max_jitter: 50.0
+    w: [0.3, 0.2, 0.4, 0.1]
+  DEFAULT:
+    ref_bw: 5.0
+    max_delay: 200.0
+    max_jitter: 100.0
+    w: [0.25, 0.25, 0.25, 0.25]

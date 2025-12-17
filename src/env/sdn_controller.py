@@ -19,13 +19,13 @@ from functools import partial
 from mininet.log import setLogLevel, info
 from scapy.all import rdpcap
 from scapy.layers.inet import IP
-from src.utils import VerbosePrint as vp
-vprint = vp.vprint
-vprint_qos = vp.vprint_qos
-from src.env.FlowGenerator import FlowType, FLOW_PROFILES
 from mininet.node import OVSKernelSwitch, RemoteController
 from mininet.link import TCLink
-from src.env.E_model import (
+
+from ..utils import logger
+from ..utils.verbose_logger import vprint, vprint_matrix, vprint_path_status, vprint_qos
+from .flow_generator import FlowType, FLOW_PROFILES
+from .e_model import (
   FullG107Calculator, 
   RigorousVideoEvaluator, 
   RigorousCloudGamingEvaluator, 
@@ -57,11 +57,11 @@ def parse_ditg_output(output_str: str) -> dict:
   no_packet_arrive = False
   
   if not output_str:
-    vprint("can't catch output str -- the str is None", tag="Parse Err")
+    logger.log("can't catch output str -- the str is None", tag="Parse Err")
     return metrics, True
 
-  vprint("parsing ditg output ...", tag="Parser")
-  # vprint(output_str)
+  logger.log("parsing ditg output ...", tag="Parser")
+  # logger.log(output_str)
   try:
     # --- 1. 提取平均延迟 (Average delay) ---
     # 示例行: Average delay            =     0.000234 s
@@ -71,8 +71,8 @@ def parse_ditg_output(output_str: str) -> dict:
       if 'nan' not in val.lower(): # 过滤掉 -nan
         metrics['delay'] = float(val) * 1000.0 # 秒 -> 毫秒
     else:
-      vprint("no delay found", tag="Parse Err")
-      vprint(f"原始输出片段:\n{output_str[:200]}", tag="Parse Err") # 调试用
+      logger.log("no delay found", tag="Parse Err")
+      logger.log(f"原始输出片段:\n{output_str[:200]}", tag="Parse Err") # 调试用
     
     jitter_match = re.search(r"Average jitter\s+=\s+([-\d\.nan]+)\s+s", output_str)
     if jitter_match:
@@ -80,7 +80,7 @@ def parse_ditg_output(output_str: str) -> dict:
       if 'nan' not in val.lower():
         metrics['jitter'] = float(val) * 1000.0 # 秒 -> 毫秒
     else:
-      vprint("no jitter found", tag="Parse Err")
+      logger.log("no jitter found", tag="Parse Err")
 
     # --- 3. 提取吞吐量 (Average bitrate) ---
     # 示例行: Average bitrate          =  4096.000000 Kbit/s
@@ -90,7 +90,7 @@ def parse_ditg_output(output_str: str) -> dict:
       if 'nan' not in val.lower():
         metrics['bandwidth'] = float(val) / 1000.0 # Kbit/s -> Mbps
     else:
-      vprint("no bitrate found", tag="Parse Err")
+      logger.log("no bitrate found", tag="Parse Err")
 
     # --- 4. 提取丢包率 (Packets dropped) ---
     # 示例行: Packets dropped          =            5 (0.50 %)
@@ -101,7 +101,7 @@ def parse_ditg_output(output_str: str) -> dict:
       if 'nan' not in val.lower():
         metrics['loss_rate'] = float(val)/100.0
     else: 
-      vprint("no loss found", tag="Parse Err")
+      logger.log("no loss found", tag="Parse Err")
 
     # 如果总包数 (Total packets) 为 0，说明完全没通，强制设置最差指标
     total_pkts_match = re.search(r"Total packets\s+=\s+(\d+)", output_str)
@@ -111,8 +111,8 @@ def parse_ditg_output(output_str: str) -> dict:
       metrics['bandwidth'] = 0.0
 
   except Exception as e:
-    vprint(f"解析 D-ITG 输出时出错: {e}", tag="Parse Err")
-    vprint(f"原始输出片段:\n{output_str[:200]}", tag="Parse Err") # 调试用
+    logger.log(f"解析 D-ITG 输出时出错: {e}", tag="Parse Err")
+    logger.log(f"原始输出片段:\n{output_str[:200]}", tag="Parse Err") # 调试用
 
   return metrics, no_packet_arrive
 
@@ -283,7 +283,9 @@ def measure_path_qos(server, client, path_route, flow_type, config, resend = Fal
   log_prefix = f"/dev/shm/itg_{client.name}_{server.name}_{random_id}"
   recv_log = f"{log_prefix}.recv"  
   
-  target_duration = 6 if flow_type==FlowType.STREAMING else 2
+  # target_duration = 6 if flow_type==FlowType.STREAMING else 2
+
+  target_duration = 1.5
 
   if flow_type == FlowType.STREAMING:
     # TCP 给 2.5 倍余量，防止拥塞误杀
@@ -308,7 +310,7 @@ def measure_path_qos(server, client, path_route, flow_type, config, resend = Fal
   # 检查文件是否存在 (防止传输完全失败导致无日志)
   check_log = server.cmd(f"ls {recv_log}")
   if "No such file" in check_log and not resend:
-    vprint("No log generated. Resend same cmd again", tag="Sender Err")
+    logger.log("No log generated. Resend same cmd again", tag="Sender Err")
     client.cmd(f"rm -f {recv_log}")
     return measure_path_qos(server, client, path_route, flow_type, config, resend=True)
 
@@ -316,7 +318,7 @@ def measure_path_qos(server, client, path_route, flow_type, config, resend = Fal
   # 解析结果 
   # Meta-DRL 
   try:
-    vprint(f"Running ITGDec on {recv_log}...", tag="Decoder")
+    logger.log(f"Running ITGDec on {recv_log}...", tag="Decoder")
 
     # 1. 启动进程
     with client.popen(
@@ -333,14 +335,14 @@ def measure_path_qos(server, client, path_route, flow_type, config, resend = Fal
 
       if dec_proc.returncode != 0 and not resend:
         dec_proc.kill()
-        vprint(f"ITGDec failed with code {dec_proc.returncode}", tag="Decoder Err")
+        logger.log(f"ITGDec failed with code {dec_proc.returncode}", tag="Decoder Err")
         return measure_path_qos(server, client, path_route, flow_type, config, resend=True)
       else:
         dec_output = stdout
-        vprint("Success dec recieve file", tag="Decoder")
+        logger.log("Success dec recieve file", tag="Decoder")
 
   except subprocess.TimeoutExpired:
-    vprint("ITGDec Timed out!", tag="Decoder Err")
+    logger.log("ITGDec Timed out!", tag="Decoder Err")
     dec_proc.kill()
     dec_output = ""
 
@@ -352,10 +354,10 @@ def measure_path_qos(server, client, path_route, flow_type, config, resend = Fal
   qos_metrics, no_packet_arrive = parse_ditg_output(dec_output)    
   if no_packet_arrive:
     if not resend :
-      vprint(f"No packet arrive : Resend cmd again", tag="Sender Err")
+      logger.log(f"No packet arrive : Resend cmd again", tag="Sender Err")
       return measure_path_qos(server, client, path_route, flow_type, config, resend=True)
     else :
-      vprint(f"Fail to send packet, bad path", tag="Sender Err")
+      logger.log(f"Fail to send packet, bad path", tag="Sender Err")
       return -1
 
   # 假设 qos_metrics 里的数值已经拿到了
@@ -378,135 +380,6 @@ def measure_path_qos(server, client, path_route, flow_type, config, resend = Fal
   )
 
   return qos_reward, qoe_reward
-
-def vprint_network_status(G):
-  """
-  打印全网状态，包含所有 GNN 输入特征：
-  1. 链路特征 (Edge Features): Bandwidth, Util, AvailBW, Delay, Loss
-  2. 节点特征 (Node Features): Degree, Centrality, Buffer, ProcDelay, etc.
-  """
-  # ==============================
-  # Part 1: 链路状态 (Edge Features)
-  # ==============================
-  vprint("-" * 110)
-  vprint(f"[Global] Edge Status (Sorted by Utilization):")
-  vprint(f" {'Link':<10} | {'Cap(M)':<8} | {'Load(M)':<8} | {'Util%':<7} | {'Avail(M)':<8} | {'Delay':<8} | {'Loss%':<7} | {'Status'}")
-  vprint("-" * 110)
-  
-  link_stats = []
-  for u, v, data in G.edges(data=True):
-    # 提取边特征
-    cap = data.get('bandwidth')      # Bandwidth
-    util = data.get('utilization')     # Utilization
-    delay = data.get('delay')          # Delay
-    loss = data.get('loss')            # Loss
-    
-    # 计算衍生特征
-    load = cap * util                       # Load (近似或从 measured_speed 获取)
-    avail = cap * (1.0 - util)              # Available Bandwidth
-    
-    # 状态判定
-    if loss > 0.01: status = "LOSS"         # 有丢包最严重
-    elif util > 0.90: status = "FULL"       # 拥塞
-    elif util > 0.50: status = "BUSY"
-    else: status = "IDLE"
-
-    link_stats.append((u, v, cap, load, util, avail, delay, loss, status))
-
-  # 按利用率降序排序
-  link_stats.sort(key=lambda x: x[4], reverse=True)
-
-  for item in link_stats:
-    u, v, cap, load, util, avail, delay, loss, status = item
-    vprint(f" {u:<2}<->{v:<2}   | {cap:<8.1f} | {load:<8.2f} | {util:<7.2%} | {avail:<8.1f} | {delay:<6.2f}ms | {loss:<7.2%} | {status}")
-
-  vprint("-" * 110)
-
-  # ==============================
-  # Part 2: 节点状态 (Node Features)
-  # ==============================
-  raw_node_data = []
-  for n, data in G.nodes(data=True):
-    deg = G.degree[n]
-    betw = data.get('betweenness')
-    clust = data.get('clustering')
-    pgrank = data.get('pagerank')
-    buff = data.get('buffer_occupancy', 0.0)
-    proc = data.get('proc_delay', 0.0)
-    
-    raw_node_data.append({
-      'n': n, 'deg': deg, 'betw': betw, 
-      'clust': clust, 'pgrank': pgrank, 
-      'buff': buff, 'proc': proc
-    })
-
-  # 2. 动态计算阈值 (Dynamic Thresholding)
-  # 找出介数中心性的最大值，或者用排序的前 20% 作为 Core
-  max_betw = max(d['betw'] for d in raw_node_data) if raw_node_data else 1.0
-  sorted_by_betw = sorted(raw_node_data, key=lambda x: x['betw'], reverse=True)
-  
-  vprint(f"[Global] Node Status (Sorted by Importance/Betweenness):")
-  vprint(f" {'Node':<6} | {'Deg':<4} | {'Betw-C':<8} | {'PgRank':<8} | {'Buffer%':<8} | {'Proc(ms)':<8} | {'Role'}")
-  vprint("-" * 90)
-
-  for item in sorted_by_betw: # 打印所有节点，按重要性排序
-    role = "Edge"
-    # === 新的判断逻辑 ===
-    if item['betw'] > (max_betw * 0.4): 
-      role = "CORE"  # 绝对的主干
-    elif item['betw'] > (max_betw * 0.1):
-      role = "Aggr"  # 汇聚层
-    # ===================
-
-    vprint(f" {item['n']:<6} | {item['deg']:<4} | {item['betw']:<8.4f} | {item['pgrank']:<8.4f} | {item['buff']:<8.2%} | {item['proc']:<8.4f} | {role}")
-  
-  vprint("-" * 90)
-
-def vprint_path_status(G, path):
-  """
-  打印路径详细状态，整合了沿途的 [节点特征] 和 [边特征]
-  """
-  vprint("-" * 120)
-  vprint(f"Path Detail: {path}")
-  vprint(f" {'Hop (u->v)':<12} | {'Cap':<6} | {'Util%':<7} | {'Avail':<6} | {'Delay':<8} | {'Loss%':<6} || {'[Node u] Buffer%':<16} | {'[Node u] ProcD':<14} | {'Status'}")
-  vprint("-" * 120)
-  
-  total_delay = 0.0
-  min_avail_bw = 99999.0
-  total_loss_prob = 0.0 # 估算路径总丢包概率
-  
-  for u, v in zip(path[:-1], path[1:]):
-    # --- 1. 获取边特征 ---
-    e_data = G[u][v]
-    cap = e_data.get('bandwidth', 100.0)
-    util = e_data.get('utilization', 0.0)
-    delay = e_data.get('delay', 1.0)
-    loss = e_data.get('loss', 0.0)
-    avail = cap * (1.0 - util)
-    
-    # --- 2. 获取源节点特征 (Node u) ---
-    n_data = G.nodes[u]
-    buff = n_data.get('buffer_occupancy', 0.0)
-    proc = n_data.get('proc_delay', 0.0) # 这里的 proc_delay 是节点处理这一跳的耗时
-
-    # --- 3. 统计 ---
-    total_delay += delay + proc # 路径总时延 = 链路时延 + 节点处理时延
-    min_avail_bw = min(min_avail_bw, avail)
-    # 路径不丢包概率 = (1-l1)*(1-l2)... => 丢包率 = 1 - product
-    # 这里简单相加近似展示 (loss 通常很小)
-    
-    # --- 4. 状态判定 ---
-    status = "OK"
-    if loss > 0.001: status = "PKT_DROP"
-    elif util > 0.95: status = "CONGEST"
-    elif buff > 0.80: status = "BUF_FULL"
-    
-    # 打印一行
-    vprint(f" {u:<2} -> {v:<2}     | {cap:<6.0f} | {util:<7.2%} | {avail:<6.1f} | {delay:<6.2f}ms | {loss:<6.2%} || {buff:<16.2%} | {proc:<14.4f} | {status}")
-
-  vprint("-" * 120)
-  vprint(f" >>> Path Summary: Total Delay ≈ {total_delay:.2f} ms | Bottleneck BW: {min_avail_bw:.2f} Mbps")
-  vprint("-" * 120)
 
 # Generator :
 # 生成一个mininet网络
@@ -531,7 +404,7 @@ class GraphTopo(Topo):
       # 2. 计算最佳 r2q (确保 quantum ≈ 1500)
       r2q = int(max(1, rate_bytes / 1500))
       # 这里沿用 Mininet 构造函数中设置的 r2q
-      vprint(f"Adding link: {u} <-> {v} | bw: {bw} Mbps | delay: {delay} | loss: {loss}% | r2q: {r2q} | qlimit: {q_limit}", tag="Mini Init")
+      logger.log(f"Adding link: {u} <-> {v} | bw: {bw} Mbps | delay: {delay} | loss: {loss}% | r2q: {r2q} | qlimit: {q_limit}", tag="Mini Init")
       self.addLink(f'{test_str}s{u}', f'{test_str}s{v}', cls=TCLink, bw=bw, delay=delay, loss=loss, r2q = r2q, use_htb=True, max_queue_size=q_limit) 
 
 # mininet 启动
@@ -554,7 +427,7 @@ def get_a_mininet(g: nx.Graph, is_test=False, remote_port=None):
     autoStaticArp=True)
 
   try:
-    vprint("Disabling TCP Offload (TSO/GSO/GRO) on all switches...", tag="Mini Init")
+    logger.log("Disabling TCP Offload (TSO/GSO/GRO) on all switches...", tag="Mini Init")
     for h in net.hosts:
       for intf in h.intfList():
         if intf.name != 'lo':
@@ -568,7 +441,7 @@ def get_a_mininet(g: nx.Graph, is_test=False, remote_port=None):
     net.start()
     yield net
   finally:
-    vprint("stopping mininet ...", tag="Mini Stop")
+    logger.log("stopping mininet ...", tag="Mini Stop")
     net.stop()
 
   return net
@@ -697,10 +570,11 @@ def send_packet_and_capture(
         feature_vector = [size, iat]
         feature_matrix.append(feature_vector)
       except ValueError:
+        logger.log("Grap packet failed!", tag="Tshark Err")
         pass # 忽略解析错误
       
   except Exception as e:
-    vprint(f"采集指纹出错: {e}", tag="Fingerprint Err")
+    logger.log(f"采集指纹出错: {e}", tag="Tshark Err")
   
   finally:
     # [Fix] 统一清理资源
@@ -806,7 +680,7 @@ def ensure_server_surgical(host_node, start_port=15000, max_retries=3):
     if pid_info:
       pid = pid_info.split('/')[0]
       if pid.isdigit():
-        vprint(f"Port {current_port} busy by PID {pid}. Cleaning...", tag="Recv Start")
+        logger.log(f"Port {current_port} busy by PID {pid}. Cleaning...", tag="Recv Start")
         host_node.cmd(f"kill -9 {pid}")
         sleep(0.1) # Yield to OS
 
@@ -837,7 +711,7 @@ def ensure_server_surgical(host_node, start_port=15000, max_retries=3):
       proc.kill()
         
     except Exception as e:
-      vprint(f"Start failed on {current_port}: {e}", tag="Recv Err")
+      logger.log(f"Start failed on {current_port}: {e}", tag="Recv Err")
         
     # Increment port and retry
     current_port += 1
@@ -857,7 +731,7 @@ def run_itg_safe(client_node, server_node, log_file, flow_type, duration_sec, ti
   try:
     # --- Step 1: Start Server ---
     server_proc, actual_port = ensure_server_surgical(server_node)
-    vprint(f"Server {server_node.name} listening on {actual_port}", tag="Recv Start")
+    logger.log(f"Server {server_node.name} listening on {actual_port}", tag="Recv Start")
 
     # --- Step 2: Generate Client Command ---
     # Crucial: Client must send to 'actual_port'
@@ -870,8 +744,8 @@ def run_itg_safe(client_node, server_node, log_file, flow_type, duration_sec, ti
       log_file=log_file
     )
     
-    vprint(f"{client_node.name} -> {target_ip}:{actual_port} ({flow_type}); Timeout: {timeout_sec}", tag="Send Start")
-    vprint(f"Send command: {cmd}", tag="Send Cmd")
+    logger.log(f"{client_node.name} -> {target_ip}:{actual_port} ({flow_type}); Timeout: {timeout_sec}", tag="Send Start")
+    logger.log(f"Send command: {cmd}", tag="Send Cmd")
     # --- Step 3: Start Client ---
     # os.setsid creates a new process group, allowing us to kill the whole tree later
     client_proc = client_node.popen(
@@ -886,7 +760,7 @@ def run_itg_safe(client_node, server_node, log_file, flow_type, duration_sec, ti
     try:
       stdout, stderr = client_proc.communicate(timeout=timeout_sec)
       # Check for immediate D-ITG errors in stderr
-      vprint(f"{stdout}", tag="Send Out")
+      logger.log(f"{stdout}", tag="Send Out")
       if stderr:
         err_str = stderr.decode('utf-8', errors='ignore')
         if "Connection refused" in err_str or "Connect error" in err_str:
@@ -895,15 +769,15 @@ def run_itg_safe(client_node, server_node, log_file, flow_type, duration_sec, ti
       return True # Success
 
     except subprocess.TimeoutExpired as e:
-      vprint(f"Flow timed out (> {timeout_sec}s). Saving logs...", tag="Send Fail")
-      vprint(f"{e.stdout}", tag="Send Fail")
+      logger.log(f"Flow timed out (> {timeout_sec}s). Saving logs...", tag="Send Fail")
+      logger.log(f"{e.stdout}", tag="Send Fail")
       # Graceful Shutdown: Send SIGINT to the Process Group
       # This tells D-ITG to stop sending and flush logs to disk
       try:
         os.killpg(os.getpgid(client_proc.pid), signal.SIGINT)
         client_proc.communicate(timeout=2) # Give it 2s to write file
       except:
-        vprint("Process unresponsive.", tag="Send Fail")
+        logger.log("Process unresponsive.", tag="Send Fail")
         os.killpg(os.getpgid(client_proc.pid), signal.SIGKILL)
       
       # For TCP, a timeout is a valid result (congestion), not necessarily a crash.
@@ -913,18 +787,18 @@ def run_itg_safe(client_node, server_node, log_file, flow_type, duration_sec, ti
   except ConnectionError as e:
     # --- Step 5: Retry Logic ---
     if retry_count < 2: # Retry once
-      vprint(f"Connection failed. Retrying...", tag="Send Retry")
+      logger.log(f"Connection failed. Retrying...", tag="Send Retry")
       # Clean up server before retrying
       if server_proc: 
         server_proc.terminate()
         server_proc.wait()
       return run_itg_safe(client_node, server_node, log_file, flow_type, duration_sec, timeout_sec, retry_count + 1)
     else:
-      vprint(f"Connection refused after retries.", tag="Send Err")
+      logger.log(f"Connection refused after retries.", tag="Send Err")
       return False
 
   except Exception as e:
-    vprint(f"Execution failed: {e}", tag="Send Err")
+    logger.log(f"Execution failed: {e}", tag="Send Err")
     return False
 
   finally:
@@ -973,7 +847,7 @@ def clean_flow_rules(net, cookie=0xA000, mask=0xF000):
   # 这告诉 OVS: "只要 Cookie 以 A 开头 (高4位是A)，不管后面几位是什么，统统删掉！"
   match_str = f"cookie={hex(cookie)}/{hex(mask)}"
   
-  vprint(f"Cleaning flows matching {match_str}...", tag="Rule Clean")
+  logger.log(f"Cleaning flows matching {match_str}...", tag="Rule Clean")
 
   for sw in net.switches:
     # 注意：这里去掉了 /-1，改用我们计算出的掩码
@@ -998,11 +872,11 @@ def verify_cleanup(net, cookie=0xA000):
     
     # 如果 result 不为空，说明找到了残留
     if result.strip():
-      vprint(f"Residue flows found on {sw.name}:\n{result.strip()}", tag="Clean Err")
+      logger.log(f"Residue flows found on {sw.name}:\n{result.strip()}", tag="Clean Err")
       has_residue = True
         
   if not has_residue:
-    vprint(f"Flow cleanup verified. No rules with cookie={hex(cookie)} found.", tag="Clean OK")
+    logger.log(f"Flow cleanup verified. No rules with cookie={hex(cookie)} found.", tag="Clean OK")
     return True
   else:
     return False
@@ -1031,7 +905,7 @@ def install_path_rules(net, path_nodes, tos=None, dst_port=None, cookie=0x1234, 
   
   # Debug 信息
   # port_str = f"Port={dst_port}" if dst_port else "Port=ANY"
-  # vprint(f"[Install] h{src_id}->h{dst_id} | ToS={tos} | {port_str}")
+  # logger.log(f"[Install] h{src_id}->h{dst_id} | ToS={tos} | {port_str}")
 
   # 2. 遍历路径上的每一跳交换机
   for i, current_node_id in enumerate(path_nodes):
@@ -1061,7 +935,7 @@ def install_path_rules(net, path_nodes, tos=None, dst_port=None, cookie=0x1234, 
         out_port = switch.ports[out_intf]
     
     if out_port is None:
-      vprint(f"Cannot find link from {sw_name}", tag="Install Err")
+      logger.log(f"Cannot find link from {sw_name}", tag="Install Err")
       continue
 
     # ==========================================
@@ -1126,7 +1000,7 @@ def install_path_rules(net, path_nodes, tos=None, dst_port=None, cookie=0x1234, 
         rev_port = switch.ports[rev_intf]
 
     if rev_port is None:
-      vprint(f"Cannot find reverse link from {sw_name}", tag="Install Err")
+      logger.log(f"Cannot find reverse link from {sw_name}", tag="Install Err")
       continue
 
     # ==========================================
@@ -1283,7 +1157,7 @@ class NetworkMonitor:
       return tx_len
         
     except Exception as e:
-      vprint(f"Error reading queue limit: {e}", tag="Monit Err")
+      logger.log(f"Error reading queue limit: {e}", tag="Monit Err")
       return 100 # 兜底默认值
 
   def _get_all_interfaces_stats(self, G):

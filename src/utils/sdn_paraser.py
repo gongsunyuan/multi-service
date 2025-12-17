@@ -2,7 +2,7 @@ import argparse
 import sys
 from argparse import ArgumentParser
 
-class TopoParaser(ArgumentParser):
+class SdnParaser(ArgumentParser):
   def __init__(self):
     ArgumentParser.__init__(
       self,

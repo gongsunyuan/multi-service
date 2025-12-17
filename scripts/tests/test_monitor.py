@@ -10,9 +10,9 @@ from mininet.log import setLogLevel
 
 # 确保可以导入 MS 模块
 sys.path.append(os.getcwd())
-from src.env.MininetController import NetworkMonitor, get_a_mininet
-from src.env.NetworkGenerator import TopologyGenerator
-from src.utils.MyParaser import TopoParaser
+from env.sdn_controller import NetworkMonitor, get_a_mininet
+from env.network_generator import TopologyGenerator
+from utils.sdn_paraser import TopoParaser
 
 class Test_config:
   M_BA = 2

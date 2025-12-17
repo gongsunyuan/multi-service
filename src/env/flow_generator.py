@@ -4,9 +4,7 @@ import time
 import heapq
 import os  # 需要引入 os 模块来创建目录
 from enum import Enum
-from src.utils import VerbosePrint as vp
-
-vprint = vp.vprint
+from ..utils import logger
 
 # === 配置与定义 ===
 class FlowType(Enum):
@@ -179,7 +177,7 @@ class FlowGenerator:
         # 我们宁愿流量少一点，也要保证物理安全
         final_tm = dict(top_flows)
         
-        vprint(f"Optimized: kept top {MAX_BG_FLOWS} flows. Max flow: {top_flows[0][1]:.2f} Mbps", tag="TM Init")
+        logger.log(f"Optimized: kept top {MAX_BG_FLOWS} flows. Max flow: {top_flows[0][1]:.2f} Mbps", tag="TM Init")
         return final_tm
     
     return tm
@@ -231,8 +229,8 @@ class FlowGenerator:
     注入背景流 (Ghost Traffic)。
     增强功能：详细的生命周期打印 & 独立日志记录。
     """
-    vprint(f"Injecting {len(tm_dict)} background flows (Ghost Strategy)...", tag="TM Init")
-    vprint(f"Duration set to: {duration} seconds (Ensure this > target flow time!)", tag="TM Init")
+    logger.log(f"Injecting {len(tm_dict)} background flows (Ghost Strategy)...", tag="TM Init")
+    logger.log(f"Duration set to: {duration} seconds (Ensure this > target flow time!)", tag="TM Init")
     
     BG_COOKIE = 0xB000
     BG_TOS = 184
@@ -246,7 +244,7 @@ class FlowGenerator:
     # ==========================================
     # Phase 0: 确保接收端在线 (Signaling Ready)
     # ==========================================
-    vprint("Starting ITGRecv daemons on all hosts...", tag="TM Init")
+    logger.log("Starting ITGRecv daemons on all hosts...", tag="TM Init")
     for h in net.hosts:
       # 建议记录 Recv 日志以便排查控制平面问题
       h.popen(f"nice -n 2 ITGRecv ")
@@ -255,7 +253,7 @@ class FlowGenerator:
     # ==========================================
     # Phase 1: 铺设路径 & 设置陷阱
     # ==========================================
-    vprint("Installing routing rules & Ghost drop policies...", tag="TM Init")
+    logger.log("Installing routing rules & Ghost drop policies...", tag="TM Init")
     configured_drops = set()
 
     for (u, v) in tm_dict.keys():
@@ -328,9 +326,11 @@ class FlowGenerator:
       count += 1
       if count % 10 == 0: time.sleep(0.1)
 
-    # vprint(f"{'='*60}")
-    # vprint(f"[TM] ✅ All {count} background flows dispatched.")
-    # vprint(f"[TM] 💡 Check {log_dir}/ for specific error messages if flows die unexpectedly.\n")
+    # logger.log(f"{'='*60}")
+    # logger.log(f"[TM] ✅ All {count} background flows dispatched.")
+    # logger.log(f"[TM] 💡 Check {log_dir}/ for specific error messages if flows die unexpectedly.\n")
     
     # 可选：返回进程列表，以便外部脚本可以在测试结束后显式 kill 它们
     return bg_processes
+  
+
