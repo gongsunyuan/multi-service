@@ -29,7 +29,7 @@ class TopologyGenerator:
       try:
         G = nx.read_graphml(loadpath, node_type=int)
       except Exception as e:
-        vprint(f"[Error] Load Topology: {e}, trying default loader...")
+        vprint(f"Load Topology: {e}, trying default loader...", tag="Graph Err")
         G = nx.read_graphml(loadpath) # Fallback
 
       # [关键] 强制转换节点 Label 为连续整数 (0, 1, 2...)
@@ -45,7 +45,7 @@ class TopologyGenerator:
     # --- 3. 初始化动态属性 ---
     self.scale_topology_bandwidth(G, scale=0.1)  # 默认不缩放
     self.G = self.update_graph_metric(G)
-    vprint(f"[Graph] Loaded Fixed Topo: {loadpath} | Nodes: {len(G.nodes())}")
+    vprint(f"Loaded Fixed Topo: {loadpath} | Nodes: {len(G.nodes())}", tag="Graph Init")
 
     return G
   

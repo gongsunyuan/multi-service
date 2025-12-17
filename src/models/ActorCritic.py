@@ -51,13 +51,13 @@ class ActorCritic(nn.Module):
     # ======================================================================
     
     if pretrained_lstm_path:
-      vprint(f"[agent] 正在加载 [LSTM Body] 权重来源: {pretrained_lstm_path}")
+      vprint(f"正在加载 [LSTM Body] 权重来源: {pretrained_lstm_path}", tag="Agent Init")
       # 加载 jstm 模型
       lstm_state = torch.load(pretrained_lstm_path, map_location='cpu')
       self.lstm_body.load_state_dict(lstm_state)
         
     if pretrained_gnn_path:
-      vprint(f"[agent] 正在加载 [GNN Body] 权重来源: {pretrained_gnn_path}")
+      vprint(f"正在加载 [GNN Body] 权重来源: {pretrained_gnn_path}", tag="Agent Init")
       gnn_state = torch.load(pretrained_gnn_path, map_location='cpu')
       
       # 移除多卡训练时 DataParallel 自动添加的 'module.' 前缀
@@ -120,8 +120,8 @@ class ActorCritic(nn.Module):
         
     # 注意：self.gnn_model.edge_output_head (Actor头) 仍然是可训练的
     
-    vprint("[agent] LSTM Body 和 GNN Body 已冻结。")
-    vprint("[agent] FiLM 生成器、 Actor 头、 Critic 头 保持可训练。")
+    vprint("LSTM Body 和 GNN Body 已冻结。", tag="Agent Init")
+    vprint("FiLM 生成器、 Actor 头、 Critic 头 保持可训练。", tag="Agent Init")
 
   def forward(self, flow_fingerprint, graph_data):
     """

@@ -21,7 +21,7 @@ FLOW_PROFILES = {
   },
   FlowType.STREAMING: {
     'type': 'STREAMING', 'protocol': 'TCP',
-    'ditg_manual': ' -c 1000 -C 750',
+    'ditg_manual': ' -c 1000 -C 700',
     'qoe_critical': {'min_bandwidth': 5, 'max_loss_rate': 1e-6}, 'reward_fn': '3GPP-QCI6'
   },
   FlowType.GAMING: {
@@ -66,9 +66,9 @@ class FlowGenerator:
     # Tier 2 (Agg) : 权重 5-10  (引力中等)
     # Tier 3 (Edge): 权重 1-3   (引力小)
     TIER_MULTIPLIERS = {
-        1: (20.0, 30.0),
-        2: (5.0, 10.0),
-        3: (1.0, 3.0)
+      1: (20.0, 30.0),
+      2: (5.0, 10.0),
+      3: (1.0, 3.0)
     }
 
     # ==========================================
@@ -179,9 +179,7 @@ class FlowGenerator:
         # 我们宁愿流量少一点，也要保证物理安全
         final_tm = dict(top_flows)
         
-        # 简单打印一下统计信息
-        # self.vprint 是假设你在类里面，如果不是请改成 print
-        vprint(f"[TM] Optimized: kept top {MAX_BG_FLOWS} flows. Max flow: {top_flows[0][1]:.2f} Mbps")
+        vprint(f"Optimized: kept top {MAX_BG_FLOWS} flows. Max flow: {top_flows[0][1]:.2f} Mbps", tag="TM Init")
         return final_tm
     
     return tm
@@ -233,8 +231,8 @@ class FlowGenerator:
     注入背景流 (Ghost Traffic)。
     增强功能：详细的生命周期打印 & 独立日志记录。
     """
-    vprint(f"[TM] Injecting {len(tm_dict)} background flows (Ghost Strategy)...")
-    vprint(f"[TM] Duration set to: {duration} seconds (Ensure this > target flow time!)")
+    vprint(f"Injecting {len(tm_dict)} background flows (Ghost Strategy)...", tag="TM Init")
+    vprint(f"Duration set to: {duration} seconds (Ensure this > target flow time!)", tag="TM Init")
     
     BG_COOKIE = 0xB000
     BG_TOS = 184
@@ -248,7 +246,7 @@ class FlowGenerator:
     # ==========================================
     # Phase 0: 确保接收端在线 (Signaling Ready)
     # ==========================================
-    vprint("[TM] Starting ITGRecv daemons on all hosts...")
+    vprint("Starting ITGRecv daemons on all hosts...", tag="TM Init")
     for h in net.hosts:
       # 建议记录 Recv 日志以便排查控制平面问题
       h.popen(f"nice -n 2 ITGRecv ")
@@ -257,7 +255,7 @@ class FlowGenerator:
     # ==========================================
     # Phase 1: 铺设路径 & 设置陷阱
     # ==========================================
-    vprint("[TM] Installing routing rules & Ghost drop policies...")
+    vprint("Installing routing rules & Ghost drop policies...", tag="TM Init")
     configured_drops = set()
 
     for (u, v) in tm_dict.keys():
