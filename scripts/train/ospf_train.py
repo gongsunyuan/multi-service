@@ -13,7 +13,7 @@ from src.utils import (
   logger, SdnParaser, SupervisedGraphDataset, load_yaml_config)
 from src.env.network_generator import TopologyGenerator 
 from src.agents.ppo_agent import FiLMPPOAgent 
-from src.engine.ospf_trainer import OSPFPreTrainer
+from src.trainers.ospf_trainer import OSPFPreTrainer
 from torch.utils.tensorboard import SummaryWriter
 
 def main():
@@ -49,11 +49,12 @@ def main():
     writer.add_scalar("Pretrain/Epoch_Actor_Loss", al, epoch)
     writer.add_scalar("Pretrain/Epoch_Critic_Loss", cl, epoch)
     writer.add_scalar("Pretrain/Edge_Accuracy", acc, epoch)
+    writer.add_scalar("Pretrain/Edge_Recall", recall, epoch)
     
     logger.log(f"Epoch {(epoch+1):02d} | Actor Loss: {al:.4f} | Accuracy: {acc:.2%} | Recall: {recall:.2%}", tag="Ospf Train")
 
     # 保存最新的两个 checkpoint
-    save_path = os.path.join(config.path.ckpt_dir, f"checkpoint_{epoch}.pth")
+    save_path = os.path.join(config.path.ckpt_dir, f"checkpoint_{epoch+1}.pth")
     torch.save(agent.state_dict(), save_path)
     
     # 自动清理逻辑 (仅保留最新2个)
@@ -63,6 +64,9 @@ def main():
       for old_f in ckpt_files[:-2]:
         os.remove(old_f)
 
+  save_path = os.path.join(config.path.ckpt_dir, "final_model.pth")
+  torch.save(agent.state_dict(), save_path)
+  
   logger.log("Pre-training completed successfully.", tag="System")
   writer.close()
 

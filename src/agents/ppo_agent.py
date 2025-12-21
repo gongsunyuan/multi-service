@@ -11,6 +11,7 @@ class FiLMPPOAgent(nn.Module):
     self.config = config
     self.device = torch.device(config.device if torch.cuda.is_available() else "cpu")
 
+    self.clip_eps = self.config.train.clip_eps
     self.film = FilmGenerator(config)
     self.gnn = FilmGNN(config)
 
@@ -28,9 +29,7 @@ class FiLMPPOAgent(nn.Module):
     前向传播 (用于训练时的 Batch 计算)
     注意：实际推理(Rollout)时通常拆开调用
     """
-
-    film_params = self.film(fingerprint)
-    node_embeds = self.gnn(graph_data.x, graph_data.edge_index, graph_data.edge_attr, film_params)
+    node_embeds = self.get_node_embeddings(graph_data=graph_data, fingerprint=fingerprint)
     
     curr_feat = node_embeds[curr_node_idx]     # (H,)
     target_feat = node_embeds[target_node_idx] # (H,)
@@ -58,9 +57,9 @@ class FiLMPPOAgent(nn.Module):
       return None, None, 0.0 # 死胡同
         
     # 1. 准备特征
+    neighbor_feats = node_embeds[neighbor_indices]          # (K, H)
     curr_feat = node_embeds[curr_node_idx].unsqueeze(0)     # (1, H)
     target_feat = node_embeds[target_node_idx].unsqueeze(0) # (1, H)
-    neighbor_feats = node_embeds[neighbor_indices]          # (K, H)
     
     K = len(neighbor_indices)
     
@@ -83,21 +82,24 @@ class FiLMPPOAgent(nn.Module):
     if deterministic:
       # 贪婪模式 (测试用)
       action_idx = torch.argmax(logits).item()
-      log_prob = 0.0 # 确定性策略无 log_prob
+      log_prob = torch.tensor(0.0).to(logits.device) # 确定性策略无 log_prob
     else:
       # 随机模式 (训练用)
       probs = F.softmax(logits, dim=0)
       dist = torch.distributions.Categorical(probs)
       action_idx = dist.sample().item()
-      log_prob = dist.log_prob(torch.tensor(action_idx))
+      action_tensor = torch.tensor(action_idx, device=logits.device)
+      log_prob = dist.log_prob(action_tensor)
         
     # 返回: 选中的邻居ID, 该步的 log_prob
     next_node = neighbor_indices[action_idx]
-    return next_node, log_prob, logits
+    return next_node, log_prob, logits, action_idx
   
-  def get_node_embeddings(self, gragh_data, fingerprint):
+  def get_node_embeddings(self, graph_data, fingerprint):
+    fingerprint = fingerprint.float()
     film_params = self.film(fingerprint)
-    node_embeds = self.gnn(gragh_data.x, gragh_data.edge_index, gragh_data.edge_attr, film_params, batch_vector=gragh_data.batch)
+    batch_vec = getattr(graph_data, 'batch', None)
+    node_embeds = self.gnn(graph_data.x, graph_data.edge_index, graph_data.edge_attr, film_params, batch_vector=batch_vec)
 
     return node_embeds
   
@@ -128,8 +130,7 @@ class FiLMPPOAgent(nn.Module):
     """
     
     # 1. 重新运行 GNN 提取特征 (Re-run GNN)
-    film_params = self.film(fingerprints) 
-    node_embeds = self.gnn(batch_graph.x, batch_graph.edge_index, batch_graph.edge_attr, film_params)
+    node_embeds = self.get_node_embeddings(graph_data=batch_graph, fingerprint=fingerprints)
 
     # 2. 计算全局索引偏移 (Global Index Alignment)
     
@@ -274,7 +275,7 @@ class FiLMPPOAgent(nn.Module):
     total_critic_loss = 0
 
     # 3. PPO 更新循环
-    for _ in range(self.config.ppo_epochs):
+    for _ in range(self.config.train.ppo_epochs):
       # 重新评估当前的动作概率和价值 (因为参数在变)
       # 这里需要你在 SDNAgent 中实现一个 evaluate 方法
       new_log_probs, state_values, dist_entropy = self.evaluate_batch(
@@ -293,7 +294,7 @@ class FiLMPPOAgent(nn.Module):
       critic_loss = 0.5 * F.mse_loss(state_values, returns)
 
       # 熵损失 (鼓励探索)
-      entropy_loss = -self.config.entropy_coef * dist_entropy.mean()
+      entropy_loss = -self.config.train.entropy_coef * dist_entropy.mean()
 
       # 总 Loss
       loss = actor_loss + critic_loss + entropy_loss
@@ -309,6 +310,6 @@ class FiLMPPOAgent(nn.Module):
 
     memory.clear() # 清空记忆，准备下一轮采样
 
-    return total_actor_loss / self.config.ppo_epochs, total_critic_loss / self.config.ppo_epochs
+    return total_actor_loss / self.config.train.ppo_epochs, total_critic_loss / self.config.train.ppo_epochs
 
 

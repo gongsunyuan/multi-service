@@ -234,13 +234,7 @@ class FlowGenerator:
     
     BG_COOKIE = 0xB000
     BG_TOS = 184
-    
-    # 创建统一的日志目录，方便排查
-    log_dir = "/tmp/bg_logs"
-    os.makedirs(log_dir, exist_ok=True)
-    # 清理旧日志 (可选)
-    os.system(f"rm -f {log_dir}/*.log")
-
+  
     # ==========================================
     # Phase 0: 确保接收端在线 (Signaling Ready)
     # ==========================================
@@ -264,7 +258,7 @@ class FlowGenerator:
 
       # 1.1 全程铺路 (Forwarding)
       if len(path_nodes) > 1:
-        install_rules_func(net, path_nodes, tos=BG_TOS, dst_port=11000, cookie=BG_COOKIE, do_ping=False)
+        install_rules_func(net, path_nodes, tos=BG_TOS, dst_port=11000, cookie=BG_COOKIE)
 
       # 1.2 终点设卡 (Drop UDP Only)
       dst_host = net.get(f'h{v}')
@@ -300,10 +294,6 @@ class FlowGenerator:
       # 计算 PPS
       pps = min(int(bw * 1_000_000 / 8000), 3000)
       if pps < 1: pps = 1
-      
-      # 日志文件路径
-      log_file = f"{log_dir}/send_h{u}_to_h{v}.log"
-
       # ITGSend 命令
       # 使用 nohup 或直接后台运行，并将输出重定向到文件
       cmd_send = (

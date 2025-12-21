@@ -2,10 +2,12 @@ import time
 import torch
 import networkx as nx
 import random
+from mininet.cli import CLI
+from ..utils import logger
 from . import sdn_controller as mc
+from .flow_generator import FlowType
 from .flow_generator import FlowGenerator
 from .network_generator import TopologyGenerator, get_pyg_data_from_nx
-from ..utils import logger
 
 class SdnWrapper:
 
@@ -27,7 +29,7 @@ class SdnWrapper:
     # --- 1. 基础组件初始化 ---
     self.flow_gen = FlowGenerator()
     self.topo_gen = TopologyGenerator()
-    self.blueprint_G = self.topo_gen.load_topology(config.graph_path)
+    self.blueprint_G = self.topo_gen.load_topology(config.path.graph_path)
     self.current_G = self.blueprint_G.copy()
 
     # --- 2. 启动 Mininet (修复顺序 Bug) ---
@@ -45,56 +47,36 @@ class SdnWrapper:
 
     # --- 4. Cookie 与 配置 ---
     self.cookie_mask = 0xF000
-    self.bg_cookie_start = getattr(config, 'bg_cookie', 0xB000)
-    self.agent_cookie_start = getattr(config, 'flow_cookie', 0xA000)
-    self.bg_duration = getattr(config, 'bg_duration', 60) 
+    self.bg_cookie_start = getattr(config.env, 'bg_cookie', 0xB000)
+    self.agent_cookie_start = getattr(config.env, 'flow_cookie', 0xA000)
+    self.bg_duration = getattr(config.env, 'bg_duration', 60) 
     
     # 任务状态
     self.s_node = None
     self.d_node = None
     self.current_flow_type = None
-    self.step_count = 0
+    self.step_count = 0 
     self.path_so_far = [] 
-    self.current_node = None
+    self.current_node = None 
+    self.dist_matrix = dict(nx.all_pairs_shortest_path_length(self.blueprint_G))
+    self.shaping_weight = getattr(config.env, 'shaping_weight', 0.1)
   
   # 重新启动背景流量/重新发送业务流
-  def reset(self, force_hard=False, current_load_mbps=None):
+  def reset_bg(self, current_load_mbps=None):
     """
     Args:
       force_hard (bool): 强制执行 Hard Reset
       current_load_mbps (float): [课程学习] 指定当前的背景流量负载
     """
-    
-    # 1. 检查是否需要 Hard Reset (换地图)
-    current_time = time.time()
-    time_elapsed = current_time - self.bg_start_time
-    
-    # 检查存活进程比例
-    live_procs = [p for p in self.bg_processes if p.poll() is None]
-    is_bg_dead = len(live_procs) < len(self.bg_processes) * 0.5 if self.bg_processes else True
-    
-    # 判定逻辑：强制 OR 超时 OR 进程死亡 OR (关键)负载需求变了
-    # 如果外部传入了新的 load 且与 config 不一致(通常意味着 Epoch 变了)，建议也 Hard Reset
-    need_hard = force_hard or (time_elapsed > self.bg_duration) or is_bg_dead
-    
-    if need_hard:
-      # 如果外部没传 load，就用 config 默认值
-      target_load = current_load_mbps if current_load_mbps else self.config.total_load_mbps
-      self._hard_reset_background_traffic(target_load)
-    else:
-      # Soft Reset: 只清理 Agent 留下的痕迹
-      mc.clean_flow_rules(self.net, cookie=self.agent_cookie_start, mask=self.cookie_mask)
-
-    # 2. 执行 Soft Reset (换任务)
-    self._soft_reset_task()
-
-    # 3. 初始化游走状态
-    self.current_node = self.s_node
-    self.path_so_far = [self.s_node]
-    self.step_count = 0
+    target_load = current_load_mbps if current_load_mbps else self.config.env.total_load_mbps
+    self._hard_reset_background_traffic(target_load)
 
     return self.get_observation()
 
+  def reset_flow(self):
+    mc.clean_flow_rules(self.net, cookie=self.agent_cookie_start, mask=self.cookie_mask)
+    return self.get_observation()
+  
   # 动作掩码
   def get_action_mask(self):
     """
@@ -200,11 +182,6 @@ class SdnWrapper:
 
     logger.log_network_status(self.current_G.copy())
 
-  # 重新发送业务流
-  def _soft_reset_task(self):
-    self.s_node, self.d_node = self.topo_gen.select_source_destination()
-    self.current_flow_type, _ = self.flow_gen.get_random_flow()
-
   # 清空背景流
   def _kill_bg_processes(self):
     for proc in self.bg_processes:
@@ -235,7 +212,9 @@ class SdnWrapper:
     # 2. 合法性检查
     if u != self.current_node:
       logger.log(f"Illegal Move: {self.current_node} -> {u} impossible. Valid edges start from {self.current_node}", tag="Env Err")
-      # 严重惩罚，这通常意味着 Mask 没做好
+      import traceback
+      traceback.print_exc()
+      exit()
       return self.get_observation(), -5.0, True, {'error': 'illegal_move'}
 
     # 3. 执行移动
@@ -244,7 +223,12 @@ class SdnWrapper:
     self.step_count += 1
     
     done = False
-    reward = -0.01 # 步数惩罚 (Step Penalty)，鼓励短路径
+    old_dist = self.dist_matrix[u][self.d_node]
+    new_dist = self.dist_matrix[v][self.d_node]
+    progress = old_dist - new_dist
+
+    shaping_reward = progress * self.shaping_weight
+    step_reward = -0.01 + shaping_reward
     info = {'flow_type': self.current_flow_type.name}
 
     # 4. 状态判定
@@ -257,13 +241,14 @@ class SdnWrapper:
       self.active_cookies.add(cookie)
 
       # 打印路径状态 (用于调试)
-      # vprint_path_status(self.current_G.copy(), self.path_so_far)
-
+      logger.log(f"Path: {self.path_so_far}, FlowType: {self.current_flow_type.name.upper()}", tag="Agent Path")
+      
+      protocol_str = 'TCP' if self.current_flow_type == FlowType.STREAMING else 'UDP'
       # A. 下发规则
       mc.install_path_rules(
         self.net, self.path_so_far, 
-        tos=32, dst_port=12000, cookie=cookie )
-      
+        tos=32, dst_port=12000, cookie=cookie, protocol=protocol_str)
+
       # B. 测量 QoS
       src_host = self.net.get(f'h{self.s_node}')
       dst_host = self.net.get(f'h{self.d_node}')
@@ -275,16 +260,18 @@ class SdnWrapper:
         flow_type=self.current_flow_type,
         config=self.config )
       
-      # [鲁棒性修复] 处理测量失败的情况
+      # 处理测量失败的情况
       if qos_reward == -1 or qos_reward is None:
         logger.log("Measurement Failed! Punishment applied.", tag="Env Warn")
-        reward = -1.0 # 测量失败视为路径不可达
+        total_reward = -1.0 # 测量失败视为路径不可达
       else:
         logger.log(f"QoS: {qos_reward:.4f} | QoE: {qoe_reward:.4f} | Path: {self.path_so_far}", tag="Env Done")
-        reward = qos_reward # 这里你可以选择返回 qos_reward 还是 qoe_reward
+        total_reward = qos_reward # 这里你可以选择返回 qos_reward 还是 qoe_reward
 
       info['qos'] = qos_reward
       info['path'] = self.path_so_far
+
+      return self.get_observation(), total_reward, True, info
 
     elif v in self.path_so_far[:-1]:
       # === Loop ===
@@ -292,7 +279,7 @@ class SdnWrapper:
       reward = -1.0 
       info['error'] = 'loop_detected'
 
-    elif self.step_count >= self.config.max_steps:
+    elif self.step_count >= self.config.train.max_steps:
       # === Timeout ===
       done = True
       reward = -2.0 # 超时惩罚
@@ -302,5 +289,5 @@ class SdnWrapper:
     # 下一跳的 Observation 中，Source 特征可能需要变为 Current Node
     # 或者你需要让 GNN 知道 "Current Position" 在哪里
     next_state = self.get_observation()
-    return next_state, reward, done, info
+    return next_state, step_reward, done, info
 

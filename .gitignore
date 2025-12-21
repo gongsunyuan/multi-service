@@ -5,6 +5,9 @@
 *.ingest
 *.log
 
+.gitignore
+learning.inpynb
+
 trained_model/
 checkpoints/
 __pycache__/

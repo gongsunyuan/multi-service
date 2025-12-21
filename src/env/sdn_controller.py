@@ -199,7 +199,7 @@ def calculate_qoe_reward(qos_metrics: dict, flow_profile: dict) -> float:
   # 确保数值稳定，截断在 [-1.0, 1.0]
   return float(np.clip(final_reward, -1.0, 1.0))
 
-def calculate_qos_reward(delay_ms, loss_percent, jitter_ms, bw_mbps, flow_type_str, config=None):
+def calculate_qos_reward(delay_ms, loss_percent, jitter_ms, bw_mbps, flow_type_str, config):
   """
   重构版 QoS 奖励函数：基于满意度 (Satisfaction) 累加，而非惩罚扣分。
   解决 Gaming 在好网络下拿负分的问题。
@@ -214,10 +214,10 @@ def calculate_qos_reward(delay_ms, loss_percent, jitter_ms, bw_mbps, flow_type_s
   
   # 定义业务约束 (Hard Constraints) & 期望 (Expectations)
   # 这里的 max_delay 定义为 "超过此值满意度为0"
-  params = config.QOS_REWARD_PARAMS 
+  params = config.qos_reward
   
   p = params.get(f_type, params['DEFAULT'])
-  weights = p['w'] # [w_delay, w_jitter, w_loss, w_bw]
+  weights = p['w'] 
 
   # --- 2. 计算各项满意度 (Score: 0.0 ~ 1.0) ---
   
@@ -272,13 +272,15 @@ def calculate_qos_reward(delay_ms, loss_percent, jitter_ms, bw_mbps, flow_type_s
 
   return rl_reward
 
-def measure_path_qos(server, client, path_route, flow_type, config, resend = False):
+def measure_path_qos(server, client, path_route, flow_type, config, resend=False):
   """
-  使用 D-ITG 测量路径 QoS (基于内存文件系统 /dev/shm)
+  [完美健壮版] 解决时序竞争与解析失败
   """
+  # --- 1. 给 OVS 流表下发一点“呼吸时间” ---
+  # 解决代码跑得比交换机快的问题
+  sleep(0.2) 
 
-  # 1. 准备内存日志路径 (使用 /dev/shm 实现“伪管道”)
-  # 使用 uuid 防止文件名冲突
+  # --- 3. 准备 D-ITG 参数 ---
   random_id = uuid.uuid4().hex[:8]
   log_prefix = f"/dev/shm/itg_{client.name}_{server.name}_{random_id}"
   recv_log = f"{log_prefix}.recv"  
@@ -289,7 +291,7 @@ def measure_path_qos(server, client, path_route, flow_type, config, resend = Fal
 
   if flow_type == FlowType.STREAMING:
     # TCP 给 2.5 倍余量，防止拥塞误杀
-    safe_timeout = target_duration* 2.5 + 2  # 6*2.5 + 2 = 17s
+    safe_timeout = target_duration* 2.5 + 4  # 6*2.5 + 2 = 17s
   else:
     # UDP 给 2 秒余量即可
     safe_timeout = target_duration + 4  # 2 + 4 = 6s
@@ -304,7 +306,7 @@ def measure_path_qos(server, client, path_route, flow_type, config, resend = Fal
 
   if not success:
     # 如果 run_itg_safe 返回 False (连接彻底失败)，直接返回 -1
-    return -1.0
+    return -1.0, -1.0
 
   # if stderr: return 0
   # 检查文件是否存在 (防止传输完全失败导致无日志)
@@ -325,7 +327,7 @@ def measure_path_qos(server, client, path_route, flow_type, config, resend = Fal
       f"ITGDec {recv_log}", 
       shell=True,
       stdout=subprocess.PIPE, 
-      stderr=subprocess.PIPE,
+      stderr=subprocess.PIPE, 
       text=True 
     ) as dec_proc:
 
@@ -347,7 +349,7 @@ def measure_path_qos(server, client, path_route, flow_type, config, resend = Fal
     dec_output = ""
 
   finally:
-    # 移除临时日志文件
+    # 清理所有临时文件 
     client.cmd(f"rm -f {recv_log}")
 
   # 2. 解析 D-ITG 输出
@@ -358,7 +360,7 @@ def measure_path_qos(server, client, path_route, flow_type, config, resend = Fal
       return measure_path_qos(server, client, path_route, flow_type, config, resend=True)
     else :
       logger.log(f"Fail to send packet, bad path", tag="Sender Err")
-      return -1
+      return -1.0, -1.0
 
   # 假设 qos_metrics 里的数值已经拿到了
   d = qos_metrics['delay']
@@ -609,7 +611,7 @@ def get_flow_command(
   flow_type: str, 
   target_ip: str, 
   duration_sec: int, 
-  sig_port: int = 9001,
+  sig_port: int = 15000,
   log_file: str = None,
   **kwargs
   ) -> str:
@@ -626,7 +628,7 @@ def get_flow_command(
   
   # Log file argument
   log_str = f"-x {log_file}" if log_file else ""
-  
+  flow_tos = 32
   # 1. Base ITGSend Arguments
   # -a: Target IP
   # -rp: Remote Port (Must match server!)
@@ -636,6 +638,7 @@ def get_flow_command(
   itg_args = (
     f"-a {shlex.quote(target_ip)} "
     f"-rp 12000 "
+    f"-b {flow_tos} "
     f"-Sdp {sig_port} "  # Use same port for signaling to keep it simple
     f"{log_str} "
     f"-t {duration_ms} "
@@ -741,8 +744,7 @@ def run_itg_safe(client_node, server_node, log_file, flow_type, duration_sec, ti
       target_ip=target_ip,
       duration_sec=duration_sec,
       sig_port=actual_port, # Sync ports!
-      log_file=log_file
-    )
+      log_file=log_file )
     
     logger.log(f"{client_node.name} -> {target_ip}:{actual_port} ({flow_type}); Timeout: {timeout_sec}", tag="Send Start")
     logger.log(f"Send command: {cmd}", tag="Send Cmd")
@@ -770,7 +772,7 @@ def run_itg_safe(client_node, server_node, log_file, flow_type, duration_sec, ti
 
     except subprocess.TimeoutExpired as e:
       logger.log(f"Flow timed out (> {timeout_sec}s). Saving logs...", tag="Send Fail")
-      logger.log(f"{e.stdout}", tag="Send Fail")
+      logger.log(f"ITGSend output: {e.stdout}", tag="Send Fail")
       # Graceful Shutdown: Send SIGINT to the Process Group
       # This tells D-ITG to stop sending and flush logs to disk
       try:
@@ -847,7 +849,7 @@ def clean_flow_rules(net, cookie=0xA000, mask=0xF000):
   # 这告诉 OVS: "只要 Cookie 以 A 开头 (高4位是A)，不管后面几位是什么，统统删掉！"
   match_str = f"cookie={hex(cookie)}/{hex(mask)}"
   
-  logger.log(f"Cleaning flows matching {match_str}...", tag="Rule Clean")
+  # logger.log(f"Cleaning flows matching {match_str}...", tag="Rule Clean")
 
   for sw in net.switches:
     # 注意：这里去掉了 /-1，改用我们计算出的掩码
@@ -876,145 +878,108 @@ def verify_cleanup(net, cookie=0xA000):
       has_residue = True
         
   if not has_residue:
-    logger.log(f"Flow cleanup verified. No rules with cookie={hex(cookie)} found.", tag="Clean OK")
+    # logger.log(f"Flow cleanup verified. No rules with cookie={hex(cookie)} found.", tag="Clean OK")
     return True
   else:
+    logger.log(f"Flow cleanup failed. Error cookie: {cookie}", tag="Clean Err")
     return False
 
 # 下发流表规则
-def install_path_rules(net, path_nodes, tos=None, dst_port=None, cookie=0x1234, do_ping=True):
+def install_path_rules(net, path_nodes, cookie, actual_sig_port=15000, tos=None, dst_port=None, protocol='UDP'):
   """
-  安装端到端路径流表 (完整版)
-  
-  参数:
-    net: Mininet 网络对象
-    path_nodes: 节点ID列表 (如 [0, 1, 2])
-    tos: 流量 ToS 标记 (None=泛洪, 32=Agent, 184=Background)
-    dst_port: 目的端口 (None=通配所有端口, 12000=精确匹配)
-    cookie: 流表标记
-    do_ping: 是否执行 Ping 测试 (仅在 tos=None 时建议开启)
+  安装端到端路径流表 (严格模式)
+  140: 只放行 ARP、Ping 和 TCP 握手 (SYN)
+  150: 放行信令数据和带 ToS 的业务数据
+  100: 反向回包保底
   """
-  # 1. 获取源主机和目的主机对象
-  src_id = path_nodes[0]
-  dst_id = path_nodes[-1]
-  
-  h_src = net.get(f'h{src_id}')
-  h_dst = net.get(f'h{dst_id}')
-  dst_ip = h_dst.IP()
-  src_ip = h_src.IP()
-  
-  # Debug 信息
-  # port_str = f"Port={dst_port}" if dst_port else "Port=ANY"
-  # logger.log(f"[Install] h{src_id}->h{dst_id} | ToS={tos} | {port_str}")
+  # 1. 获取基础网络对象与 IP
+  src_id, dst_id = path_nodes[0], path_nodes[-1]
+  h_src, h_dst = net.get(f'h{src_id}'), net.get(f'h{dst_id}')
+  src_ip, dst_ip = h_src.IP(), h_dst.IP()
 
-  # 2. 遍历路径上的每一跳交换机
   for i, current_node_id in enumerate(path_nodes):
     sw_name = f's{current_node_id}'
     switch = net.get(sw_name)
+
+    # ==========================================
+    # A. 端口预计算 (必须先算好正向和反向，才能下流表)
+    # ==========================================
     
-    # ==========================================
-    # A. 计算正向输出端口 (Out Port)
-    # ==========================================
+    # 1. 正向输出端口 (Out Port)
     out_port = None
     if i == len(path_nodes) - 1:
-      # Case: 最后一跳 -> 目的主机
       links = net.linksBetween(switch, h_dst)
       if links:
         link = links[0]
-        # 确定 switch 侧的接口
         out_intf = link.intf1 if link.intf1.node == switch else link.intf2
         out_port = switch.ports[out_intf]
     else:
-      # Case: 中间跳 -> 下一跳交换机
-      next_node_id = path_nodes[i+1]
-      next_switch = net.get(f's{next_node_id}')
-      links = net.linksBetween(switch, next_switch)
+      next_sw = net.get(f's{path_nodes[i+1]}')
+      links = net.linksBetween(switch, next_sw)
       if links:
         link = links[0]
         out_intf = link.intf1 if link.intf1.node == switch else link.intf2
         out_port = switch.ports[out_intf]
-    
-    if out_port is None:
-      logger.log(f"Cannot find link from {sw_name}", tag="Install Err")
-      continue
 
-    # ==========================================
-    # B. 下发正向规则 (Forwarding Rules)
-    # ==========================================
-
-    if tos is not None:
-      # === QoS 专用模式 (区分业务) ===
-      
-      # [规则 1.A]: D-ITG 默认信令 (TCP 9000) - 给背景流用
-      cmd_sig = (f'ovs-ofctl -O OpenFlow13 add-flow {sw_name} '
-                 f'"cookie={cookie},priority=150,dl_type=0x0800,'
-                 f'nw_proto=6,tp_dst=9000,nw_dst={dst_ip},actions=output:{out_port}"')
-      switch.cmd(cmd_sig)
-
-      # [规则 1.B]: D-ITG VIP 信令 (TCP 9001) - 给智能体流用 (NEW!)
-      # 必须加这条，否则 Step 2 的 VIP 通道不通！
-      cmd_sig_vip = (f'ovs-ofctl -O OpenFlow13 add-flow {sw_name} '
-                 f'"cookie={cookie},priority=150,dl_type=0x0800,'
-                 f'nw_proto=6,tp_dst=9001,nw_dst={dst_ip},actions=output:{out_port}"')
-      switch.cmd(cmd_sig_vip)
-      
-      # [规则 2]: 业务数据流 - 优先级 150
-      # 动态构建匹配条件
-      match_str = (f"cookie={cookie},priority=150,dl_type=0x0800,"
-                   f"nw_proto=17,nw_tos={tos},nw_dst={dst_ip}")
-      
-      # 如果指定了端口，加入精确匹配；否则通配所有端口
-      if dst_port is not None:
-        match_str += f",tp_dst={dst_port}"
-      
-      cmd_data = f'ovs-ofctl -O OpenFlow13 add-flow {sw_name} "{match_str},actions=output:{out_port}"'
-      switch.cmd(cmd_data)
-      
-    else:
-      # === 兼容/泛洪模式 (Ping) ===
-      # [规则 3]: 通用 IP 转发 - 优先级 100
-      cmd_gen = (f'ovs-ofctl -O OpenFlow13 add-flow {sw_name} '
-                 f'"cookie={cookie},priority=100,dl_type=0x0800,'
-                 f'nw_dst={dst_ip},actions=output:{out_port}"')
-      switch.cmd(cmd_gen)
-
-    # ==========================================
-    # C. 计算反向输出端口 (Reverse Port)
-    # ==========================================
+    # 2. 反向输出端口 (Reverse Port)
     rev_port = None
     if i == 0:
-      # Case: 第一跳 -> 源主机 (回包终点)
       links_rev = net.linksBetween(switch, h_src)
       if links_rev:
         link_rev = links_rev[0]
         rev_intf = link_rev.intf1 if link_rev.intf1.node == switch else link_rev.intf2
         rev_port = switch.ports[rev_intf]
     else:
-      # Case: 中间跳 -> 上一跳交换机
-      prev_node_id = path_nodes[i-1]
-      prev_switch = net.get(f's{prev_node_id}')
-      links_rev = net.linksBetween(switch, prev_switch)
+      prev_sw = net.get(f's{path_nodes[i-1]}')
+      links_rev = net.linksBetween(switch, prev_sw)
       if links_rev:
         link_rev = links_rev[0]
         rev_intf = link_rev.intf1 if link_rev.intf1.node == switch else link_rev.intf2
         rev_port = switch.ports[rev_intf]
 
-    if rev_port is None:
-      logger.log(f"Cannot find reverse link from {sw_name}", tag="Install Err")
-      continue
+    if out_port is None or rev_port is None:
+      continue # 容错处理
 
     # ==========================================
-    # D. 下发反向规则 (Reverse Rules)
+    # B. 下发流表 (严格匹配逻辑)
     # ==========================================
+
+    # [Priority 140: 基础设施层] 
     
-    # [规则 4]: 反向 IP 回包 - 优先级 100
-    # 确保 TCP ACK (信令回应) 和 Ping Reply 能回来
-    # 这里放宽条件，匹配所有发往 src_ip 的包
-    cmd_rev_ip = (f'ovs-ofctl -O OpenFlow13 add-flow {sw_name} '
-                  f'"cookie={cookie},priority=100,dl_type=0x0800,'
-                  f'nw_dst={src_ip},actions=output:{rev_port}"')
-    switch.cmd(cmd_rev_ip)
+    # [ARP 规则]: 允许二层地址解析。匹配: dl_type=0x0806 (ARP 协议)。
+    switch.cmd(f'ovs-ofctl -O OpenFlow13 add-flow {sw_name} "priority=140,dl_type=0x0806,actions=NORMAL"')
 
+    # [Ping 正向]: 匹配: dl_type=0x0800 (IP), nw_proto=1 (ICMP), 目标 IP。
+    switch.cmd(f'ovs-ofctl -O OpenFlow13 add-flow {sw_name} "cookie={cookie},priority=140,dl_type=0x0800,nw_proto=1,nw_dst={dst_ip},actions=output:{out_port}"')
+    # [Ping 反向]: 匹配: 目标 IP 为源主机。
+    switch.cmd(f'ovs-ofctl -O OpenFlow13 add-flow {sw_name} "cookie={cookie},priority=140,dl_type=0x0800,nw_proto=1,nw_dst={src_ip},actions=output:{rev_port}"')
+
+    # [TCP 握手正向]: 匹配: nw_proto=6 (TCP), tcp_flags=0x002/0x002 (仅 SYN 位为 1)。
+    switch.cmd(f'ovs-ofctl -O OpenFlow13 add-flow {sw_name} "cookie={cookie},priority=140,dl_type=0x0800,nw_proto=6,tcp_flags=0x002/0x002,nw_dst={dst_ip},actions=output:{out_port}"')
+    # [TCP 握手反向]: 匹配: 反向路径的 SYN/ACK。
+    switch.cmd(f'ovs-ofctl -O OpenFlow13 add-flow {sw_name} "cookie={cookie},priority=140,dl_type=0x0800,nw_proto=6,tcp_flags=0x002/0x002,nw_dst={src_ip},actions=output:{rev_port}"')
+    # tcp_flags=0x010/0x010 匹配 ACK 位。
+    switch.cmd(f'ovs-ofctl -O OpenFlow13 add-flow {sw_name} "cookie={cookie},priority=140,tcp,nw_dst={dst_ip},tcp_flags=0x010/0x010,actions=output:{out_port}"')
+    # [Priority 150: 业务通道层] 
+    if tos is not None:
+      # [信令通道 15000]: 匹配: TCP 协议, 目的端口 15000。
+      switch.cmd(f'ovs-ofctl -O OpenFlow13 add-flow {sw_name} "cookie={cookie},priority=150,dl_type=0x0800,nw_proto=6,tp_dst={actual_sig_port},nw_dst={dst_ip},actions=output:{out_port}"')
+      # [信令回包]: 匹配: 源端口 15000 (ACK)。
+      switch.cmd(f'ovs-ofctl -O OpenFlow13 add-flow {sw_name} "cookie={cookie},priority=150,dl_type=0x0800,nw_proto=6,tp_src={actual_sig_port},nw_dst={src_ip},actions=output:{rev_port}"')
+
+      # [VIP 数据流]: 匹配: 指定协议, 指定 ToS, 目标 IP。
+      p_num = 6 if protocol.upper() == 'TCP' else 17
+      match_data = f"cookie={cookie},priority=150,dl_type=0x0800,nw_proto={p_num},nw_tos={tos},nw_dst={dst_ip}"
+      # 仅 UDP 精确匹配数据端口，TCP 建议放宽端口以兼容。
+      if protocol.upper() == 'UDP' and dst_port:
+        match_data += f",tp_dst={dst_port}"
+      
+      switch.cmd(f'ovs-ofctl -O OpenFlow13 add-flow {sw_name} "{match_data},actions=output:{out_port}"')
+
+    # [Priority 100: 反向回包保底] 
+    
+    # [反向保底]: 匹配: 只要发往源主机的 IP 包。用于承载所有 ACK/Reply，优先级最低。
+    switch.cmd(f'ovs-ofctl -O OpenFlow13 add-flow {sw_name} "cookie={cookie},priority=100,dl_type=0x0800,nw_dst={src_ip},actions=output:{rev_port}"')
 
 # 根据gnn输出的 logits来生成路径--贪婪/概率选择：
 # 替换 MS/Env/MininetController.py 中的 sample_path 函数

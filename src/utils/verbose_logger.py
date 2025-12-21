@@ -139,54 +139,59 @@ class VerboseLogger:
   
   def log_network_status(self, G):
     """
-    打印全网节点与链路的物理状态快照。
-    用于验证背景流是否制造了足够的拥塞 (Buffer/Util)。
+    打印全网节点与链路状态。
+    节点按介数中心性排序，边按利用率排序。
     """
     if not self.enabled: return
     
-    self.log("=" * 80, tag="Net Status")
-    
-    # --- 1. 节点状态 (Buffer & Processing) ---
-    self.log(f"[Nodes] Total: {len(G.nodes())}", tag="Net Status")
-    node_header = f" {'Node':<4} | {'Buffer%':<10} | {'ProcDelay':<10} | {'Centrality'}"
+    # --- 1. 节点状态 (按 Betweenness 降序排序) ---
+    self.log("", tag="Net Status")
+    self.log("=" * 60)
+    self.log(f"[Nodes] Sorted by Betweenness Centrality")
+    node_header = f" {'Node':<4} | {'Centrality':<10} | {'Buffer%':<10} | {'ProcDelay'}"
     self.log(node_header)
     self.log("-" * 60)
     
-    # 排序输出，方便查看
-    for n in sorted(G.nodes()):
-      # 兼容不同图数据的 key
-      buff = G.nodes[n].get('buffer_occupancy', 0.0)
-      proc = G.nodes[n].get('proc_delay', 0.0)
-      # 简单展示一个中心性指标 (Betweenness)
-      betw = G.nodes[n].get('betweenness', 0.0)
+    # 使用 lambda 获取 'betweenness' 进行排序
+    sorted_nodes = sorted(
+      G.nodes(data=True), 
+      key=lambda x: x[1].get('buffer_occupancy', 0.0), 
+      reverse=True)
+    
+    for n, data in sorted_nodes:
+      buff = data.get('buffer_occupancy', 0.0)
+      proc = data.get('proc_delay', 0.0)
+      betw = data.get('betweenness', 0.0)
       
-      # 红色高亮：如果 Buffer 堆积严重
-      marker = " << FULL" if buff > 0.8 else ""
-      
-      self.log(f" {n:<4} | {buff:<10.2%} | {proc:<10.4f} | {betw:.4f}{marker}")
+      marker = " [HUB]" if betw > G.graph.get('avg_betw', 0.5) else "" # 假设有一个平均参考值
+      self.log(f" {n:<4} | {betw:<10.4f} | {buff:<10.2%} | {proc:<10.4f}{marker}")
     
     self.log("-" * 60)
 
-    # --- 2. 链路状态 (Bandwidth & Congestion) ---
-    self.log(f"[Edges] Total: {len(G.edges())}", tag="Net Status")
-    edge_header = f" {'Link':<10} | {'Cap(Mbps)':<10} | {'Util%':<8} | {'Delay(ms)':<10} | {'Loss%'}"
+    # --- 2. 链路状态 (按 Utilization 降序排序) ---
+    self.log(f"[Edges] Sorted by Link Utilization")
+    edge_header = f" {'Link':<10} | {'Util%':<10} | {'Cap(Mbps)':<10} | {'Delay(ms)':<10} | {'Loss%'}"
     self.log(edge_header)
     self.log("-" * 60)
     
-    for u, v, data in G.edges(data=True):
-      cap = data.get('capacity', 100.0) # 物理容量
+    # 使用 lambda 获取 data 中的 'utilization' 进行排序
+    sorted_edges = sorted(G.edges(data=True), 
+                          key=lambda x: x[2].get('utilization', 0.0), 
+                          reverse=True)
+    
+    for u, v, data in sorted_edges:
+      cap = data.get('capacity', 100.0)
       util = data.get('utilization', 0.0)
       delay = data.get('delay', 0.0)
       loss = data.get('loss', 0.0)
       
-      # 状态标记
       status = ""
-      if util > 0.95: status = " [CONGESTED]"
+      if util > 0.90: status = " [CONGESTED]"
       if loss > 0.01: status += " [DROP]"
       
-      self.log(f" {u:<2}->{v:<2}    | {cap:<10.1f} | {util:<8.2%} | {delay:<10.2f} | {loss:.2%}{status}")
+      self.log(f" {u:<2}->{v:<2}     | {util:<10.2%} | {cap:<10.1f} | {delay:<10.2f} | {loss:.2%}{status}")
       
-    self.log("=" * 80 + "\n")
+    self.log("=" * 80)
 
 # 全局单例导出 
 logger = VerboseLogger()

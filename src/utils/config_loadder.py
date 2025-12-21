@@ -2,7 +2,7 @@ import yaml
 import os
 from pathlib import Path
 from .create_unique_log_dir import create_unique_log_dir
-
+from .config_saver import save_configs
 class AttrDict(dict):
   """
   一个简单的扩展类，允许通过 . 访问字典属性，并支持递归嵌套。
@@ -32,10 +32,30 @@ def load_yaml_config(yaml_path):
       config_dict = yaml.safe_load(f)
       # 封装为对象形式返回 
       config = AttrDict(config_dict)
-      config.path.log_dir = create_unique_log_dir(config.path.log_dir, experiment_name=config.name.exp_name)
-      config.path.ckpt_dir = create_unique_log_dir(config.path.ckpt_dir, experiment_name=config.name.exp_name)
-      os.makedirs(config.path.ckpt_dir, exist_ok=True)
-      os.makedirs(config.path.log_dir , exist_ok=True)
+      if hasattr(config, 'path'):
+        if hasattr(config.path, 'output_dir'):
+          if not "eval" in config.name.exp_name:
+            config.path.output_dir = create_unique_log_dir(config.path.output_dir, experiment_name=config.name.exp_name)
+            config.path.log_dir = os.path.join(config.path.output_dir, "logs/")
+            config.path.ckpt_dir = os.path.join(config.path.output_dir, "checkpoints/")
+            config.path.eval_dir = os.path.join(config.path.output_dir, "eval_results/")
+            config.path.config_dir = os.path.join(config.path.output_dir, "configs/")
+
+            os.chmod(config.path.output_dir, mode=0o777)
+            if hasattr(config.path, 'log_dir'):
+              os.makedirs(config.path.log_dir , exist_ok=True)
+              os.chmod(config.path.log_dir, mode=0o777)
+            if hasattr(config.path, 'ckpt_dir'):
+              os.makedirs(config.path.ckpt_dir, exist_ok=True)
+              os.chmod(config.path.ckpt_dir, mode=0o777)
+            if hasattr(config.path, 'eval_dir'):
+              os.makedirs(config.path.eval_dir, exist_ok=True)
+              os.chmod(config.path.eval_dir, mode=0o777)
+            if hasattr(config.path, 'config_dir'):
+              os.makedirs(config.path.config_dir, exist_ok=True)
+              os.chmod(config.path.config_dir, mode=0o777)
+
+      save_configs(config)
       return config
     except yaml.YAMLError as e:
       print(f"Error parsing YAML file: {e}")

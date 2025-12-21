@@ -31,10 +31,9 @@ class PPOMemory:
     """
     核心转化函数：将 List 转化为符合训练要求的 Tensor/Batch
     """
-    # 1. 图状态特殊处理：将 List[Data] 转化为一个大图 Batch 
-    # 注意：不能用 torch.stack，因为图的节点数可能不同
+    # 1. 图状态处理
     states_batch = Batch.from_data_list(self.states).to(self.device)
-    
+
     # 2. 基础数据转化
     log_probs = torch.stack(self.log_probs).to(self.device).detach() 
     actions = torch.tensor(self.actions, dtype=torch.long).to(self.device) 
@@ -43,7 +42,8 @@ class PPOMemory:
     is_terminals = torch.tensor(self.is_terminals, dtype=torch.float32).to(self.device)
     
     # 3. 辅助训练数据转化  
-    fingerprints = torch.stack(self.fingerprints).to(self.device).detach()
+    fingerprints = torch.cat(self.fingerprints, dim=0).to(self.device).detach()
+    
     curr_indices = torch.tensor(self.curr_indices, dtype=torch.long).to(self.device)
     target_indices = torch.tensor(self.target_indices, dtype=torch.long).to(self.device)
 
