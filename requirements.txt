@@ -3,7 +3,7 @@ numpy>=1.21.0
 scipy>=1.7.0
 networkx>=2.6.0
 tqdm>=4.64.0
-
+   
 # --- Deep Learning (PyTorch & PyG) ---
 # Note: For specific CUDA versions, visit pytorch.org
 torch>=1.12.0
