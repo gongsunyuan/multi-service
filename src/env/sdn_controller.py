@@ -2,7 +2,8 @@ import os
 import math
 import subprocess
 from time import sleep, time
-import re 
+import re
+from typing import Any 
 from mininet.net import Mininet
 import numpy as np
 from enum import Enum 
@@ -42,7 +43,7 @@ video_calc = RigorousVideoEvaluator(target_bitrate_kbps=5000) # 1080p Video
 fps_game_calc = RigorousLegacyFPSEvaluator() # CSa
 # cloud_game_calc = RigorousCloudGamingEvaluator(target_bitrate_kbps=8000) # Cloud Gaming
 
-def parse_ditg_output(output_str: str) -> dict:
+def parse_ditg_output(output_str: str) -> tuple[dict[str, Any], bool]:
   """
   解析 ITGDec 的标准输出文本，提取关键 QoS 指标。
   处理包括正常数值和异常值 (如 nan) 的情况。
@@ -132,7 +133,11 @@ def calculate_qoe_reward(qos_metrics: dict, flow_profile: dict) -> float:
   b = qos_metrics.get('bandwidth', 0.0) * 1000.0 # Convert to kbps
   
   # 2. 识别业务类型
+
   f_type_enum = flow_profile.get('type') 
+
+  assert f_type_enum is not None, "flow type is None"
+
   f_type = f_type_enum.name.lower() if hasattr(f_type_enum, 'name') else str(f_type_enum).lower()
 
   mos = 1.0
@@ -558,6 +563,8 @@ def send_packet_and_capture(
     client_proc = client.popen(client_cmd, shell=True)
 
     # 6. [核心] 实时读取
+    assert tshark_proc.stdout is not None, "tshark stdout is None"
+  
     for line in tshark_proc.stdout:
       line = line.strip()
       if not line: continue
@@ -601,18 +608,18 @@ def send_packet_and_capture(
 
   # 如果没抓到包，返回全0或者随机噪声防止报错，但在训练初期这可能导致冷启动问题
   if len(feature_matrix) == 0:
-    return torch.zeros((n_packets_to_capture, 2), dtype=float)
+    return torch.zeros((n_packets_to_capture, 2), dtype=torch.float32)
 
-  fingerprint_tensor = torch.tensor(feature_matrix, dtype=float)
+  fingerprint_tensor = torch.tensor(feature_matrix, dtype=torch.float32)
   return fingerprint_tensor
 
 # 根据流类型，返回不同的 D-ITG 命令。
 def get_flow_command(
-  flow_type: str, 
+  flow_type: FlowType, 
   target_ip: str, 
   duration_sec: int, 
   sig_port: int = 15000,
-  log_file: str = None,
+  log_file: str | None = None,
   **kwargs
   ) -> str:
   """
@@ -621,9 +628,12 @@ def get_flow_command(
   """
   # Map friendly names to FlowType Enum or dict keys
   # Assuming FLOW_PROFILES is a global dict defined elsewhere
-  profile = FLOW_PROFILES.get(flow_type, FLOW_PROFILES.get('voip')) 
+  profile = FLOW_PROFILES.get(flow_type, FLOW_PROFILES.get(FlowType.VOIP)) 
   
+  assert profile is not None, f"FlowType {flow_type} not found in FLOW_PROFILES"
   protocol = profile['protocol'] # 'UDP' or 'TCP'
+
+  assert protocol in ['UDP', 'TCP'], f"Invalid protocol: {protocol}"
   duration_ms = int(duration_sec * 1000)
   
   # Log file argument
@@ -1022,7 +1032,6 @@ def sample_path(edge_logits, edge_index, s_node, d_node, max_steps=100, G_fallba
       candidate_nodes.append(next_node)
       
     logits_tensor = torch.stack(candidate_logits)
-    
     if greedy:
       action_idx = torch.argmax(logits_tensor).item()
       log_prob = torch.tensor(0.0).to(logits_tensor.device)
@@ -1035,7 +1044,7 @@ def sample_path(edge_logits, edge_index, s_node, d_node, max_steps=100, G_fallba
     
     log_probs.append(log_prob)
     
-    next_hop = candidate_nodes[action_idx]
+    next_hop = candidate_nodes[int(action_idx)]
     path.append(next_hop)
     visited.add(next_hop)
     current = next_hop

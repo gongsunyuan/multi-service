@@ -2,8 +2,9 @@ import os
 import yaml
 
 from .verbose_logger import logger
+from .config_loadder import AttrDict
 
-def save_configs(config):
+def save_configs(config: AttrDict):
   # 1. 保存完整的训练配置 (Train Config)
   train_cfg_path = os.path.join(config.path.config_dir, "train_eval.yaml")
   eval_cfg_path = os.path.join(config.path.config_dir, "eval_config.yaml")

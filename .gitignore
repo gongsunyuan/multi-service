@@ -6,8 +6,9 @@
 *.log
 
 .gitignore
-learning.inpynb
+learning.ipynb
 
+.vscode/
 trained_model/
 checkpoints/
 __pycache__/

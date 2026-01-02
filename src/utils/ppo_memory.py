@@ -1,8 +1,14 @@
+from typing import Any
+
+
+from torch._tensor import Tensor
+
+
 import torch
 from torch_geometric.data import Batch # 必须导入这个用于处理图批处理
 
 class PPOMemory:
-  def __init__(self, device):
+  def __init__(self, device: str) -> None:
     self.device = device
     self.states = []
     self.values = []
@@ -16,7 +22,7 @@ class PPOMemory:
     self.target_indices = [] 
 
   def store(self, state, action, log_prob, value, reward, is_terminal,
-            fingerprint, curr_idx, target_idx):
+            fingerprint, curr_idx, target_idx) -> None:
     self.states.append(state)
     self.values.append(value)
     self.rewards.append(reward)
@@ -27,12 +33,12 @@ class PPOMemory:
     self.fingerprints.append(fingerprint)
     self.target_indices.append(target_idx)
 
-  def get_all(self):
+  def get_all(self) -> tuple[Any, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
     """
     核心转化函数：将 List 转化为符合训练要求的 Tensor/Batch
     """
     # 1. 图状态处理
-    states_batch = Batch.from_data_list(self.states).to(self.device)
+    states_batch = Batch.from_data_list(self.states).to(self.device) # type: ignore
 
     # 2. 基础数据转化
     log_probs = torch.stack(self.log_probs).to(self.device).detach() 
