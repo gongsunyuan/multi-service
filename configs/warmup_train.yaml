@@ -20,5 +20,11 @@ train:
     clip_eps: 0.2
     batch_size: 16
     save_interval: 2
-    train_epochs: 5000000
+    epochs: 1000
     checkpoint_keep_count: 2
+    pos_weight: 3.0
+    # 早停设置
+    patience: 10
+    min_delta: 0.001
+    # 采样设置
+    samples_per_epoch: 10000

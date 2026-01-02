@@ -16,6 +16,8 @@ class FiLMPPOAgent(nn.Module):
     self.gnn = FilmGNN(config)
 
     # Define actor and critic networks
+    # Actor 输入：[当前节点, 目标节点, 邻居节点, 边特征]
+    # Critic 输入：[当前节点, 目标节点]
     critic_input_dim =  config.model.hidden_dim*2 
     actor_input_dim =  config.model.hidden_dim*3 + config.model.edge_dim 
     self.actor = actor(input_dim= actor_input_dim)
@@ -183,7 +185,7 @@ class FiLMPPOAgent(nn.Module):
       neighbor_mask = (edge_index[0] == u_global)
       
       # [Var] neighbor_global_indices: 所有邻居在大图中的 ID 
-      # [Shape] (K, ) 其中 K 是邻居数量 
+      # [Shape] (K, ) 其中 K 是邻居数量 (当前样本的度)
       neighbor_global_indices = edge_index[1][neighbor_mask]
       
       # [Var] neighbor_edge_attrs: 这些边的属性 (Delay, BW, Loss...)
@@ -276,37 +278,37 @@ class FiLMPPOAgent(nn.Module):
 
     # 3. PPO 更新循环
     for _ in range(self.config.train.ppo_epochs):
-      # 重新评估当前的动作概率和价值 (因为参数在变)
-      # 这里需要你在 SDNAgent 中实现一个 evaluate 方法
-      new_log_probs, state_values, dist_entropy = self.evaluate_batch(
-        states_batch, fingerprints, curr_idxs, target_idxs, actions
-      )
+        # 重新评估当前的动作概率和价值 (因为参数在变)
+        # 这里需要你在 SDNAgent 中实现一个 evaluate 方法
+        new_log_probs, state_values, dist_entropy = self.evaluate_batch(
+            states_batch, fingerprints, curr_idxs, target_idxs, actions
+        )
 
-      # 计算 Ratio (新旧策略比率)
-      ratio = torch.exp(new_log_probs - old_log_probs)
+        # 计算 Ratio (新旧策略比率)
+        ratio = torch.exp(new_log_probs - old_log_probs)
 
-      # PPO 截断损失 (Actor Loss)
-      surr1 = ratio * advantages
-      surr2 = torch.clamp(ratio, 1 - self.clip_eps, 1 + self.clip_eps) * advantages
-      actor_loss = -torch.min(surr1, surr2).mean()
+        # PPO 截断损失 (Actor Loss)
+        surr1 = ratio * advantages
+        surr2 = torch.clamp(ratio, 1 - self.clip_eps, 1 + self.clip_eps) * advantages
+        actor_loss = -torch.min(surr1, surr2).mean()
 
-      # 价值损失 (Critic Loss)
-      critic_loss = 0.5 * F.mse_loss(state_values, returns)
+        # 价值损失 (Critic Loss)
+        critic_loss = 0.5 * F.mse_loss(state_values, returns)
 
-      # 熵损失 (鼓励探索)
-      entropy_loss = -self.config.train.entropy_coef * dist_entropy.mean()
+        # 熵损失 (鼓励探索)
+        entropy_loss = -self.config.train.entropy_coef * dist_entropy.mean()
 
-      # 总 Loss
-      loss = actor_loss + critic_loss + entropy_loss
+        # 总 Loss
+        loss = actor_loss + critic_loss + entropy_loss
 
-      # 反向传播
-      self.optimizer.zero_grad()
-      loss.backward()
-      nn.utils.clip_grad_norm_(self.parameters(), max_norm=0.5)
-      self.optimizer.step()
+        # 反向传播
+        self.optimizer.zero_grad()
+        loss.backward()
+        nn.utils.clip_grad_norm_(self.parameters(), max_norm=0.5)
+        self.optimizer.step()
 
-      total_actor_loss += actor_loss.item()
-      total_critic_loss += critic_loss.item()
+        total_actor_loss += actor_loss.item()
+        total_critic_loss += critic_loss.item()
 
     memory.clear() # 清空记忆，准备下一轮采样
 

@@ -45,8 +45,8 @@ class CheckpointManager:
 
     def save(
         self, 
-        epoch: int, 
         model: torch.nn.Module, 
+        epoch: int | None = None, 
         save_file: str | None = None,
         metrics: Dict[str, float]| None = None, 
         optimizer: torch.optim.Optimizer | None = None,
@@ -87,7 +87,11 @@ class CheckpointManager:
             logger.log("Warning: 'metrics' is not a dictionary. It might cause issues in history tracking.", tag="Warn")
             # 这里可以选择报错，也可以选择只是警告，看你对严谨性的要求
 
-        filename = f"checkpoint_epoch_{epoch:06d}.pth"
+        assert epoch is not None or save_file is not None, "Either epoch or save_file must be provided."
+
+        if epoch is not None:
+            filename = f"checkpoint_epoch_{epoch:06d}.pth"
+
         if save_file is not None:
             checkpoint_path = self.checkpoint_dir / save_file
         else :
