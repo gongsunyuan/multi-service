@@ -1,35 +1,35 @@
 # 路径配置
 name:
-  exp_name: "ospf_train"
+  	exp_name: "ospf_train"
 
 path:
-  output_dir: "workspace/outputs/ospf_train"
+ 	
 
 # 网络架构
 model:
-  edge_dim: 4
-  node_dim: 9
-  gnn_heads: 4
-  gnn_layers: 8
-  hidden_dim: 256
-  fingerprint_dim: 2
+	edge_dim: 4
+	node_dim: 9
+	gnn_heads: 4
+	gnn_layers: 8
+	hidden_dim: 256
+	fingerprint_dim: 2
 
 # 训练参数
 train:
-  lr: 0.00003
-  clip_eps: 0.2
-  max_steps: 20
-  batch_size: 16
-  ppo_epochs: 10
-  max_epochs: 500
-  save_interval: 10
-  entropy_coef: 0.01
-  checkpoint_keep_count: 2
+	lr: 0.00003
+	clip_eps: 0.2
+	max_steps: 20
+	batch_size: 16
+	ppo_epochs: 10
+	max_epochs: 500
+	save_interval: 10
+	entropy_coef: 0.01
+	checkpoint_keep_count: 2
 
 env:
-  max_nodes_num: 20
-  min_delay: 1.0
-  max_delay: 200.0
-  min_bw: 30
-  max_bw: 200.0
-  max_loss: 5.0
+	max_nodes_num: 20
+	min_delay: 1.0
+	max_delay: 200.0
+	min_bw: 30
+	max_bw: 200.0
+	max_loss: 5.0

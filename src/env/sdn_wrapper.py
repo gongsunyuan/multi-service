@@ -1,4 +1,5 @@
 import time
+from typing import Any
 import torch
 import networkx as nx
 import random
@@ -8,11 +9,14 @@ from . import sdn_controller as mc
 from .flow_generator import FlowType
 from .flow_generator import FlowGenerator
 from .network_generator import TopologyGenerator, get_pyg_data_from_nx
+from ..utils import AttrDict
+
+
 
 class SdnWrapper:
 
   # 初始化背景流
-  def __init__(self, config):
+  def __init__(self, config: AttrDict ) -> None:
     """
     __init__ 的 Docstring
     
@@ -83,9 +87,10 @@ class SdnWrapper:
     生成动作掩码 (True 代表合法动作)
     """
     edge_index = self.observation_data.edge_index
+
+    assert(edge_index is not None)
     num_edges = edge_index.shape[1]
     mask = torch.zeros(num_edges, dtype=torch.bool)
-    
     # 获取所有边的起点
     source_nodes = edge_index[0, :]
     
@@ -117,6 +122,9 @@ class SdnWrapper:
     
     # --- 2. 特征提取 ---
     # Hop-by-Hop 关键：S_node 填 self.current_node
+    assert(self.current_node is not None)
+    assert(self.d_node is not None)
+
     data, _ = get_pyg_data_from_nx(
       self.current_G.copy(), 
       self.current_node, 
@@ -200,7 +208,11 @@ class SdnWrapper:
     """
     Returns: next_state, reward, done, info
     """
+    info: dict[str, Any] = {}
+
     # 1. 解析动作
+    assert(self.observation_data.edge_index is not None)
+
     try:
       # 增加防越界保护
       u = self.observation_data.edge_index[0, action_edge_idx].item()
@@ -215,7 +227,6 @@ class SdnWrapper:
       import traceback
       traceback.print_exc()
       exit()
-      return self.get_observation(), -5.0, True, {'error': 'illegal_move'}
 
     # 3. 执行移动
     self.current_node = v
@@ -229,7 +240,10 @@ class SdnWrapper:
 
     shaping_reward = progress * self.shaping_weight
     step_reward = -0.01 + shaping_reward
-    info = {'flow_type': self.current_flow_type.name}
+    
+    assert(self.current_flow_type is not None)
+    
+    info['flow_type'] = self.current_flow_type.name
 
     # 4. 状态判定
     if v == self.d_node:

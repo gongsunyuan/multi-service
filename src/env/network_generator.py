@@ -8,7 +8,7 @@ from torch_geometric.data import Data
 from ..utils import logger
 
 class TopologyGenerator:
-  def __init__(self):
+  def __init__(self) -> None:
     self.G = None
     pass
 
@@ -31,6 +31,7 @@ class TopologyGenerator:
         self.load_topology(default_path)
       
       # 返回固定图的深拷贝，防止数据污染
+      assert self.G is not None, "Fixed graph is not loaded"
       G = self.G.copy()
       # 刷新一下动态状态 (拥塞程度)
       return self.refresh_dynamic_state(G, difficulty=0.5)
@@ -143,6 +144,8 @@ class TopologyGenerator:
 
     # 3. 计算聚类系数
     clust_dict = nx.clustering(G)
+    
+    assert isinstance(clust_dict, dict), "clust_dict is not a dict"
 
     # 4. 赋值回图节点
     for n in G.nodes():
@@ -262,7 +265,7 @@ def get_pyg_data_from_nx(G: nx.Graph, Cur_node: int, D_node: int, config):
   :rtype: tuple[Data, nx.Graph]
   
   特征维度说明：
-    - 节点特征 (8维):
+    - 节点特征 (9维):
       0. Degree (归一化)
       1. Is_Destination (0/1)
       2. Dist_To_Destination (归一化)
@@ -271,6 +274,7 @@ def get_pyg_data_from_nx(G: nx.Graph, Cur_node: int, D_node: int, config):
       5. PageRank
       6. Buffer Occupancy 
       7. Processing Delay
+      8. Is_Current_Node
     - 边特征 (4维): 
       0. Delay (归一化)
       1. Bandwidth (归一化)
@@ -350,8 +354,10 @@ def get_pyg_data_from_nx(G: nx.Graph, Cur_node: int, D_node: int, config):
     # [Change] 这里的特征列表精简为 8 维
     is_c = 1.0 if i == Cur_node else 0.0
     is_d = 1.0 if i == D_node else 0.0
-    deg = G.degree(i) / (deg_max + 1e-6)
+    deg = G.degree(i) / (deg_max + 1e-6) # type: ignore
     dd = 1.0 * min(dist_to_d.get(i, 999), deg_max) / deg_max
+    
+    assert isinstance(clustering, dict), f"clustering is not dict: {clustering}"
     
     betw = betweenness.get(i, 0.0)
     clus = clustering.get(i, 0.0)

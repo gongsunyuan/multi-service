@@ -19,7 +19,7 @@ def main():
   args = parser.parse_args()
   config_path = os.path.join("configs/", args.yaml)
   config = load_yaml_config(config_path)
-  config.device = "cuda" if torch.cuda.is_available() else "cpu"
+  config['device'] = "cuda" if torch.cuda.is_available() else "cpu"
 
   # 2. 环境初始化 (启动 Mininet)
   log_path = os.path.join(config.path.log_dir, "debug.log")
@@ -32,8 +32,9 @@ def main():
   memory = PPOMemory(config.device)
   
   # 加载预训练权重进行热启动
-  logger.log(f"Hot Start: Loading weights from {args.checkpoint}", tag="Init")
-  agent.load_state_dict(torch.load(args.checkpoint, map_location=config.device))
+  if(args.checkpoint):
+    logger.log(f"Hot Start: Loading weights from {args.checkpoint}", tag="Init")
+    agent.load_state_dict(torch.load(args.checkpoint, map_location=config.device))
   
   # 4. 训练流程控制
   trainer = PPOTrainer(agent, env, memory, config)
