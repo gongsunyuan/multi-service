@@ -66,10 +66,9 @@ class WarmupTrainer:
             # 4. Loss
             mask = batch.train_mask
             loss = self.criterion(logits[mask], batch.y_guidance[mask])
-
+            
             self.optimizer.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.agent.parameters(), max_norm=1.0)
             self.optimizer.step()
             
             total_loss += loss.item()
