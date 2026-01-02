@@ -4,7 +4,7 @@ name:
 path:
     fgprt_path: "data/fingerprints/fingerprint_bank.pt"
     output_dir: "workspace/outputs/warmup_train"
-
+  
 # 网络架构
 model:
     edge_dim: 4

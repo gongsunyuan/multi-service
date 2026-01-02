@@ -3,7 +3,7 @@ name:
   	exp_name: "ospf_train"
 
 path:
- 	
+ 	 
 
 # 网络架构
 model:
