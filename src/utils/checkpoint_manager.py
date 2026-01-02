@@ -153,7 +153,11 @@ class CheckpointManager:
             key=lambda x: x['metrics'][metric_key], 
             reverse=higher_is_better
         )
+<<<<<<< HEAD
 
+=======
+        
+>>>>>>> 10df8564a669efb4c9baf12ad895ffcd004530f0
         best_record = sorted_records[0]
         
         # 验证文件是否存在
