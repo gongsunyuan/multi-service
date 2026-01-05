@@ -14,13 +14,13 @@ Warmup Trainer 模块
 """
 
 import torch
-from torch_geometric.data import DataLoader
+from torch_geometric.loader import DataLoader
 from torch_geometric.data.batch import Batch
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import IterableDataset
 
-from agents import FiLMPPOAgent
-from utils import CheckpointManager, AttrDict
+from ..agents import FiLMPPOAgent
+from ..utils import CheckpointManager, AttrDict, logger
 
 class WarmupTrainer:
     def __init__(self, agent: FiLMPPOAgent, config: AttrDict, writer: SummaryWriter | None = None) -> None:  
@@ -29,7 +29,7 @@ class WarmupTrainer:
         self.writer = writer
         self.device = torch.device(config.device)
         
-        self.checkpoint_manager = CheckpointManager(config.path.checkpoint_dir)
+        self.checkpoint_manager = CheckpointManager(config.path.ckpt_dir, config.train.checkpoint_keep_count)
         # 全参数训练：GNN 和 Actor 一起练
         # GNN 负责看懂 "这条路很堵" 和 "那条路通向终点"
         # Actor 负责综合这两个信息做决策
@@ -37,6 +37,9 @@ class WarmupTrainer:
         # 使用带权重的 BCE Loss (正样本少，负样本多)
         pos_weight = config.train.get('pos_weight', 3.0) if hasattr(config.train, 'get') else getattr(config.train, 'pos_weight', 3.0)
         self.criterion = torch.nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight]).to(self.device))
+        
+        # 添加全局步骤计数器，用于 TensorBoard 日志
+        self.global_step = 0
 
     def train_epoch(self, dataset: IterableDataset, epoch_idx: int) -> float:
         """
@@ -57,7 +60,7 @@ class WarmupTrainer:
         batch_size = getattr(self.config.train, 'batch_size', 32) if hasattr(self.config.train, 'batch_size') else 32
         
         # 创建数据加载器
-        loader = DataLoader(dataset, batch_size=batch_size)
+        loader = DataLoader(dataset, batch_size=batch_size)  # type: ignore
         
         # 设置模型为训练模式
         self.agent.train()
@@ -71,12 +74,14 @@ class WarmupTrainer:
             # 移动到指定设备
             batch = batch.to(self.device)
             
-            # 创建虚拟指纹（当前未使用）
-            dummy_fp = torch.ones((batch.num_graphs, 2), device=self.device)
-            
             # 1. GNN 提取节点特征
             # 输入边属性包含利用率信息，GNN可以学习到拥塞情况
-            node_embeds = self.agent.gnn(batch.x, batch.edge_index, batch.edge_attr, dummy_fp)
+            # 生成 film 参数
+            # 创建正确格式的虚拟指纹：(Batch, Seq_Len, fingerprint_dim)
+            dummy_fp = torch.ones((batch.num_graphs, 1, 2), device=self.device)  # 添加 Seq_Len 维度
+            film_params = self.agent.film(dummy_fp)
+            # 使用正确的参数调用 GNN
+            node_embeds = self.agent.gnn(batch.x, batch.edge_index, batch.edge_attr, film_params, batch.batch)
             
             # 2. 构造 Actor 输入
             # 获取边的源节点和目标节点索引
@@ -106,7 +111,8 @@ class WarmupTrainer:
             # 4. 计算损失
             # 只计算训练掩码内的边
             mask = batch.train_mask
-            loss = self.criterion(logits[mask], batch.y_guidance[mask])
+            # 移除logits的最后一个维度，使其与target尺寸匹配
+            loss = self.criterion(logits[mask].squeeze(-1), batch.y_guidance[mask])
             
             # 5. 反向传播更新参数
             self.optimizer.zero_grad()
@@ -119,7 +125,9 @@ class WarmupTrainer:
             
             # 记录每步的损失
             if self.writer is not None:
-                self.writer.add_scalar('train/step_loss', loss.item(), epoch_idx * len(loader) + step)
+                self.writer.add_scalar('train/step_loss', loss.item(), self.global_step)
+            # 递增全局步骤计数器
+            self.global_step += 1
         
         # 计算平均损失
         avg_loss = total_loss / total_batches if total_batches > 0 else 0.0
@@ -145,7 +153,7 @@ class WarmupTrainer:
         batch_size = getattr(self.config.train, 'batch_size', 32) if hasattr(self.config.train, 'batch_size') else 32
         
         # 创建数据加载器
-        loader = DataLoader(dataset, batch_size=batch_size)
+        loader = DataLoader(dataset, batch_size=batch_size) # type: ignore
         
         # 设置模型为评估模式
         self.agent.eval()
@@ -160,11 +168,13 @@ class WarmupTrainer:
                 # 移动到指定设备
                 batch = batch.to(self.device)
                 
-                # 创建虚拟指纹（当前未使用）
-                dummy_fp = torch.ones((batch.num_graphs, 2), device=self.device)
-                
                 # 1. GNN 提取节点特征
-                node_embeds = self.agent.gnn(batch.x, batch.edge_index, batch.edge_attr, dummy_fp)
+                # 生成 film 参数
+                # 创建正确格式的虚拟指纹：(Batch, Seq_Len, fingerprint_dim)
+                dummy_fp = torch.ones((batch.num_graphs, 1, 2), device=self.device)  # 添加 Seq_Len 维度
+                film_params = self.agent.film(dummy_fp)
+                # 使用正确的参数调用 GNN
+                node_embeds = self.agent.gnn(batch.x, batch.edge_index, batch.edge_attr, film_params, batch.batch)
                 
                 # 2. 构造 Actor 输入
                 row, col = batch.edge_index
@@ -188,7 +198,8 @@ class WarmupTrainer:
                 
                 # 4. 计算损失
                 mask = batch.train_mask
-                loss = self.criterion(logits[mask], batch.y_guidance[mask])
+                # 移除logits的最后一个维度，使其与target尺寸匹配
+                loss = self.criterion(logits[mask].squeeze(-1), batch.y_guidance[mask])
                 
                 # 累加损失
                 total_loss += loss.item()

@@ -7,7 +7,7 @@ import networkx as nx
 from torch.utils.data import IterableDataset
 from torch_geometric.data import Data, Batch
 from .routing_kernels import RoutingKernels
-from ..env.network_generator import TopologyGenerator, get_pyg_data_from_nx
+from ..env.network_generator import TopologyGenerator
 from ..utils import logger, AttrDict
 
 class WarmupDataset(IterableDataset):
@@ -33,7 +33,7 @@ class WarmupDataset(IterableDataset):
         
         # 初始化所有边的利用率
         for u, v in edges:
-            cap = 100  # 假设带宽统一，简化问题，只看利用率
+            cap = random.choice(['30', '120', '200'])  
             util = 0.0
             
             # 根据不同策略生成拥塞
@@ -93,8 +93,9 @@ class WarmupDataset(IterableDataset):
         if not next_hop_map: return None # pyright: ignore[reportReturnType]
 
         # 5. 转 PyG
-        # D_node=target，这样 get_pyg 会自动生成 Is_Dest 等特征
-        data, _ = get_pyg_data_from_nx(G_nx, Cur_node=0, D_node=target, config=self.config)
+        # D_node=target，这样 get_graph_data 会自动生成 Is_Dest 等特征
+        from .networkx_watcher import get_graph_data
+        data, _ = get_graph_data(G_nx, Cur_node=0, D_node=target, config=self.config)
         
         # 6. 构造监督信号：Edge Classification
         # 遍历所有边，如果这条边是 (u -> best_neighbor)，则 Label=1

@@ -6,15 +6,16 @@
 *.log
 
 .gitignore
-learning.ipynb
+test.ipynb
 
-.vscode/
 trained_model/
 checkpoints/
 __pycache__/
-train_log/
 workspace/
+train_log/
+.vscode/
 dataset/
 curve/
+.trae/
 data/
 tmp/

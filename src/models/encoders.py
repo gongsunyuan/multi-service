@@ -2,6 +2,8 @@ import torch.nn as nn
 from torch_geometric.nn import GATv2Conv
 import torch.nn.functional as F
 
+from ..utils import AttrDict
+
 class FilmGenerator(nn.Module):
     """
     [模块1] 意图生成器
@@ -9,7 +11,7 @@ class FilmGenerator(nn.Module):
     输出: GNN 的调制参数 (Gamma, Beta)
     """
 
-    def __init__(self, config):
+    def __init__(self, config:AttrDict):
         super().__init__()
         self.lstm = nn.LSTM(config.model.fingerprint_dim, config.model.hidden_dim, batch_first=True)
         # 输出层生成所有 GNN 层的 Gamma 和 Beta
@@ -91,28 +93,28 @@ class FilmGNN(nn.Module):
         
         for i in range(self.num_layers):
             x_in = x
-        x = self.convs[i](x, edge_index, edge_attr=edge_attr)
-        x = self.norms[i](x)
-        
-        # 3. 取出第 i 层的参数 (Batch, Hidden)
-        layer_params = params[:, i, :, :] 
-        gamma = layer_params[:, 0, :] + 1.0 
-        beta = layer_params[:, 1, :]        
-        
-        # ================= [标准解法核心] =================
-        if batch_vector is not None:
-            # 利用 batch_vector (N,) 从 gamma (B, H) 中查表
-            # 结果变为 (N, H)，与节点数量一一对应
-            gamma_expanded = gamma[batch_vector] 
-            beta_expanded = beta[batch_vector]
-            x = x * gamma_expanded + beta_expanded
-        else:
-            # 兼容单图推理的情况 (batch_size=1)
-            x = x * gamma + beta
-        # ==================================================
+            x = self.convs[i](x, edge_index, edge_attr=edge_attr)
+            x = self.norms[i](x)
+            
+            # 3. 取出第 i 层的参数 (Batch, Hidden)
+            layer_params = params[:, i, :, :] 
+            gamma = layer_params[:, 0, :] + 1.0 
+            beta = layer_params[:, 1, :]        
+            
+            # ================= [标准解法核心] =================
+            if batch_vector is not None:
+                # 利用 batch_vector (N,) 从 gamma (B, H) 中查表
+                # 结果变为 (N, H)，与节点数量一一对应
+                gamma_expanded = gamma[batch_vector] 
+                beta_expanded = beta[batch_vector]
+                x = x * gamma_expanded + beta_expanded
+            else:
+                # 兼容单图推理的情况 (batch_size=1)
+                x = x * gamma + beta
+            # ==================================================
 
-        x = F.relu(x)
-        x = x + x_in 
+            x = F.relu(x)
+            x = x + x_in 
             
         return x
 

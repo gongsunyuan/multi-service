@@ -25,16 +25,33 @@ class BankTrafficManager:
 
     def generate_batch(self, batch_size):
         """
-        从库中随机采样指纹，并确保设备与 Agent 一致
+        均衡生成各类型的流，从库中随机采样指纹
         """
-        flows = []
+        # 避免循环引用，在此处导入
+        from ..env.flow_generator import FlowType
 
-        for _ in range(batch_size):
-            # 1. 随机选择源宿节点 
-            s, d = self.env.topo_gen.select_source_destination()
+        flows = []
+        all_types = list(FlowType)
+        num_types = len(all_types)
+        
+        # 1. 规划每种类型的数量 (Balanced Sampling)
+        base_count = batch_size // num_types
+        remainder = batch_size % num_types
+        
+        target_types = []
+        for t in all_types:
+            target_types.extend([t] * base_count)
+        
+        # 余数随机分配
+        if remainder > 0:
+            target_types.extend(random.sample(all_types, remainder))
             
-            # 2. 随机选择业务类型
-            f_type, _ = self.env.flow_gen.get_random_flow()
+        # 打乱顺序
+        random.shuffle(target_types)
+
+        for f_type in target_types:
+            # 2. 随机选择源宿节点 
+            s, d = self.env.topo_gen.select_source_destination()
             
             # 3. 从预处理过的库中采样 
             type_key = f_type.name.lower()

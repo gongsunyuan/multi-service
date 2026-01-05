@@ -16,7 +16,7 @@ class SdnParaser(ArgumentParser):
     self.add_argument(
       "-dv","--device",
       type=str,
-      default="",
+      default=None,
       help="指定使用gpu-'0,1,2,3'"
     )
     self.add_argument(

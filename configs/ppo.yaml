@@ -2,9 +2,12 @@
 name:
     exp_name: "nsfnet_ppo_train"
 path:
+    warmup_path: "workspace/outputs/warmup_train/20260103_144813_film_warmup_train/checkpoints/warmup_best.pt"
     graph_path: "data/topologies/nsfnet_gravity.graphml"
     fgprt_path: "data/fingerprints/fingerprint_bank.pt"
     output_dir: "workspace/outputs/ppo_train"
+
+debug_mode: false # Toggle debug logs (ITG cmds, raw parser output, etc.)
 
 # 网络架构
 model:
@@ -20,9 +23,9 @@ train:
     lr: 0.0004
     clip_eps: 0.2
     max_steps: 20
-    batch_size: 16
+    batch_size: 30
     ppo_epochs: 10
-    max_epochs: 5000000
+    max_epochs: 5000
     save_interval: 2
     entropy_coef: 0.01
     checkpoint_keep_count: 2
@@ -40,9 +43,9 @@ env:
     bg_cookie: 0xB000
     flow_cookie: 0xA000
 
+    end_load: 400.0           
+    start_load: 100.0      
     total_load_mbps: 200.0
-    start_load: 20.0      
-    end_load: 200.0           
  
     curriculum: true       
 
@@ -53,19 +56,19 @@ qos_reward:
         ref_bw: 0.5
         max_delay: 80.0
         max_jitter: 20.0
-        w: [0.4, 0.1, 0.4, 0.1]
+        w: [0.4, 0.1, 0.4, 0.1] # [delay, jitter, loss_rate, bandwidth]
     VOIP:
         ref_bw: 0.1
         max_delay: 150.0
         max_jitter: 50.0
-        w: [0.3, 0.2, 0.4, 0.1]
+        w: [0.3, 0.2, 0.4, 0.1] # [delay, jitter, loss_rate, bandwidth]
     STREAMING:
         ref_bw: 5.0
         max_delay: 1000.0
         max_jitter: 100.0
-        w: [0.1, 0.1, 0.3, 0.5]
+        w: [0.1, 0.1, 0.3, 0.5] # [delay, jitter, loss_rate, bandwidth]
     DEFAULT:
         ref_bw: 5.0
         max_delay: 200.0
         max_jitter: 100.0
-        w: [0.25, 0.25, 0.25, 0.25]
+        w: [0.25, 0.25, 0.25, 0.25] # [delay, jitter, loss_rate, bandwidth]

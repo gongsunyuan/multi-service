@@ -28,15 +28,17 @@ class VerboseLogger:
 		if self._initialized: return
 		self.enabled = True
 		self.log_to_console = True
+		self.debug_mode = False  # [New] Debug Mode
 		self.tag_width = 12
 		self.pbar = None
 		self._file_logger = None
 		self._initialized = True
 
-	def configure(self, log_file: str | None = None, verbose: bool = True, console: bool = True) -> None:
+	def configure(self, log_file: str | None = None, verbose: bool = True, log_to_console: bool = True, debug_mode: bool = False) -> None:
 		"""[初始化入口] 在程序启动时配置一次。"""
 		self.enabled = verbose
-		self.log_to_console = console
+		self.log_to_console = log_to_console
+		self.debug_mode = debug_mode
 		if log_file:
 			logger = logging.getLogger("SDN_File_Log")
 			logger.setLevel(logging.INFO)
@@ -56,8 +58,14 @@ class VerboseLogger:
 
 	def log(self, message: str, tag: str | None = None, timestamp: datetime | None = None, log_to_console: bool | None = None, **kwargs):
 		"""核心打印函数 (替代 vprint)。"""
-		if not log_to_console : 
+		# [New] Filter Debug logs if debug_mode is False
+		if tag and tag.lower() == "debug" and not self.debug_mode:
+			return
+
+		# [Fix] Correct logic for log_to_console override
+		if log_to_console is None: 
 			log_to_console = self.log_to_console
+			
 		if not self.enabled: return
 		now = timestamp if timestamp else datetime.now()
 		time_str = now.strftime("%H:%M:%S.%f")[:-3]
@@ -95,8 +103,8 @@ class VerboseLogger:
 		except IOError as e:
 			self.log(f"Failed to write matrix: {e}", tag="Error")
 
-	def log_qos(self, service_type: str, delay: float, jitter: float, bw: float, loss: float, tag: str = "Measure"):
-		"""QoS 报告格式化。"""
+	def log_qos(self, service_type: str, delay: float, jitter: float, bw: float, loss: float, tag: str = "QoS Report"):
+		"""QoS 报告格式化 (简洁对齐版)。"""
 		if not self.enabled: return
 		locked_now = datetime.now()
 		self.log(f"Report for {service_type}:", tag=tag, timestamp=locked_now)

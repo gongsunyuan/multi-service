@@ -73,7 +73,8 @@ class CheckpointManager:
             raise ValueError("Cannot save checkpoint: 'model' is None.")
             
         # 2. 检查 Epoch 格式（防止传入 'last' 这种字符串导致后续排序崩溃）
-        if not isinstance(epoch, int) or epoch < 0:
+        # 只有当 save_file 未提供时，才严格检查 epoch
+        if save_file is None and (not isinstance(epoch, int) or epoch < 0):
             raise ValueError(f"Epoch must be a non-negative integer, got {epoch} (type: {type(epoch)})")
             
         # 3. 检查保存目录是否存在（防止训练途中被人手滑删了文件夹）
@@ -91,7 +92,7 @@ class CheckpointManager:
 
         if epoch is not None:
             filename = f"checkpoint_epoch_{epoch:06d}.pth"
-
+        
         if save_file is not None:
             checkpoint_path = self.checkpoint_dir / save_file
         else :
@@ -129,7 +130,7 @@ class CheckpointManager:
             
             return str(checkpoint_path)
         except Exception as e:
-            logger.log(f"Error saving checkpoint: {e}", tag="Checkpoint Err", log_to_console=True)
+            logger.log(f"Error saving checkpoint: {e}", tag="Checkpoint Err", log_to_console=False)
             raise e
 
     def get_best_checkpoint(self, metric_key: str = 'reward', higher_is_better: bool = True) -> Optional[str]:
@@ -189,7 +190,7 @@ class CheckpointManager:
     
     def _cleanup_old_checkpoints(self) -> None:
         # 基于文件名中的 epoch 数字解析，比 getmtime 更可靠
-        files = list(self.checkpoint_dir.glob("checkpoint_epoch_*.pth"))
+        files = list(self.checkpoint_dir.glob("*_epoch_*.pth"))
         
         def parse_epoch(p: Path):
             # 提取 000123
@@ -239,12 +240,12 @@ class CheckpointManager:
         if checkpoint_path is None:
             checkpoint_path = self.get_latest_checkpoint()
             if checkpoint_path is None:
-                logger.log("No checkpoint found to load.", tag="Load", log_to_console=True)
+                logger.log("No checkpoint found to load.", tag="Load", log_to_console=False)
                 return {} # 返回空字典，由外部判断是否报错
         
         ckpt_path_obj = Path(checkpoint_path)
         if not ckpt_path_obj.exists():
-            logger.log(f"Checkpoint file not found: {ckpt_path_obj}", tag="Load Err", log_to_console=True)
+            logger.log(f"Checkpoint file not found: {ckpt_path_obj}", tag="Load Err", log_to_console=False)
             raise FileNotFoundError(f"Checkpoint file not found: {ckpt_path_obj}")
 
         logger.log(f"Loading checkpoint from: {ckpt_path_obj} ...", tag="Load")
@@ -264,14 +265,14 @@ class CheckpointManager:
                 if 'optimizer_state_dict' in checkpoint_data:
                     optimizer.load_state_dict(checkpoint_data['optimizer_state_dict'])
                 else:
-                    logger.log("Warning: Optimizer provided but missing in checkpoint.", tag="Warn", log_to_console=True)
+                    logger.log("Warning: Optimizer provided but missing in checkpoint.", tag="Warn", log_to_console=False)
                     
             # 5. 加载调度器 (Scheduler)
             if scheduler is not None:
                 if 'scheduler_state_dict' in checkpoint_data:
                     scheduler.load_state_dict(checkpoint_data['scheduler_state_dict'])
                 else:
-                    logger.log("Warning: Scheduler provided but missing in checkpoint.", tag="Warn", log_to_console=True)
+                    logger.log("Warning: Scheduler provided but missing in checkpoint.", tag="Warn", log_to_console=False)  
             
             # 6. 加载 RL 归一化器 (Normalizer) - 关键！
             if normalizer is not None:
@@ -281,7 +282,7 @@ class CheckpointManager:
                 elif 'obs_rms' in checkpoint_data: # 另一种常见的命名
                     normalizer.load_state_dict(checkpoint_data['obs_rms'])
                 else:
-                    logger.log("Warning: Normalizer provided but missing in checkpoint!", tag="Warn")
+                    logger.log("Warning: Normalizer provided but missing in checkpoint!", tag="Warn", log_to_console=True)
 
             # 7. 提取元数据用于恢复训练状态
             loaded_epoch = checkpoint_data.get('epoch', -1)
@@ -298,5 +299,5 @@ class CheckpointManager:
             return info
 
         except Exception as e:
-            logger.log(f"Failed to load checkpoint: {e}", tag="Error")
+            logger.log(f"Failed to load checkpoint: {e}", tag="Load Err", log_to_console=False)
             raise e
