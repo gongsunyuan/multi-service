@@ -1,0 +1,32 @@
+Metadata-Version: 2.4
+Name: multi-service
+Version: 0.1.0
+Summary: 基于 GNN 与网络仿真的多业务路由研究项目
+Author-email: DengYuwei <dengyuwei2025@163.com>
+License: MIT
+Requires-Python: ==3.13.9
+Description-Content-Type: text/markdown
+Requires-Dist: torch==2.9.1
+Requires-Dist: torch-geometric==2.7.0
+Requires-Dist: numpy==2.3.5
+Requires-Dist: pandas==2.3.3
+Requires-Dist: networkx==3.6
+Requires-Dist: scapy==2.6.1
+Requires-Dist: aiohttp==3.13.2
+Requires-Dist: requests==2.32.5
+Requires-Dist: omegaconf==2.3.0
+Requires-Dist: PyYAML==6.0.3
+Requires-Dist: tqdm==4.67.1
+Provides-Extra: science
+Requires-Dist: scipy==1.16.3; extra == "science"
+Requires-Dist: matplotlib==3.10.7; extra == "science"
+Requires-Dist: sympy==1.14.0; extra == "science"
+Requires-Dist: tensorboard==2.20.0; extra == "science"
+Provides-Extra: dev
+Requires-Dist: black>=25.12.0; extra == "dev"
+Requires-Dist: mypy>=1.19.1; extra == "dev"
+Requires-Dist: ipython>=9.8.0; extra == "dev"
+Requires-Dist: ipykernel>=7.1.0; extra == "dev"
+Requires-Dist: pytest; extra == "dev"
+
+# multi-service

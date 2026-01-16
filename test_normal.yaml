@@ -1,5 +1,0 @@
-name:
-  debug_mode: false
-  exp_name: test_exp
-path:
-  output_dir: /tmp/test_output_dir

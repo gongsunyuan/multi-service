@@ -1,14 +1,14 @@
 from mininet.net import Mininet   
 from mininet.cli import CLI
-from src.env.sdn_controller import send_packet_and_capture, get_a_mininet, install_path_rules, NetworkMonitor
-from src.env.network_generator import TopologyGenerator
-from src.env.flow_generator import(
+from multi_service.env.sdn_controller import send_packet_and_capture, get_a_mininet, install_path_rules, NetworkMonitor
+from multi_service.env.network_generator import TopologyGenerator
+from multi_service.env.flow_generator import(
   FlowGenerator
 )
-from src.utils import (
+from multi_service.utils import (
   SdnParaser, logger
 )
-from src.utils.verbose_logger import vprint
+from multi_service.utils.verbose_logger import vprint
 import networkx as nx
 
 class Test_config:

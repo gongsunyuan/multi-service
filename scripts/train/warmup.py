@@ -5,9 +5,9 @@ import sys
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
-from src.agents.ppo_agent import FiLMPPOAgent
-from src.trainers import WarmupTrainer
-from src.utils import (
+from multi_service.agents.ppo_agent import FiLMPPOAgent
+from multi_service.trainers import WarmupTrainer
+from multi_service.utils import (
     AttrDict, logger, SdnParaser, load_yaml_config, WarmupDataset
 )
 

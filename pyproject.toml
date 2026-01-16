@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "multi-service"
+version = "0.1.0"
+description = "基于 GNN 与网络仿真的多业务路由研究项目"
+readme = "README.md"
+requires-python = "==3.13.9"
+license = {text = "MIT"}
+authors = [
+    {name = "DengYuwei", email="dengyuwei2025@163.com"}
+]
+
+dependencies = [
+    "torch==2.9.1",
+    "torch-geometric==2.7.0",
+    "numpy==2.3.5",
+    "pandas==2.3.3",
+    "networkx==3.6",
+    "scapy==2.6.1",
+    "aiohttp==3.13.2",
+    "requests==2.32.5",
+    "omegaconf==2.3.0",
+    "PyYAML==6.0.3",
+    "tqdm==4.67.1",
+]
+
+[project.optional-dependencies]
+science = [
+    "scipy==1.16.3",
+    "matplotlib==3.10.7",
+    "sympy==1.14.0",
+    "tensorboard==2.20.0",
+]
+
+# 开发与调试工具
+dev = [
+    "black>=25.12.0",
+    "mypy>=1.19.1",
+    "ipython>=9.8.0",
+    "ipykernel>=7.1.0",
+    "pytest", 
+]
+
+[tool.setuptools]
+# 告诉工具去 src 文件夹下自动寻找你的 Python 包
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 88
+# 匹配你的 Python 版本
+target-version = ['py313']
+
+[tool.mypy]
+python_version = "3.13"
+warn_return_any = true
+warn_unused_configs = true

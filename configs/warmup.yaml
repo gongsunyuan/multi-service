@@ -4,7 +4,7 @@ name:
 path:
     fgprt_path: "data/fingerprints/fingerprint_bank.pt"
     output_dir: "workspace/outputs/warmup_train"
-  
+    
 # 网络架构
 model:
     edge_dim: 4
@@ -13,6 +13,8 @@ model:
     gnn_layers: 6
     hidden_dim: 128
     fingerprint_dim: 2
+    
+    ablation_mode: "full" 
 
 # 训练参数
 train:

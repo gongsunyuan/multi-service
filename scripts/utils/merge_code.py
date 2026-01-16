@@ -108,8 +108,8 @@ def consolidate_project(source_dir, output_filename):
 # ================= 运行脚本 =================
 if __name__ == "__main__":
   # 设置目标路径
-  target_directory = "." 
-  output_file = "project_code.ingest"
+  target_directory = "./src" 
+  output_file = "agent_code.ingest"
 
   if os.path.exists(target_directory):
     consolidate_project(target_directory, output_file)
