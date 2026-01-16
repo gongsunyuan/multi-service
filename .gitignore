@@ -10,6 +10,7 @@ test.ipynb
 
 trained_model/
 checkpoints/
+.mypy_cache/
 __pycache__/
 workspace/
 train_log/

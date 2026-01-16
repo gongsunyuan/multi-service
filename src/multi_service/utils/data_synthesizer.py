@@ -74,11 +74,11 @@ class WarmupDataset(IterableDataset):
             
             # 写入属性 (Input 特征需要 utilization，Path计算需要 weight)
             G_nx[u][v]['utilization'] = util
-            G_nx[u][v]['bandwidth'] = cap
+            G_nx[u][v]['bandwidth'] = random.randint(10, 100)
             G_nx[u][v]['delay'] = max(0.0, random.normalvariate(10, 10))  
             G_nx[u][v]['loss'] = 0.0
 
-            w = self.kernel.calculate_hybrid_weight(bw_priority=G_nx[u][v]['bandwidth'], delay=G_nx[u][v]['delay'], bandwidth=float(cap))
+            w = self.kernel.calculate_hybrid_weight(delay=G_nx[u][v]['delay'], bandwidth=float(cap))
             G_nx[u][v]['hybrid_weight'] = w
 
         # 3. 随机选 Target

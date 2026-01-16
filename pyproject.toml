@@ -60,3 +60,14 @@ target-version = ['py313']
 python_version = "3.13"
 warn_return_any = true
 warn_unused_configs = true
+
+[[tool.mypy.overrides]]
+module = [
+    "mininet.*",
+    "torch_geometric.*",
+    "scapy.*",
+    "networkx.*",
+    "tqdm.*",
+    "yaml.*"
+]
+ignore_missing_imports = true

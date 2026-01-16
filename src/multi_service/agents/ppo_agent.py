@@ -6,8 +6,8 @@ from torch_geometric.data import Data
 
 from .based_agent import BaseSDNAgent
 
-from ..utils import compute_advantages, AttrDict, logger
-from ..models import FilmGenerator, FilmGNN, actor, critic
+from multi_service.utils import compute_advantages, AttrDict, logger
+from multi_service.models import FilmGenerator, FilmGNN, actor, critic
 
 class FiLMPPOAgent(BaseSDNAgent):
     def __init__(self, config: AttrDict):

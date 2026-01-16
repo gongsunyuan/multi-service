@@ -2,7 +2,7 @@ import networkx as nx
 
 class RoutingKernels:
     @staticmethod
-    def calculate_hybrid_weight(bw_priority: float, delay: float, bandwidth: float = 2.0) -> float:
+    def calculate_hybrid_weight(delay: float, bandwidth: float, bw_priority: float=1.0) -> float:
         """
         在不考虑利用率的情况下，综合延迟和带宽计算链路代价。
         
@@ -11,14 +11,13 @@ class RoutingKernels:
             bandwidth: 链路物理容量 (Mbps) 
             bw_priority: 带宽优先级系数。值越大，模型越倾向于避开低带宽路径。
         """
-        # 1. 基础延迟代价
-        # 直接使用延迟作为基础代价分量
-        delay_cost = delay 
+        
+        delay_cost = delay / 20  
         
         # 2. 带宽代价 (反比逻辑)
         # 代价与带宽成反比：100M 链路贡献 1.0 代价，10M 链路贡献 10.0 代价
         # 这能强迫 Dijkstra 避开窄带宽路，即使它延迟很低
-        bw_cost = bw_priority / (bandwidth + 1e-6)
+        bw_cost = bw_priority / (bandwidth/10 + 1e-6)
         
         # 3. 组合代价
         # 返回两者的加权和
