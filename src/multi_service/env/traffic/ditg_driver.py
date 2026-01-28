@@ -476,11 +476,11 @@ def normalize_fingerprint(tensor: torch.Tensor) -> torch.Tensor:
     # 网络包最大通常是 1514 (MTU + Ethernet Header)。
     # 将其缩放到 [0, 1] 范围内。
     norm_tensor[:, 0] = norm_tensor[:, 0] / 1600.0
-  
+    
     iat_cap = 0.1  # 100ms
     iat_clamped = torch.clamp(norm_tensor[:, 1], max=iat_cap)   # 截断 (Clamp)
     norm_tensor[:, 1] = iat_clamped / iat_cap                   # 归一化
-  
+    
     return norm_tensor
 
 # 获取一个流量特征张量

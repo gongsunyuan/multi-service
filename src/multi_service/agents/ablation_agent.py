@@ -1,6 +1,8 @@
+from sympy import true
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+from torch.optim import lr_scheduler
 
 from multi_service.agents.based_agent import BaseSDNAgent
 from multi_service.utils import compute_advantages, logger
@@ -20,10 +22,13 @@ class AblationAgent(BaseSDNAgent):
 
         # 2. 初始化核心编码器
         self.use_gnn = "gnn" in self.mode or self.mode == "full"
+        logger.log(f"Using GNN: {self.use_gnn}", tag="agent init")
+        logger.log(f"Using FiLM: {self.use_film}", tag="agent init")
+
         if self.use_gnn:
             self.encoder = FilmGNN(config)
         else:
-            # DRL 模式：线性层将原始节点维度 (9) 映射到 hidden_dim [cite: 308, 317]
+            # DRL 模式：线性层将原始节点维度 (9) 映射到 hidden_dim 
             self.encoder = nn.Linear(config.model.node_dim, config.model.hidden_dim)
 
         # 3. 初始化决策头 (维度始终对齐)
@@ -33,14 +38,22 @@ class AblationAgent(BaseSDNAgent):
         self.critic = critic(input_dim= critic_input_dim)
 
         self.optimizer = torch.optim.Adam(self.parameters(), lr=config.train.lr) 
+        self.scheduler = lr_scheduler.ReduceLROnPlateau(
+            self.optimizer, 
+            mode='max', 
+            factor=0.5, 
+            patience=100, 
+            threshold=0.0005, 
+            min_lr=1e-6,
+        ) 
         self.to(self.device)
 
     def get_node_embeddings(self, graph_data, fingerprint):
         """
-        [核心适配] 无论哪种模式，最终输出 (N, H) 维度的嵌入 [cite: 35]
+        [核心适配] 无论哪种模式，最终输出 (N, H) 维度的嵌入 
         """
         # 处理 FiLM 调制参数
-        if self.use_film and self.mode != "vanilla_gnn":
+        if self.use_film :
             film_params = self.film(fingerprint.float()) 
         else:
             # 消融实验：强制 FiLM 参数为 0 (即 Identity 变换)
@@ -57,14 +70,34 @@ class AblationAgent(BaseSDNAgent):
                 film_params, getattr(graph_data, 'batch', None)
             ) 
         else:
-            # DRL 模式：原始特征投影后，如果是 FiLM-DRL 则手动应用调制
-            h = self.encoder(graph_data.x)
+            # DRL 模式：线性投影
+            h = self.encoder(graph_data.x) # 预期 (N, H)
+            
             if self.use_film and self.mode == "film_drl":
+                # 1. 明确 film_params 的维度 (B, Layers, 2, H)
                 params = film_params.view(film_params.size(0), self.config.model.gnn_layers, 2, -1)
-                gamma = params[:, 0, 0, :] + 1.0 # 取第一层模拟调制
-                beta = params[:, 0, 1, :]
-                batch_vec = getattr(graph_data, 'batch', torch.zeros(h.size(0), dtype=torch.long, device=self.device))
-                h = h * gamma[batch_vec] + beta[batch_vec]
+                
+                # 2. 提取 gamma 和 beta (B, H)
+                g = params[:, 0, 0, :] + 1.0 
+                b = params[:, 0, 1, :]
+                
+                # 3. 处理 batch 索引
+                # 关键：如果 graph_data 没有 batch 属性（单图推理），手动补齐
+                batch_vec = getattr(graph_data, 'batch', None)
+                if batch_vec is None:
+                    batch_vec = torch.zeros(h.size(0), dtype=torch.long, device=self.device)
+                
+                # 4. 强制映射并应用调制
+                # 确保 g[batch_vec] 的形状是 (N, H) 而不是 (B, H)
+                gamma_indexed = g[batch_vec] # 结果维度应该是 (节点数, 隐藏层维数)
+                beta_indexed = b[batch_vec]
+                
+                h = h * gamma_indexed + beta_indexed
+                
+            # 最终检查：如果 h 的维度变成了 1，说明之前的逻辑强行挤压了维度
+            if h.dim() == 1:
+                h = h.unsqueeze(0)
+                
             return h
 
     def get_action(self, state, node_embeds, action_mask, curr_node_idx, target_node_idx, 
@@ -182,3 +215,5 @@ class AblationAgent(BaseSDNAgent):
         memory.clear()   
         return actor_loss.item() / self.config.train.ppo_epochs, critic_loss.item() / self.config.train.ppo_epochs
 
+    def get_current_lr(self): 
+        return self.optimizer.param_groups[0]['lr']

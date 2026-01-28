@@ -7,8 +7,8 @@ class BankTrafficManager:
     """
     使用预存指纹库的流量管理器
     """
-    def __init__(self, env, bank_path) -> None:
-        self.env = env
+    def __init__(self, config, bank_path: str) -> None:
+        self.env = config.env
         # 加载指纹库 
         raw_bank = torch.load(bank_path, map_location='cpu')
         
@@ -71,6 +71,7 @@ class BankTrafficManager:
             flow_obj = type('Flow', (), {
                 'src': s,
                 'dst': d,
+                'label': f_type.value-1,
                 'flow_type': f_type,
                 'fingerprint': fingerprint
             })

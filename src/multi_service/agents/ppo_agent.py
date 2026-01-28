@@ -124,7 +124,10 @@ class FiLMPPOAgent(BaseSDNAgent):
         fingerprint = fingerprint.float()
         film_params = self.film(fingerprint)
         batch_vec = getattr(graph_data, 'batch', None)
-        node_embeds = self.gnn(graph_data.x, graph_data.edge_index, graph_data.edge_attr, film_params, batch_vector=batch_vec)
+        node_embeds = self.gnn(
+            graph_data.x, graph_data.edge_index, graph_data.edge_attr, 
+            film_params, batch_vector=batch_vec
+        )
 
         return node_embeds
   

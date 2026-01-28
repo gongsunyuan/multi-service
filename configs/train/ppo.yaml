@@ -1,11 +1,11 @@
 # 路径配置
 name:
-    exp_name: "full_film_ppo_train"
+    exp_name: "vanilla_gnn_ppo_train"
 path:
-    warmup_path: "workspace/outputs/warmup_train/warmup_with_delay_bw/checkpoints/warmup_final.pt"
-    graph_path: "data/topologies/train_film.graphml"
+    lstm_path:  "workspace/outputs/lstm_pre_train/20260117_210415_lstm_pre_train/checkpoints/lstm.pth"
+    graph_path: "data/topologies/train/Bimodal QoS-Constrain.graphml"
     fgprt_path: "data/fingerprints/fingerprint_bank.pt"
-    output_dir: "workspace/outputs/full_film_ppo_train"
+    output_dir: "workspace/outputs/vanilla_gnn_ppo_train"
 
 debug_mode: false
 
@@ -18,7 +18,7 @@ model:
     hidden_dim: 128
     fingerprint_dim: 2
     
-    ablation_mode: "full" # 'full', 'vanilla_gnn', 'film_drl', 'vanilla_drl'
+    ablation_mode: "vanilla_gnn" # 'full', 'vanilla_gnn', 'film_drl', 'vanilla_drl'
     
 # 训练参数
 train:
@@ -29,10 +29,8 @@ train:
     ppo_epochs: 10
     max_epochs: 500
     save_interval: 2
-    entropy_coef: 0.01
+    entropy_coef: 0.05
     checkpoint_keep_count: 2
-
-    
 
 # 环境与背景流
 env:
@@ -58,16 +56,22 @@ env:
 
 # QoS 奖励参数
 qos_reward:
-    penalty_dead_end: -5
-    GAMING:
-        max_delay: 80.0
-        max_jitter: 20.0
-        w: [3, 1, 0.5] # [delay, jitter, loss_rate]
+    penalty_dead_end: -10
     VOIP:
-        max_delay: 150.0
+        min_delay: 10.0
+        max_delay: 200.0
+        min_jitter: 0.0
+        max_jitter: 50.0
+        w: [10, 1, 0.5] # [delay, jitter, loss_rate]
+    STREAMING:
+        min_delay: 10.0
+        max_delay: 200.0
+        min_jitter: 0.0
+        max_jitter: 50.0
+        w: [0.01, 0.01, 10] # [delay, jitter, loss_rate]
+    GAMING:
+        min_delay: 10.0
+        max_delay: 100.0
+        min_jitter: 0.0
         max_jitter: 50.0
         w: [3, 1, 0.5] # [delay, jitter, loss_rate]
-    STREAMING:
-        max_delay: 1000.0
-        max_jitter: 100.0
-        w: [0.1, 0.1, 3] # [delay, jitter, loss_rate]

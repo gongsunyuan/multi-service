@@ -178,21 +178,24 @@ def calculate_qoe_reward(qos_metrics: dict, flow_profile: dict) -> float:
 def calculate_qos_reward(delay_ms: float, loss_percent: float, jitter_ms: float, flow_type_str: str, config: AttrDict) -> float:
     qos_reward_info = config.qos_reward
     loss_normalized = loss_percent
-    delay_normalized = min(delay_ms / qos_reward_info[flow_type_str.upper()]['max_delay'], 1.0)
-    jitter_normalized = min(jitter_ms / qos_reward_info[flow_type_str.upper()]['max_jitter'], 1.0)
+    min_delay = qos_reward_info[flow_type_str.upper()]['min_delay']
+    max_delay = qos_reward_info[flow_type_str.upper()]['max_delay']
+    delay_normalized = min(max((delay_ms - min_delay) / (max_delay - min_delay), 0.0), 1.0)
+    min_jitter = qos_reward_info[flow_type_str.upper()]['min_jitter']
+    max_jitter = qos_reward_info[flow_type_str.upper()]['max_jitter']
+    jitter_normalized = min(max((jitter_ms - min_jitter) / (max_jitter - min_jitter), 0.0), 1.0)
     
     
     weight = qos_reward_info[flow_type_str.upper()]['w']
-    sum_w = sum(weight)
 
-    qos_reward = 1 - (
+    qos_reward = 5 - (
         weight[0] * delay_normalized +
         weight[1] * jitter_normalized +
         weight[2] * loss_normalized 
-    ) / sum_w
+    ) 
 
-    # qos reward in range [-1, 1]
-    qos_reward = qos_reward*2-1
+    # qos reward in range [-sum_w, sum_w]
+    qos_reward = qos_reward/2.5-1
     return qos_reward
 
     

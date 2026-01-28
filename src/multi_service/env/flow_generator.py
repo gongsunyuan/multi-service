@@ -8,24 +8,19 @@ from ..utils import logger
 
 # === 配置与定义 ===
 class FlowType(Enum):
-    VOIP = 1
-    STREAMING = 2
-    GAMING = 3
+  VOIP = 1
+  STREAMING = 2
 
 FLOW_PROFILES = {
-    FlowType.VOIP: {
-        'type': 'VOIP', 'protocol': 'UDP', 'ditg_preset': 'VoIP -x G.711.2',
-        'qoe_critical': {'max_delay': 150, 'max_jitter': 50}, 'reward_fn': 'E-Model'
-    },
-    FlowType.STREAMING: {
-        'type': 'STREAMING', 'protocol': 'UDP',
-        'ditg_manual': ' -c 1000 -C 3000',
-        'qoe_critical': {'min_bandwidth': 5, 'max_loss_rate': 1e-6}, 'reward_fn': '3GPP-QCI6'
-    },
-    FlowType.GAMING: {
-        'type': 'GAMING', 'protocol': 'UDP', 'ditg_preset': 'CSa',
-        'qoe_critical': {'max_delay': 50, 'max_jitter': 30}, 'reward_fn': '3GPP-QCI80'
-    }
+  FlowType.VOIP: {
+    'type': 'VOIP', 'protocol': 'UDP', 'ditg_preset': 'VoIP -x G.711.2',
+    'qoe_critical': {'max_delay': 150, 'max_jitter': 50}, 'reward_fn': 'E-Model'
+  },
+  FlowType.STREAMING: {
+    'type': 'STREAMING', 'protocol': 'UDP',
+    'ditg_manual': ' -c 1000 -C 3000',
+    'qoe_critical': {'min_bandwidth': 5, 'max_loss_rate': 1e-6}, 'reward_fn': '3GPP-QCI6'
+  }
 }
 
 class FlowGenerator:

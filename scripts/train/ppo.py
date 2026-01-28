@@ -103,7 +103,7 @@ def train_ppo() -> None:
             else:
                 logger.log(f"Failed to load warmup model from: {config.path.warmup_path}", log_to_console=True, tag="Warmup Warn")
         
-    traffic_gen = BankTrafficManager(env=env, bank_path=config.path.fgprt_path)
+    traffic_gen = BankTrafficManager(config=config, bank_path=config.path.fgprt_path)
     try:
         logger.log("Starting Formal RL Training...", log_to_console=True, tag="Init")
         trainer.run(traffic_gen)

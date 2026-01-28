@@ -310,13 +310,13 @@ class SdnWrapper:
         elif v in self.path_so_far[:-1]:
             # === Loop ===
             done = True
-            step_reward -= 1.0 
+            step_reward -= 10.0 
             info['error'] = 'loop_detected'
 
         elif self.step_count >= self.config.train.max_steps:
             # === Timeout ===
             done = True
-            step_reward -= 2.0 # 超时惩罚
+            step_reward -= 10.0 # 超时惩罚
             info['error'] = 'max_steps'
 
         # 5. 更新观察 (Observation)

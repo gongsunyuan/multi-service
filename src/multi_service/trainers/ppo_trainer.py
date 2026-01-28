@@ -123,7 +123,7 @@ class PPOTrainer:
                 selected_edge_idx = torch.where(mask)[0][action_idx].item()
                 next_state, reward, done, info = self.env.step(int(selected_edge_idx))
                 
-                # [Optimization] Clean Step Logging
+                #  Clean Step Logging
                 logger.log(f"{curr_node} -> {next_node} | Reward: {reward:.4f}", tag=f"Step {len(self.env.path_so_far)-1:02d}")
                 
                 # Move detailed info to Debug tag
@@ -204,7 +204,7 @@ class PPOTrainer:
 
         # 1. 训练
         train_reward = self.train_one_epoch(traffic_generator)
-        
+        self.agent.scheduler.step(train_reward)
         # 2. 保存 Checkpoint
         if epoch % self.config.train.save_interval == 0:
             self.checkpoint_manager.save(
@@ -214,5 +214,5 @@ class PPOTrainer:
             )
 
         duration = time.time() - start_time
-        logger.log(f"Epoch {epoch}: Reward={train_reward:.4f} | Time={duration:.2f}s", tag="Train", log_to_console=True)
+        logger.log(f"Epoch {epoch}: Reward={train_reward:.4f} | Current LR={self.agent.get_current_lr():.8f} |Time={duration:.2f}s", tag="Train", log_to_console=True)
 

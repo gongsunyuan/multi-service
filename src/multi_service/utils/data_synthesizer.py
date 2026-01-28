@@ -33,7 +33,7 @@ class WarmupDataset(IterableDataset):
         
         # 初始化所有边的利用率
         for u, v in edges:
-            cap = random.choice([100.0, 80.0, 18.0, 10.0])  
+            cap = random.randint(10, 100)
             util = 0.0
             
             # 根据不同策略生成拥塞
@@ -75,7 +75,7 @@ class WarmupDataset(IterableDataset):
             # 写入属性 (Input 特征需要 utilization，Path计算需要 weight)
             G_nx[u][v]['utilization'] = util
             G_nx[u][v]['bandwidth'] = random.randint(10, 100)
-            G_nx[u][v]['delay'] = max(0.0, random.normalvariate(10, 10))  
+            G_nx[u][v]['delay'] = random.randint(2, 20)
             G_nx[u][v]['loss'] = 0.0
 
             w = self.kernel.calculate_hybrid_weight(delay=G_nx[u][v]['delay'], bandwidth=float(cap))

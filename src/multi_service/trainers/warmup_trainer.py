@@ -113,10 +113,10 @@ class WarmupTrainer:
             mask = batch.train_mask
             # 移除logits的最后一个维度，使其与target尺寸匹配
             loss = self.criterion(logits[mask].squeeze(-1), batch.y_guidance[mask])
-            
             # 5. 反向传播更新参数
             self.optimizer.zero_grad()
             loss.backward()
+            loss = torch.nn.utils.clip_grad_norm_(self.agent.parameters(), max_norm=1.0)
             self.optimizer.step()
             
             # 累加损失
