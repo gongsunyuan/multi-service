@@ -80,7 +80,6 @@ def load_yaml_config(yaml_path: str) -> AttrDict:
 
             # 延迟导入 save_configs 以避免循环导入
             from .config_saver import save_configs
-            save_configs(config)
             return config
         except yaml.YAMLError as e:
             print(f"Error parsing YAML file: {e}")

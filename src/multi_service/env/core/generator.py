@@ -6,7 +6,7 @@ from mininet.topo import Topo
 from mininet.node import OVSKernelSwitch, RemoteController
 from mininet.link import TCLink
 from mininet.log import setLogLevel, info
-from ...utils import logger
+from loguru import logger
 
 # Generator :
 # 生成一个mininet网络
@@ -46,15 +46,15 @@ class GraphTopo(Topo):
             # 2. 计算最佳 r2q (确保 quantum ≈ 1500)
             r2q = int(max(1, rate_bytes / 1500))
             # 这里沿用 Mininet 构造函数中设置的 r2q
-            logger.log(
+            logger.info(
                 f"Link {u:>2} <-> {v:<2} | "
                 f"BW: {bw:>5} Mbps | "
                 f"Delay: {delay:>6} | "
                 f"Loss: {loss:>3}% | "
                 f"R2Q: {r2q:>5} | "
                 f"QLimit: {q_limit:>4}", 
-                tag="Mini Init"
             )
+
             self.addLink(
                 f'{test_str}s{u}', f'{test_str}s{v}', 
                 cls=TCLink, 
@@ -74,9 +74,6 @@ def get_a_mininet(g: nx.Graph, is_test=False, remote_port=None):
     else:
         controller = None
 
-    # if not vp.MININET_VERBOSE:
-    # setLogLevel('critical')
-
     net = Mininet(
         topo=GraphTopo(g, is_test),
         switch=OVSKernelSwitch,
@@ -86,7 +83,7 @@ def get_a_mininet(g: nx.Graph, is_test=False, remote_port=None):
         autoStaticArp=True)
 
     try:
-        logger.log("Disabling TCP Offload (TSO/GSO/GRO) on all switches...", tag="Mini Init")
+        logger.info("Disabling TCP Offload (TSO/GSO/GRO) on all switches...")
         for h in net.hosts:
             for intf in h.intfList():
                 if intf.name != 'lo':
@@ -100,7 +97,7 @@ def get_a_mininet(g: nx.Graph, is_test=False, remote_port=None):
         net.start()
         yield net
     finally:
-        logger.log("stopping mininet ...", tag="Mini Stop")
+        logger.info("stopping mininet ...")
         net.stop()
 
     return net

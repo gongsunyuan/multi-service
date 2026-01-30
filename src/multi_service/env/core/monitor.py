@@ -1,7 +1,7 @@
 import re
 import networkx as nx
 from time import time, sleep
-from ...utils import logger
+from loguru import logger
 
 # 监视器，负责动态提取mininet拓扑状态
 class NetworkMonitor:
@@ -47,7 +47,7 @@ class NetworkMonitor:
             return tx_len
         
         except Exception as e:
-            logger.log(f"Error reading queue limit: {e}", tag="Monit Err")
+            logger.error(f"Error reading queue limit: {e}")
             return 100 # 兜底默认值
 
     def _get_all_interfaces_stats(self, G):
@@ -112,7 +112,7 @@ class NetworkMonitor:
                         if match_backlog:
                             results[node.name][current_intf] = int(match_backlog.group(1))
             except Exception as e:
-                logger.log(f"Batch TC error on {node.name}: {e}", tag="Monit Err")
+                logger.error(f"Batch TC error on {node.name}: {e}")
         return results
 
     def sync_state_to_graph(self, G: nx.Graph, duration = 0.05):

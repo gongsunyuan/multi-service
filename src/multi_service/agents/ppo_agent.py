@@ -1,16 +1,18 @@
 
+from omegaconf import DictConfig
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from torch_geometric.data import Data
 
+from loguru import logger
 from .based_agent import BaseSDNAgent
 
-from multi_service.utils import compute_advantages, AttrDict, logger
+from multi_service.utils import compute_advantages, AttrDict
 from multi_service.models import FilmGenerator, FilmGNN, actor, critic
 
 class FiLMPPOAgent(BaseSDNAgent):
-    def __init__(self, config: AttrDict):
+    def __init__(self, config: DictConfig):
 
         super().__init__(config)
         self.config = config
@@ -69,7 +71,7 @@ class FiLMPPOAgent(BaseSDNAgent):
             action_idx: 选中的邻居索引 (int)
         """
         if len(neighbor_indices) == 0:
-            logger.log(f"当前节点 {curr_node_idx} 没有有效邻居", tag="Warning")
+            logger.info(f"当前节点 {curr_node_idx} 没有有效邻居")
             return None, None, None, None # 死胡同，返回4个None
             
         # 1. 准备特征

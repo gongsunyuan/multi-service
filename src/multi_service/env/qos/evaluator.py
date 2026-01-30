@@ -2,7 +2,8 @@ import re
 import math
 import numpy as np
 from typing import Any
-from ...utils import logger, AttrDict
+from loguru import logger
+from omegaconf import DictConfig
 from ..flow_generator import FlowType, FLOW_PROFILES
 from ..e_model import (
     FullG107Calculator, 
@@ -29,10 +30,10 @@ def parse_ditg_output(output_str: str) -> tuple[dict[str, Any], bool]:
     no_packet_arrive = False
   
     if not output_str:
-        logger.log("can't catch output str -- the str is None", tag="Debug")
+        logger.debug("can't catch output str -- the str is None")
         return metrics, True
 
-    logger.log("parsing ditg output ...", tag="Debug")
+    logger.debug("parsing ditg output ...")
     # logger.log(output_str)
     try:
         # --- 1. 提取平均延迟 (Average delay) ---
@@ -43,8 +44,8 @@ def parse_ditg_output(output_str: str) -> tuple[dict[str, Any], bool]:
             if 'nan' not in val.lower(): # 过滤掉 -nan
                 metrics['delay'] = float(val) * 1000.0 # 秒 -> 毫秒
         else:
-            logger.log("no delay found", tag="Debug")
-            logger.log(f"原始输出片段:\n{output_str[:200]}", tag="Debug") # 调试用
+            logger.debug("no delay found")
+            logger.debug(f"原始输出片段:\n{output_str[:200]}") # 调试用
     
         jitter_match = re.search(r"Average jitter\s+=\s+([-\d\.nan]+)\s+s", output_str)
         if jitter_match:
@@ -52,7 +53,8 @@ def parse_ditg_output(output_str: str) -> tuple[dict[str, Any], bool]:
             if 'nan' not in val.lower():
                 metrics['jitter'] = float(val) * 1000.0 # 秒 -> 毫秒
         else:
-            logger.log("no jitter found", tag="Debug")
+            logger.debug("no jitter found")
+            # logger.debug(f"原始输出片段:\n{output_str[:200]}") # 调试用
 
         # --- 3. 提取吞吐量 (Average bitrate) ---
         # 示例行: Average bitrate          =  4096.000000 Kbit/s
@@ -62,7 +64,8 @@ def parse_ditg_output(output_str: str) -> tuple[dict[str, Any], bool]:
             if 'nan' not in val.lower():
                 metrics['bandwidth'] = float(val) / 1000.0 # Kbit/s -> Mbps
         else:
-            logger.log("no bitrate found", tag="Debug")
+            logger.debug("no bitrate found")
+            # logger.debug(f"原始输出片段:\n{output_str[:200]}") # 调试用
 
         # --- 4. 提取丢包率 (Packets dropped) ---
         # 示例行: Packets dropped          =            5 (0.50 %)
@@ -73,7 +76,8 @@ def parse_ditg_output(output_str: str) -> tuple[dict[str, Any], bool]:
             if 'nan' not in val.lower():
                 metrics['loss_rate'] = float(val)/100.0
         else: 
-            logger.log("no loss found", tag="Debug")
+            logger.debug("no loss found")
+            # logger.debug(f"原始输出片段:\n{output_str[:200]}") # 调试用
 
         # 如果总包数 (Total packets) 为 0，说明完全没通，强制设置最差指标
         total_pkts_match = re.search(r"Total packets\s+=\s+(\d+)", output_str)
@@ -83,8 +87,8 @@ def parse_ditg_output(output_str: str) -> tuple[dict[str, Any], bool]:
             metrics['bandwidth'] = 0.0
 
     except Exception as e:
-        logger.log(f"解析 D-ITG 输出时出错: {e}", tag="Parse Err")
-        logger.log(f"原始输出片段:\n{output_str[:200]}", tag="Debug") # 调试用
+        logger.debug(f"解析 D-ITG 输出时出错: {e}")
+        logger.debug(f"原始输出片段:\n{output_str[:200]}") # 调试用
 
     return metrics, no_packet_arrive
 
@@ -175,7 +179,7 @@ def calculate_qoe_reward(qos_metrics: dict, flow_profile: dict) -> float:
     # 确保数值稳定，截断在 [-1.0, 1.0]
     return float(np.clip(final_reward, -1.0, 1.0))
 
-def calculate_qos_reward(delay_ms: float, loss_percent: float, jitter_ms: float, flow_type_str: str, config: AttrDict) -> float:
+def calculate_qos_reward(delay_ms: float, loss_percent: float, jitter_ms: float, flow_type_str: str, config: DictConfig) -> float:
     qos_reward_info = config.qos_reward
     loss_normalized = loss_percent
     min_delay = qos_reward_info[flow_type_str.upper()]['min_delay']

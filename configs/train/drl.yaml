@@ -36,7 +36,7 @@ train:
 env:
     src_nodes: [0,]
     dst_nodes: [13,]
-
+    
     max_loss: 5.0
     bg_duration: 600
 

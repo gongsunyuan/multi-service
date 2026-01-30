@@ -5,7 +5,7 @@ import torch
 import os
 import math
 from torch_geometric.data import Data
-from ..utils import logger
+from loguru import logger
 
 class TopologyGenerator:
     def __init__(self) -> None:
@@ -106,7 +106,7 @@ class TopologyGenerator:
             try:
                 G = nx.read_graphml(loadpath, node_type=int)
             except Exception as e:
-                logger.log(f"Load Topology: {e}, trying default loader...", tag="Graph Err")
+                logger.error(f"Load Topology: {e}, trying default loader...")
                 G = nx.read_graphml(loadpath) # Fallback to default loader
 
             # [关键] 强制转换节点 Label 为连续整数 (0, 1, 2...)
@@ -122,7 +122,7 @@ class TopologyGenerator:
         # --- 3. 初始化动态属性 ---
         # self.scale_topology_bandwidth(G, scale=0.1)  # 默认不缩放
         self.G = self.update_graph_metric(G)
-        logger.log(f"Loaded Fixed Topo: {loadpath} | Nodes: {len(G.nodes())}", tag="Graph Init")
+        logger.info(f"Loaded Fixed Topo: {loadpath} | Nodes: {len(G.nodes())}")
 
         return G
   

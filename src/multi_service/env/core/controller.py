@@ -2,7 +2,7 @@ import torch
 import networkx as nx
 from collections import defaultdict
 from time import sleep
-from ...utils import logger
+from loguru import logger
 
 # 根据gnn输出的 logits来生成路径--贪婪/概率选择：
 # 替换 MS/Env/MininetController.py 中的 sample_path 函数
@@ -115,14 +115,14 @@ def verify_cleanup(net, cookie=0xA000):
     
         # 如果 result 不为空，说明找到了残留
         if result.strip():
-            logger.log(f"Residue flows found on {sw.name}:\n{result.strip()}", tag="Clean Err")
+            logger.info(f"Residue flows found on {sw.name}:\n{result.strip()}")
             has_residue = True
         
     if not has_residue:
         # logger.log(f"Flow cleanup verified. No rules with cookie={hex(cookie)} found.", tag="Clean OK")
         return True
     else:
-        logger.log(f"Flow cleanup failed. Error cookie: {cookie}", tag="Clean Err")
+        logger.error(f"Flow cleanup failed. Error cookie: {cookie}")
         return False
 
 # 清除流表规则

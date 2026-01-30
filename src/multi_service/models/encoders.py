@@ -1,10 +1,9 @@
 from networkx import config
+from omegaconf import DictConfig, ListConfig
 import torch
 import torch.nn as nn
 from torch_geometric.nn import GATv2Conv
 import torch.nn.functional as F
-
-from ..utils import AttrDict
 
 class FilmGenerator(nn.Module):
     """
@@ -13,7 +12,7 @@ class FilmGenerator(nn.Module):
     输出: GNN 的调制参数 (Gamma, Beta)
     """
 
-    def __init__(self, config:AttrDict):
+    def __init__(self, config: DictConfig | ListConfig):
         super().__init__()
         self.config = config
         self.lstm = nn.LSTM(config.model.fingerprint_dim, config.model.hidden_dim, batch_first=True)

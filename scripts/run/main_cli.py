@@ -6,9 +6,9 @@ from multi_service.env.flow_generator import(
   FlowGenerator
 )
 from multi_service.utils import (
-  SdnParaser, logger
+  SdnParaser
 )
-from multi_service.utils.verbose_logger import vprint
+from loguru import logger
 import networkx as nx
 
 class Test_config:
@@ -36,9 +36,11 @@ def function_test():
     tm_gen.apply_traffic_matrix_to_mininet(net, tm_dict, g.copy(), install_rules_func=install_path_rules)
     for _ in range(3):
       cur_G = monitor.sync_state_to_graph(g.copy())
-    logger.log_network_status(cur_G.copy())
+    logger.info(f"Network status after {_} steps:")
+    logger.info(f"  Nodes: {cur_G.nodes()}")
+    logger.info(f"  Edges: {cur_G.edges()}")
     for u, v in g.edges():
-      print(f"[{u}, {v}] bandwidth={g[u][v]['bandwidth']} delay={g[u][v]['delay']}")
+      logger.info(f"[{u}, {v}] bandwidth={g[u][v]['bandwidth']:.2f} Mbps | delay={g[u][v]['delay']:.2f} ms")
     install_path_rules(net, [0, 1], cookie=0xA000)
     CLI(net)
 

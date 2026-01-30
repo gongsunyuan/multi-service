@@ -1,13 +1,13 @@
+from omegaconf import DictConfig, ListConfig
 from torch_geometric.data.data import Data
-
-
+from loguru import logger
 import time
 from typing import Any, Literal
 import torch
 import networkx as nx
 import random
 from mininet.cli import CLI
-from ..utils import logger
+from omegaconf import DictConfig
 from . import sdn_controller as mc
 from .flow_generator import FLOW_PROFILES, FlowType
 from .flow_generator import FlowGenerator
@@ -18,7 +18,7 @@ from ..utils import AttrDict, get_graph_data
 
 class SdnWrapper:
     # 初始化背景流
-    def __init__(self, config: AttrDict ) -> None:
+    def __init__(self, config: DictConfig | ListConfig ) -> None:
         """
         __init__ 的 Docstring
         
@@ -149,7 +149,7 @@ class SdnWrapper:
     
     # 结束环境
     def close(self):
-        logger.log("Closing environment...", tag="Env Close")
+        logger.info("Closing environment...")
         self._kill_bg_processes()
         # 退出前最后清理一次，保持宿主机干净
         mc.clean_flow_rules(self.net, cookie=self.bg_cookie_start, mask=self.cookie_mask)
@@ -166,7 +166,7 @@ class SdnWrapper:
         """
         环境重置：注入指定负载的背景流
         """
-        logger.log(f">>> Hard Reset | Load: {load_mbps:.1f} Mbps <<<", tag="Env Reset")
+        logger.info(f">>> Hard Reset | Load: {load_mbps:.1f} Mbps <<<")
         
         # 1. 清理
         self._kill_bg_processes()
@@ -198,8 +198,6 @@ class SdnWrapper:
         for _ in range(3):
             self.get_observation()
             time.sleep(0.5)
-
-        logger.log_network_status(self.current_G.copy())
 
     # 清空背景流
     def _kill_bg_processes(self):
@@ -239,14 +237,14 @@ class SdnWrapper:
             u = self.observation_data.edge_index[0, action_edge_idx].item()
             v = self.observation_data.edge_index[1, action_edge_idx].item()
         except IndexError:
-            logger.log("Action index out of bounds!", tag="Env Err")
+            logger.error("Action index out of bounds!")
             import traceback
             traceback.print_exc()
             exit()
         
         # 2. 合法性检查
         if u != self.current_node:
-            logger.log(f"Illegal Move: {self.current_node} -> {u} impossible. Valid edges start from {self.current_node}", tag="Env Err")
+            logger.error(f"Illegal Move: {self.current_node} -> {u} impossible. Valid edges start from {self.current_node}")
             import traceback
             traceback.print_exc()
             exit()
@@ -274,7 +272,7 @@ class SdnWrapper:
             self.active_cookies.add(cookie)
 
             # 打印路径状态 (用于调试)
-            logger.log(f"Path: {self.path_so_far}, FlowType: {self.current_flow_type.name.upper()}", tag="Debug")
+            logger.debug(f"Path: {self.path_so_far}, FlowType: {self.current_flow_type.name.upper()}")
             
             protocol_str = FLOW_PROFILES[self.current_flow_type]['protocol']
             # A. 下发规则
@@ -293,14 +291,8 @@ class SdnWrapper:
                 flow_type=self.current_flow_type,
                 config=self.config )
             
-            # 处理测量失败的情况
-            if qos_reward == -1 or qos_reward is None:
-                CLI(self.net)
-                logger.log("Measurement Failed! Punishment applied.", tag="Env Warn")
-                total_reward = -1.0 # 测量失败视为路径不可达
-            else:
-                logger.log(f"QoS: {qos_reward:.4f} | QoE: {qoe_reward:.4f} | Path: {self.path_so_far}", tag="Env Done")
-                total_reward = qos_reward # 这里你可以选择返回 qos_reward 还是 qoe_reward
+            logger.debug(f"QoS: {qos_reward:.4f} | QoE: {qoe_reward:.4f} | Path: {self.path_so_far}")
+            total_reward = qos_reward # 这里你可以选择返回 qos_reward 还是 qoe_reward
 
             info['qos'] = qos_reward
             info['path'] = self.path_so_far

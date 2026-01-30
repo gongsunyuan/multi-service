@@ -1,17 +1,20 @@
+from omegaconf import DictConfig, ListConfig
 from sympy import true
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from torch.optim import lr_scheduler
-
+from loguru import logger
 from multi_service.agents.based_agent import BaseSDNAgent
-from multi_service.utils import compute_advantages, logger
+from multi_service.utils import compute_advantages
 from multi_service.models import FilmGenerator, FilmGNN, actor, critic
 
 class AblationAgent(BaseSDNAgent):
-    def __init__(self, config):
+    def __init__(self, config: DictConfig , ablation_mode: str | None = None):
         super().__init__(config)
         self.config = config
+        if ablation_mode is not None: 
+            self.config.model.ablation_mode = ablation_mode
         self.mode = config.model.ablation_mode # 'full', 'vanilla_gnn', 'film_drl', 'vanilla_drl'
         self.device = torch.device(config.device if torch.cuda.is_available() else "cpu")
         self.clip_eps = self.config.train.clip_eps 
@@ -22,8 +25,8 @@ class AblationAgent(BaseSDNAgent):
 
         # 2. 初始化核心编码器
         self.use_gnn = "gnn" in self.mode or self.mode == "full"
-        logger.log(f"Using GNN: {self.use_gnn}", tag="agent init")
-        logger.log(f"Using FiLM: {self.use_film}", tag="agent init")
+        logger.debug(f"Using GNN: {self.use_gnn}", tag="agent init")
+        logger.debug(f"Using FiLM: {self.use_film}", tag="agent init")
 
         if self.use_gnn:
             self.encoder = FilmGNN(config)

@@ -1,7 +1,7 @@
 import torch
 import random
 
-from .verbose_logger import logger
+from loguru import logger
 
 class BankTrafficManager:
     """
@@ -22,7 +22,7 @@ class BankTrafficManager:
                 processed_list.append(t)
             self.bank[k.lower()] = processed_list
             
-        logger.log(f"Fingerprint Bank loaded and pre-processed from {bank_path}", tag="System", log_to_console=True)
+        logger.info(f"Fingerprint Bank loaded and pre-processed from {bank_path}")
 
     def generate_batch(self, batch_size: int) -> list:
         """
@@ -60,7 +60,7 @@ class BankTrafficManager:
             available_fingerprints = self.bank.get(type_key, [])
             
             if not available_fingerprints:
-                logger.log(f"No fingerprint data for type: {f_type.name}!", tag="Flow Type Err", log_to_console=True)
+                logger.error(f"No fingerprint data for type: {f_type.name}!")
                 # 兜底：生成全 0 的张量
                 fingerprint = torch.zeros((1, 30, 2))
             else:

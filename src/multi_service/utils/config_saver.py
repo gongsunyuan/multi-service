@@ -1,10 +1,10 @@
 import os
+from omegaconf import DictConfig
 import yaml
 
-from .verbose_logger import logger
-from .config_loadder import AttrDict
+from loguru import logger
 
-def save_configs(config: AttrDict):
+def save_configs(config: DictConfig):
     # 1. 保存完整的训练配置 (Train Config)
     train_cfg_path = os.path.join(config.path.config_dir, "train_eval.yaml")
     eval_cfg_path = os.path.join(config.path.config_dir, "eval_config.yaml")
@@ -28,4 +28,4 @@ def save_configs(config: AttrDict):
     with open(eval_cfg_path, 'w', encoding='utf-8') as f:
         yaml.dump(eval_dict, f, indent=2, sort_keys=False, allow_unicode=True)
     
-    logger.log(f"Configs saved to {config.path.config_dir}", tag="Init")
+    logger.info(f"Configs saved to {config.path.config_dir}")
