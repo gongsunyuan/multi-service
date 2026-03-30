@@ -1,0 +1,4926 @@
+This file is a merged representation of a subset of the codebase, containing specifically included files, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of a subset of the repository's contents that is considered the most important context.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Only files matching these patterns are included: src/multi_service/**/*
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+src/
+  multi_service/
+    agents/
+      __init__.py
+      based_agent.py
+      drl_agent.py
+      full_agent.py
+      gnn_agent.py
+    env/
+      core/
+        controller.py
+        generator.py
+        monitor.py
+      qos/
+        evaluator.py
+      traffic/
+        ditg_driver.py
+      __init__.py
+      e_model.py
+      flow_generator.py
+      network_generator.py
+      sdn_controller.py
+      sdn_wrapper.py
+    models/
+      __init__.py
+      encoders.py
+      heads.py
+      layers.py
+    trainers/
+      __init__.py
+      lstm_trainer.py
+      ospf_trainer.py
+      ppo_trainer.py
+    utils/
+      __init__.py
+      checkpoint_manager.py
+      config_loadder.py
+      config_saver.py
+      create_unique_log_dir.py
+      fingerprint_manager.py
+      math_utils.py
+      networkx_watcher.py
+      ppo_memory.py
+      routing_kernels.py
+      sdn_paraser.py
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="src/multi_service/agents/drl_agent.py">
+from omegaconf import DictConfig
+import torch
+import torch.nn as nn
+from torch.nn import functional as F
+from torch.optim import lr_scheduler
+from loguru import logger
+from multi_service.agents.based_agent import BaseSDNAgent
+from multi_service.utils import compute_advantages
+from multi_service.models import actor, critic
+
+class DrlAgent(BaseSDNAgent):
+    """
+    DRL Agent: Uses Linear projection for node encoding (No GNN, No FiLM).
+    """
+    def __init__(self, 
+                 node_dim, 
+                 edge_dim, 
+                 hidden_dim, 
+                 lr, 
+                 clip_eps, 
+                 ppo_epochs, 
+                 entropy_coef, 
+                 weight_decay=0.0,
+                 device_name="cpu"):
+        
+        device = torch.device(device_name if torch.cuda.is_available() else "cpu")
+        super().__init__(device)
+        
+        self.clip_eps = clip_eps
+        self.ppo_epochs = ppo_epochs
+        self.entropy_coef = entropy_coef
+        
+        # 1. Initialize Core Encoder (Linear only)
+        # DRL mode: Linear layer maps original node dimension to hidden_dim 
+        self.encoder = nn.Linear(node_dim, hidden_dim)
+        
+        logger.debug("DrlAgent initialized with Linear encoder (no GNN, no FiLM)")
+
+        # 2. Initialize Decision Heads
+        critic_input_dim = hidden_dim * 2 
+        actor_input_dim = hidden_dim * 3 + edge_dim 
+        self.actor = actor(input_dim=actor_input_dim)
+        self.critic = critic(input_dim=critic_input_dim)
+
+        self.optimizer = torch.optim.Adam(self.parameters(), lr=lr, weight_decay=weight_decay) 
+        self.scheduler = lr_scheduler.ReduceLROnPlateau(
+            self.optimizer, 
+            mode='max', 
+            factor=0.5, 
+            patience=100, 
+            threshold=0.0005, 
+            min_lr=1e-6,
+        ) 
+        self.to(self.device)
+
+    def get_node_embeddings(self, graph_data, fingerprint):
+        """
+        Uses Linear projection for node features.
+        """
+        # Linear projection
+        h = self.encoder(graph_data.x) # Expected (N, H)
+        
+        # Check if dimension was squeezed
+        if h.dim() == 1:
+            h = h.unsqueeze(0)
+            
+        return h
+
+    def get_action(self, state, node_embeds, action_mask, curr_node_idx, target_node_idx, 
+                 neighbor_indices, neighbor_edge_attrs, deterministic=False):
+        if len(neighbor_indices) == 0:
+            return None, None, None, None
+
+        neighbor_indices_tensor = torch.tensor(neighbor_indices, device=node_embeds.device)
+        neighbor_feats = node_embeds[neighbor_indices_tensor] # (K, H) 
+        curr_feat = node_embeds[curr_node_idx].unsqueeze(0) # (1, H)
+        target_feat = node_embeds[target_node_idx].unsqueeze(0) # (1, H) 
+        
+        K = len(neighbor_indices)
+        actor_input = torch.cat([
+            curr_feat.repeat(K, 1), target_feat.repeat(K, 1), 
+            neighbor_feats, neighbor_edge_attrs
+        ], dim=-1) 
+        
+        logits = self.actor(actor_input).squeeze(-1) 
+        if action_mask is not None:
+            logits[~action_mask] = -1e9
+
+        if deterministic:
+            action_idx = torch.argmax(logits).item()
+            log_prob = torch.tensor(0.0).to(logits.device)
+        else:
+            probs = F.softmax(logits, dim=0) 
+            dist = torch.distributions.Categorical(probs) 
+            action_idx = dist.sample().item()
+            log_prob = dist.log_prob(torch.tensor(action_idx, device=logits.device))
+
+        return int(neighbor_indices[action_idx]), log_prob, logits, action_idx 
+
+    def evaluate_value(self, node_embeds, curr_node_idx, target_node_idx):
+        curr_feat = node_embeds[curr_node_idx]
+        target_feat = node_embeds[target_node_idx]
+        return self.critic(torch.cat([curr_feat, target_feat], dim=-1))
+    
+    def evaluate_batch(self, batch_graph, fingerprints, curr_node_indices, target_node_indices, actions):
+        node_embeds = self.get_node_embeddings(batch_graph, fingerprints)
+        batch_ptr = batch_graph.ptr[:-1] 
+        curr_global_idx = curr_node_indices + batch_ptr 
+        target_global_idx = target_node_indices + batch_ptr 
+
+        # Critic Evaluation
+        critic_input = torch.cat([node_embeds[curr_global_idx], node_embeds[target_global_idx]], dim=-1)
+        state_values = self.critic(critic_input).squeeze(-1)
+
+        new_log_probs, dist_entropies = [], []
+        edge_index, edge_attr = batch_graph.edge_index, batch_graph.edge_attr 
+
+        for i in range(len(actions)):
+            u_global = curr_global_idx[i].item()
+            neighbor_mask = (edge_index[0] == u_global)   
+            neighbor_global_indices = edge_index[1][neighbor_mask] 
+            
+            neighbor_feats = node_embeds[neighbor_global_indices] 
+            c_feat = node_embeds[u_global].unsqueeze(0)
+            t_feat = node_embeds[target_global_idx[i]].unsqueeze(0)
+        
+            K = neighbor_feats.size(0)
+            actor_input = torch.cat([
+                c_feat.repeat(K, 1), t_feat.repeat(K, 1), 
+                neighbor_feats, edge_attr[neighbor_mask]
+            ], dim=-1) 
+        
+            logits = self.actor(actor_input).squeeze(-1)
+            mask = batch_graph.action_mask[neighbor_mask]   
+            logits[~mask] = -1e9
+            
+            dist = torch.distributions.Categorical(torch.softmax(logits, dim=0))   
+            new_log_probs.append(dist.log_prob(actions[i]))
+            dist_entropies.append(dist.entropy())
+
+        return torch.stack(new_log_probs), state_values, torch.stack(dist_entropies)   
+
+    def update(self, memory):
+        (states_batch, actions, old_log_probs, values, rewards, 
+            is_terminals, fingerprints, curr_idxs, target_idxs) = memory.get_all()   
+        
+        advantages = compute_advantages(rewards, values, is_terminals).to(self.device)   
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-5)
+
+        returns = advantages + values
+
+        for _ in range(self.ppo_epochs):   
+            new_log_probs, state_values, dist_entropy = self.evaluate_batch(
+                states_batch, fingerprints, curr_idxs, target_idxs, actions
+            )
+
+            ratio = torch.exp(new_log_probs - old_log_probs)   
+            surr1 = ratio * advantages
+            surr2 = torch.clamp(ratio, 1 - self.clip_eps, 1 + self.clip_eps) * advantages
+            actor_loss = -torch.min(surr1, surr2).mean()      
+            
+            critic_loss = 0.5 * F.mse_loss(state_values, returns)   
+            entropy_loss = -self.entropy_coef * dist_entropy.mean()      
+            
+            loss = actor_loss + critic_loss + entropy_loss
+            self.optimizer.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(self.parameters(), max_norm=0.5)   
+            self.optimizer.step()
+
+        memory.clear()   
+        return actor_loss.item() / self.ppo_epochs, critic_loss.item() / self.ppo_epochs
+
+    def get_current_lr(self): 
+        return self.optimizer.param_groups[0]['lr']
+</file>
+
+<file path="src/multi_service/agents/full_agent.py">
+from omegaconf import DictConfig
+import torch
+import torch.nn as nn
+from torch.nn import functional as F
+from torch.optim import lr_scheduler
+from loguru import logger
+from multi_service.agents.based_agent import BaseSDNAgent
+from multi_service.utils import compute_advantages
+from multi_service.models import FilmGenerator, FilmGNN, actor, critic
+
+
+class FullAgent(BaseSDNAgent):
+    """
+    Full Agent: Uses GNN for node encoding and FiLM for fingerprint modulation.
+    """
+
+    def __init__(self,
+                 node_dim,
+                 edge_dim,
+                 hidden_dim,
+                 fingerprint_dim,
+                 gnn_layers,
+                 gnn_heads,
+                 dropout,
+                 lr,
+                 clip_eps,
+                 ppo_epochs,
+                 entropy_coef,
+                 weight_decay,
+                 device_name="cpu"):
+
+        device = torch.device(
+            device_name if torch.cuda.is_available() else "cpu")
+        super().__init__(device)
+
+        self.clip_eps = clip_eps
+        self.ppo_epochs = ppo_epochs
+        self.entropy_coef = entropy_coef
+
+        # 1. Initialize Intent Generator (FiLM)
+        self.film = FilmGenerator(fingerprint_dim=fingerprint_dim,
+                                  hidden_dim=hidden_dim,
+                                  gnn_layers=gnn_layers,
+                                  dropout=dropout)
+
+        # 2. Initialize Core Encoder (GNN)
+        self.encoder = FilmGNN(node_dim=node_dim,
+                               edge_dim=edge_dim,
+                               hidden_dim=hidden_dim,
+                               gnn_layers=gnn_layers,
+                               gnn_heads=gnn_heads,
+                               dropout=dropout)
+
+        logger.debug("FullAgent initialized with GNN and FiLM",
+                     tag="agent init")
+
+        # 3. Initialize Decision Heads
+        critic_input_dim = hidden_dim * 2
+        actor_input_dim = hidden_dim * 3 + edge_dim
+        self.actor = actor(input_dim=actor_input_dim)
+        self.critic = critic(input_dim=critic_input_dim)
+
+        self.optimizer = torch.optim.Adam(self.parameters(), lr=lr, weight_decay=weight_decay)
+        self.scheduler = lr_scheduler.ReduceLROnPlateau(
+            self.optimizer,
+            mode='max',
+            factor=0.5,
+            patience=100,
+            threshold=0.0005,
+            min_lr=1e-6,
+        )
+        self.to(self.device)
+
+    def get_node_embeddings(self, graph_data, fingerprint):
+        """
+        Uses FiLM generator to modulate GNN embeddings based on fingerprint.
+        """
+        # Generate FiLM parameters from fingerprint
+        film_params = self.film(fingerprint.float())
+
+        # Apply GNN with FiLM modulation
+        return self.encoder(graph_data.x, graph_data.edge_index,
+                            graph_data.edge_attr, film_params,
+                            getattr(graph_data, 'batch', None))
+
+    def get_action(self,
+                   state,
+                   node_embeds,
+                   action_mask,
+                   curr_node_idx,
+                   target_node_idx,
+                   neighbor_indices,
+                   neighbor_edge_attrs,
+                   deterministic=False):
+        if len(neighbor_indices) == 0:
+            return None, None, None, None
+
+        neighbor_indices_tensor = torch.tensor(neighbor_indices,
+                                               device=node_embeds.device)
+        neighbor_feats = node_embeds[neighbor_indices_tensor]  # (K, H)
+        curr_feat = node_embeds[curr_node_idx].unsqueeze(0)  # (1, H)
+        target_feat = node_embeds[target_node_idx].unsqueeze(0)  # (1, H)
+
+        K = len(neighbor_indices)
+        actor_input = torch.cat([
+            curr_feat.repeat(K, 1),
+            target_feat.repeat(K, 1), neighbor_feats, neighbor_edge_attrs
+        ],
+                                dim=-1)
+
+        logits = self.actor(actor_input).squeeze(-1)
+        if action_mask is not None:
+            logits[~action_mask] = -1e9
+
+        if deterministic:
+            action_idx = torch.argmax(logits).item()
+            log_prob = torch.tensor(0.0).to(logits.device)
+        else:
+            probs = F.softmax(logits, dim=0)
+            dist = torch.distributions.Categorical(probs)
+            action_idx = dist.sample().item()
+            log_prob = dist.log_prob(
+                torch.tensor(action_idx, device=logits.device))
+
+        return int(neighbor_indices[action_idx]), log_prob, logits, action_idx
+
+    def evaluate_value(self, node_embeds, curr_node_idx, target_node_idx):
+        curr_feat = node_embeds[curr_node_idx]
+        target_feat = node_embeds[target_node_idx]
+        return self.critic(torch.cat([curr_feat, target_feat], dim=-1))
+
+    def evaluate_batch(self, batch_graph, fingerprints, curr_node_indices,
+                       target_node_indices, actions):
+        node_embeds = self.get_node_embeddings(batch_graph, fingerprints)
+        batch_ptr = batch_graph.ptr[:-1]
+        curr_global_idx = curr_node_indices + batch_ptr
+        target_global_idx = target_node_indices + batch_ptr
+
+        # Critic Evaluation
+        critic_input = torch.cat(
+            [node_embeds[curr_global_idx], node_embeds[target_global_idx]],
+            dim=-1)
+        state_values = self.critic(critic_input).squeeze(-1)
+
+        new_log_probs, dist_entropies = [], []
+        edge_index, edge_attr = batch_graph.edge_index, batch_graph.edge_attr
+
+        for i in range(len(actions)):
+            u_global = curr_global_idx[i].item()
+            neighbor_mask = (edge_index[0] == u_global)
+            neighbor_global_indices = edge_index[1][neighbor_mask]
+
+            neighbor_feats = node_embeds[neighbor_global_indices]
+            c_feat = node_embeds[u_global].unsqueeze(0)
+            t_feat = node_embeds[target_global_idx[i]].unsqueeze(0)
+
+            K = neighbor_feats.size(0)
+            actor_input = torch.cat([
+                c_feat.repeat(K, 1),
+                t_feat.repeat(K, 1), neighbor_feats, edge_attr[neighbor_mask]
+            ],
+                                    dim=-1)
+
+            logits = self.actor(actor_input).squeeze(-1)
+            mask = batch_graph.action_mask[neighbor_mask]
+            logits[~mask] = -1e9
+
+            dist = torch.distributions.Categorical(torch.softmax(logits,
+                                                                 dim=0))
+            new_log_probs.append(dist.log_prob(actions[i]))
+            dist_entropies.append(dist.entropy())
+
+        return torch.stack(new_log_probs), state_values, torch.stack(
+            dist_entropies)
+
+    def update(self, memory):
+        (states_batch, actions, old_log_probs, values, rewards, is_terminals,
+         fingerprints, curr_idxs, target_idxs) = memory.get_all()
+
+        advantages = compute_advantages(rewards, values,
+                                        is_terminals).to(self.device)
+        advantages = (advantages - advantages.mean()) / (advantages.std() +
+                                                         1e-5)
+
+        returns = advantages + values
+
+        for _ in range(self.ppo_epochs):
+            new_log_probs, state_values, dist_entropy = self.evaluate_batch(
+                states_batch, fingerprints, curr_idxs, target_idxs, actions)
+
+            ratio = torch.exp(new_log_probs - old_log_probs)
+            surr1 = ratio * advantages
+            surr2 = torch.clamp(ratio, 1 - self.clip_eps,
+                                1 + self.clip_eps) * advantages
+            actor_loss = -torch.min(surr1, surr2).mean()
+
+            critic_loss = 0.5 * F.mse_loss(state_values, returns)
+            entropy_loss = -self.entropy_coef * dist_entropy.mean()
+
+            loss = actor_loss + critic_loss + entropy_loss
+            self.optimizer.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(self.parameters(), max_norm=0.5)
+            self.optimizer.step()
+
+        memory.clear()
+        return actor_loss.item() / self.ppo_epochs, critic_loss.item(
+        ) / self.ppo_epochs
+
+    def get_current_lr(self):
+        return self.optimizer.param_groups[0]['lr']
+</file>
+
+<file path="src/multi_service/agents/gnn_agent.py">
+from omegaconf import DictConfig
+import torch
+import torch.nn as nn
+from torch.nn import functional as F
+from torch.optim import lr_scheduler
+from loguru import logger
+from multi_service.agents.based_agent import BaseSDNAgent
+from multi_service.utils import compute_advantages
+from multi_service.models import FilmGNN, actor, critic
+
+class GnnAgent(BaseSDNAgent):
+    """
+    GNN Agent: Uses GNN for node encoding but without FiLM modulation (Identity/Zero params).
+    """
+    def __init__(self, 
+                 node_dim, 
+                 edge_dim, 
+                 hidden_dim, 
+                 gnn_layers, 
+                 gnn_heads, 
+                 dropout, 
+                 lr, 
+                 clip_eps, 
+                 ppo_epochs, 
+                 entropy_coef, 
+                 device_name="cpu"):
+        
+        device = torch.device(device_name if torch.cuda.is_available() else "cpu")
+        super().__init__(device)
+        
+        self.clip_eps = clip_eps
+        self.ppo_epochs = ppo_epochs
+        self.entropy_coef = entropy_coef
+        self.hidden_dim = hidden_dim
+        self.gnn_layers = gnn_layers
+        
+        # 1. Initialize Core Encoder (GNN only)
+        # Note: FilmGNN is used but fed with zero params to act as standard GNN
+        self.encoder = FilmGNN(
+            node_dim=node_dim, 
+            edge_dim=edge_dim, 
+            hidden_dim=hidden_dim, 
+            gnn_layers=gnn_layers, 
+            gnn_heads=gnn_heads, 
+            dropout=dropout
+        )
+        
+        logger.debug("GnnAgent initialized with GNN (no FiLM)", tag="agent init")
+
+        # 2. Initialize Decision Heads
+        critic_input_dim = hidden_dim * 2 
+        actor_input_dim = hidden_dim * 3 + edge_dim 
+        self.actor = actor(input_dim=actor_input_dim)
+        self.critic = critic(input_dim=critic_input_dim)
+
+        self.optimizer = torch.optim.Adam(self.parameters(), lr=lr) 
+        self.scheduler = lr_scheduler.ReduceLROnPlateau(
+            self.optimizer, 
+            mode='max', 
+            factor=0.5, 
+            patience=100, 
+            threshold=0.0005, 
+            min_lr=1e-6,
+        ) 
+        self.to(self.device)
+
+    def get_node_embeddings(self, graph_data, fingerprint):
+        """
+        Uses GNN with zero FiLM parameters (Identity transformation).
+        """
+        batch_size = fingerprint.size(0)
+        # Create zero params
+        film_params = torch.zeros(
+            batch_size, 
+            self.hidden_dim * 2 * self.gnn_layers, 
+            device=self.device
+        )
+        
+        return self.encoder(
+            graph_data.x, graph_data.edge_index, graph_data.edge_attr, 
+            film_params, getattr(graph_data, 'batch', None)
+        ) 
+
+    def get_action(self, state, node_embeds, action_mask, curr_node_idx, target_node_idx, 
+                 neighbor_indices, neighbor_edge_attrs, deterministic=False):
+        if len(neighbor_indices) == 0:
+            return None, None, None, None
+
+        neighbor_indices_tensor = torch.tensor(neighbor_indices, device=node_embeds.device)
+        neighbor_feats = node_embeds[neighbor_indices_tensor] # (K, H) 
+        curr_feat = node_embeds[curr_node_idx].unsqueeze(0) # (1, H)
+        target_feat = node_embeds[target_node_idx].unsqueeze(0) # (1, H) 
+        
+        K = len(neighbor_indices)
+        actor_input = torch.cat([
+            curr_feat.repeat(K, 1), target_feat.repeat(K, 1), 
+            neighbor_feats, neighbor_edge_attrs
+        ], dim=-1) 
+        
+        logits = self.actor(actor_input).squeeze(-1) 
+        if action_mask is not None:
+            logits[~action_mask] = -1e9
+
+        if deterministic:
+            action_idx = torch.argmax(logits).item()
+            log_prob = torch.tensor(0.0).to(logits.device)
+        else:
+            probs = F.softmax(logits, dim=0) 
+            dist = torch.distributions.Categorical(probs) 
+            action_idx = dist.sample().item()
+            log_prob = dist.log_prob(torch.tensor(action_idx, device=logits.device))
+
+        return int(neighbor_indices[action_idx]), log_prob, logits, action_idx 
+
+    def evaluate_value(self, node_embeds, curr_node_idx, target_node_idx):
+        curr_feat = node_embeds[curr_node_idx]
+        target_feat = node_embeds[target_node_idx]
+        return self.critic(torch.cat([curr_feat, target_feat], dim=-1))
+    
+    def evaluate_batch(self, batch_graph, fingerprints, curr_node_indices, target_node_indices, actions):
+        node_embeds = self.get_node_embeddings(batch_graph, fingerprints)
+        batch_ptr = batch_graph.ptr[:-1] 
+        curr_global_idx = curr_node_indices + batch_ptr 
+        target_global_idx = target_node_indices + batch_ptr 
+
+        # Critic Evaluation
+        critic_input = torch.cat([node_embeds[curr_global_idx], node_embeds[target_global_idx]], dim=-1)
+        state_values = self.critic(critic_input).squeeze(-1)
+
+        new_log_probs, dist_entropies = [], []
+        edge_index, edge_attr = batch_graph.edge_index, batch_graph.edge_attr 
+
+        for i in range(len(actions)):
+            u_global = curr_global_idx[i].item()
+            neighbor_mask = (edge_index[0] == u_global)   
+            neighbor_global_indices = edge_index[1][neighbor_mask] 
+            
+            neighbor_feats = node_embeds[neighbor_global_indices] 
+            c_feat = node_embeds[u_global].unsqueeze(0)
+            t_feat = node_embeds[target_global_idx[i]].unsqueeze(0)
+        
+            K = neighbor_feats.size(0)
+            actor_input = torch.cat([
+                c_feat.repeat(K, 1), t_feat.repeat(K, 1), 
+                neighbor_feats, edge_attr[neighbor_mask]
+            ], dim=-1) 
+        
+            logits = self.actor(actor_input).squeeze(-1)
+            mask = batch_graph.action_mask[neighbor_mask]   
+            logits[~mask] = -1e9
+            
+            dist = torch.distributions.Categorical(torch.softmax(logits, dim=0))   
+            new_log_probs.append(dist.log_prob(actions[i]))
+            dist_entropies.append(dist.entropy())
+
+        return torch.stack(new_log_probs), state_values, torch.stack(dist_entropies)   
+
+    def update(self, memory):
+        (states_batch, actions, old_log_probs, values, rewards, 
+            is_terminals, fingerprints, curr_idxs, target_idxs) = memory.get_all()   
+        
+        advantages = compute_advantages(rewards, values, is_terminals).to(self.device)   
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-5)
+
+        returns = advantages + values
+
+        for _ in range(self.ppo_epochs):   
+            new_log_probs, state_values, dist_entropy = self.evaluate_batch(
+                states_batch, fingerprints, curr_idxs, target_idxs, actions
+            )
+
+            ratio = torch.exp(new_log_probs - old_log_probs)   
+            surr1 = ratio * advantages
+            surr2 = torch.clamp(ratio, 1 - self.clip_eps, 1 + self.clip_eps) * advantages
+            actor_loss = -torch.min(surr1, surr2).mean()      
+            
+            critic_loss = 0.5 * F.mse_loss(state_values, returns)   
+            entropy_loss = -self.entropy_coef * dist_entropy.mean()      
+            
+            loss = actor_loss + critic_loss + entropy_loss
+            self.optimizer.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(self.parameters(), max_norm=0.5)   
+            self.optimizer.step()
+
+        memory.clear()   
+        return actor_loss.item() / self.ppo_epochs, critic_loss.item() / self.ppo_epochs
+
+    def get_current_lr(self): 
+        return self.optimizer.param_groups[0]['lr']
+</file>
+
+<file path="src/multi_service/agents/__init__.py">
+
+</file>
+
+<file path="src/multi_service/agents/based_agent.py">
+import torch
+import torch.nn as nn
+from abc import ABC, abstractmethod
+from torch_geometric.data import Data
+
+class BaseSDNAgent(nn.Module, ABC):
+    def __init__(self, device):
+        super().__init__()
+        self.device = device
+
+    @abstractmethod
+    def get_node_embeddings(self, graph_data, fingerprint):
+        """
+            [抽象方法] 子类必须实现：如何从图数据和指纹中提取节点嵌入
+        """
+        pass
+
+    @abstractmethod
+    def get_action(self, state, node_embeds, **kwargs):
+        """
+            [抽象方法] 子类必须实现：具体的动作选择逻辑
+        """
+        pass
+
+    @abstractmethod
+    def evaluate_batch(self, *args, **kwargs):
+        """
+            [抽象方法] 子类必须实现：用于训练时的批量评估逻辑
+        """
+        pass
+
+    @abstractmethod
+    def update(self, memory):
+        """
+            [抽象方法] 子类必须实现：参数更新算法（如 PPO, DQN 等）
+        """
+        pass
+</file>
+
+<file path="src/multi_service/env/__init__.py">
+from .sdn_wrapper import SdnWrapper
+</file>
+
+<file path="src/multi_service/env/e_model.py">
+import numpy as np
+import math
+
+# ==============================================================================
+# 1. VoIP Model (G.107)
+# ==============================================================================
+class FullG107Calculator:
+    def __init__(self):
+      self.R0 = 93.2 
+      self.Is = 0.0
+      self.A = 0.0 
+      self.Ie_base = 0.0
+      self.Bpl = 4.3
+
+    def calculate_mos(self, delay_ms, loss_pct, jitter_ms):
+        Ta = delay_ms + (2 * jitter_ms) + 10.0 
+        if Ta <= 100:
+            Id = 0.0
+        else:
+            X = np.log(Ta / 100.0) / np.log(2.0)
+            Id_base = 25.0 * ( (1 + X**6)**(1/6) - 3 * (1 + (X/3)**6)**(1/6) + 2 )
+
+            if Ta > 150:
+                Id_penalty = (Ta - 150) * 0.2
+                Id = Id_base + Id_penalty
+            else:
+                Id = Id_base
+
+        Ppl = loss_pct
+        Ie_eff = self.Ie_base + (95 - self.Ie_base) * (Ppl / (Ppl + self.Bpl))
+        
+        R = self.R0 - self.Is - Id - Ie_eff + self.A
+        
+        if R < 0: return 1.0
+        if R > 100: return 4.5
+        return 1 + 0.035 * R + 7e-6 * R * (R - 60) * (100 - R)
+
+# ==============================================================================
+# 2. Video Model (Pure Math - High Performance)
+# ==============================================================================
+class RigorousVideoEvaluator:
+    def __init__(self, target_bitrate_kbps=5000, max_buffer_sec=10.0):
+        self.target_bitrate_kbps = target_bitrate_kbps
+        self.max_buffer_sec = max_buffer_sec
+        self.current_buffer_sec = 6.0 
+
+        # P.1203 Coefficients (Calibrated for 5Mbps = Excellent)
+        self.q1 = 4.66
+        self.q2 = 0.70
+        self.q3 = 500.0  # Calibrated inflection point
+        self.q4 = 2.5
+
+    def reset(self):
+        self.current_buffer_sec = 6.0
+
+    def _get_tcp_throughput_mathis(self, rtt_ms, loss_pct):
+        mss_bits = 1460 * 8  
+        rtt_sec = max(0.001, rtt_ms / 1000.0)
+        p = loss_pct / 100.0
+        if p <= 1e-6: return 99999999.0
+        c = 1.22
+        bw_bps = (mss_bits / rtt_sec) * (c / math.sqrt(p))
+        return bw_bps / 1000.0 
+
+    def _fallback_math_mos(self, bitrate, stall, duration):
+        # O.22 Video Quality
+        if bitrate <= 10: mos_v = 1.0
+        else:
+            term = self.q4 * (math.log10(self.q3) - math.log10(bitrate))
+            mos_v = self.q2 + (self.q1 - self.q2) / (1 + math.exp(term))
+        
+        # O.23 Stalling Penalty
+        if stall > 0.001:
+            ratio = stall / max(duration, 1.0)
+            penalty = math.exp(-15.0 * ratio)
+            final_mos = 1.0 + (mos_v - 1.0) * penalty
+        else:
+            final_mos = mos_v
+        
+        return max(1.0, min(5.0, final_mos))
+
+    def calculate_mos(self, loss_pct, rtt_ms, physical_bw_kbps, duration_sec, stateless_mode=True):
+        if stateless_mode: self.current_buffer_sec = 0.5
+
+        mathis_bw = self._get_tcp_throughput_mathis(rtt_ms, loss_pct)
+        effective_bw = min(physical_bw_kbps, mathis_bw)
+
+        downloaded_content_sec = (effective_bw * duration_sec) / self.target_bitrate_kbps
+        prev_buffer = self.current_buffer_sec
+        new_buffer = prev_buffer + downloaded_content_sec - duration_sec
+        
+        stall_duration = 0.0
+        if new_buffer < 0:
+            stall_duration = abs(new_buffer)
+            self.current_buffer_sec = 0.0
+        else:
+            self.current_buffer_sec = min(new_buffer, self.max_buffer_sec)
+
+        viewing_bitrate = min(effective_bw, self.target_bitrate_kbps)
+
+        # 直接调用数学公式，不再尝试调用官方库
+        return self._fallback_math_mos(viewing_bitrate, stall_duration, duration_sec)
+
+# ==============================================================================
+# 3. Cloud Gaming Model (G.1072)
+# ==============================================================================
+class RigorousCloudGamingEvaluator:
+    def __init__(self, target_bitrate_kbps=8000):
+        self.base_mos = 4.5
+        self.target_bitrate_kbps = target_bitrate_kbps 
+
+    def calculate_mos(self, delay_ms, loss_pct, physical_bw_kbps):
+        effective_bw = min(physical_bw_kbps, self.target_bitrate_kbps)
+        if effective_bw <= 100: I_coding = 3.5 
+        else:
+            ratio = effective_bw / self.target_bitrate_kbps
+            I_coding = 1.8 * np.exp(-3.0 * ratio) 
+
+        total_lag = delay_ms + 30.0 
+        if total_lag <= 30: I_delay = 0.0
+        else:
+            if total_lag < 100: I_delay = (total_lag - 30) * 0.015
+            else: I_delay = (100 - 30) * 0.015 + (total_lag - 100) * 0.06
+
+        I_loss = 4.0 * (loss_pct / 100.0) * 10.0 
+        mos = self.base_mos - I_coding - I_delay - I_loss
+        return np.clip(mos, 1.0, 4.5)
+
+# ==============================================================================
+# 4. Legacy FPS Model (CSa)
+# ==============================================================================
+class RigorousLegacyFPSEvaluator:
+    def __init__(self):
+        self.base_mos = 4.5
+        self.delay_threshold = 20.0 
+
+    def calculate_mos(self, delay_ms, loss_pct, jitter_ms):
+        if delay_ms <= self.delay_threshold: I_delay = 0.0
+        elif delay_ms <= 60: I_delay = (delay_ms - self.delay_threshold) * 0.02 
+        else: I_delay = 0.8 + (delay_ms - 60) * 0.08
+
+        if jitter_ms <= 5: I_jitter = 0.0
+        else: I_jitter = (jitter_ms - 5.0) * 0.15
+
+        # Aggressive Loss Penalty
+        I_loss = 80.0 * (loss_pct / 100.0) 
+        
+        mos = self.base_mos - I_delay - I_jitter - I_loss
+        return np.clip(mos, 1.0, 4.5)
+</file>
+
+<file path="src/multi_service/env/sdn_controller.py">
+"""
+[SDN Controller Facade]
+这是一个重构后的统一入口文件。
+为了保持向后兼容性，它重新导出了分散在 src/env/qos, src/env/traffic, src/env/core 中的函数。
+"""
+
+# 1. QoS 评估模块
+from .qos.evaluator import (
+    parse_ditg_output,
+    calculate_qoe_reward,
+    calculate_qos_reward,
+    voip_calc,
+    video_calc,
+    fps_game_calc
+)
+
+# 2. 流量生成驱动
+from .traffic.ditg_driver import (
+    get_flow_command,
+    ensure_server_surgical,
+    run_itg_safe,
+    measure_path_qos,
+    send_packet_and_capture,
+    normalize_fingerprint,
+    get_a_fingerprint
+)
+
+# 3. SDN 控制器 (流表管理)
+from .core.controller import (
+    sample_path,
+    verify_cleanup,
+    clean_flow_rules,
+    install_path_rules
+)
+
+# 4. 网络监控器
+from .core.monitor import NetworkMonitor
+
+# 5. Mininet 生成器
+from .core.generator import (
+    GraphTopo,
+    get_a_mininet
+)
+</file>
+
+<file path="src/multi_service/models/__init__.py">
+from .encoders import FilmGenerator, FilmGNN
+from .heads import actor, critic
+</file>
+
+<file path="src/multi_service/models/heads.py">
+import torch.nn as nn
+
+class actor(nn.Module):
+    """
+    演员网络，用于生成动作。
+    
+    参数:
+        input_dim: 输入维度，通常是状态空间的维度。
+            current_node: 当前节点的状态向量。
+            target_node: 目标节点的状态向量。
+            neighbor_nodes: 当前节点的邻居节点状态向量。
+            edge_attrs: 当前节点与邻居节点之间的边特征向量。
+    输出:
+        动作值，范围通常在 [-1, 1] 之间。
+    """
+    def __init__(self, input_dim, dropout=0.1):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, 128),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(64, 1))
+  
+    def forward(self, x):
+        return self.net(x)
+
+class critic(nn.Module):
+    """
+    评论家网络，用于评估状态价值。
+
+    参数:
+        input_dim: 输入维度，通常是状态空间的维度。
+            current_node: 当前节点的状态向量。
+            target_node: 目标节点的状态向量。
+    输出:
+        状态价值估计值。
+    """
+    def __init__(self, input_dim, dropout=0.1):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, 128),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(64, 1))
+    
+    def forward(self, x):
+        return self.net(x)
+</file>
+
+<file path="src/multi_service/models/layers.py">
+import torch.nn as nn
+</file>
+
+<file path="src/multi_service/trainers/lstm_trainer.py">
+import torch
+import torch.nn as nn
+import torch.optim as optim
+
+from multi_service.utils import BankTrafficManager
+
+class LSTMTrainer:
+    def __init__(self, lstm, config):
+        self.lstm = lstm
+        self.config = config
+        self.device = config.device  # 建议在 config 中统一指定设备
+        self.optimizer = optim.Adam(lstm.parameters(), lr=config.train.lr, weight_decay=config.train.weight_decay)
+        
+        # 针对分类任务，使用交叉熵损失函数
+        self.criterion = nn.CrossEntropyLoss()
+
+    def train_one_epoch(self, traffic_generator):
+        self.lstm.train()
+        total_loss = 0
+        
+        # 1. 获取包含多个 flow 对象的列表
+        flows = traffic_generator.generate_batch(self.config.train.batch_size)
+        if not flows:
+            return 0
+
+        # 2. 【核心改进】将 list 转换为 Batch Tensor
+        # 假设每个 fingerprint 已经是 (30, 2) 或 (1, 30, 2)
+        # 我们使用 torch.stack 将其合并为 (batch_size, 30, 2)
+        
+        batch_x = []
+        batch_y = []
+        
+        for flow in flows:
+            # 确保去掉多余的 batch 维度，统一处理成 (seq_len, feature_dim)
+            fp = flow.fingerprint.float()
+            if isinstance(fp, torch.Tensor):
+                fp = fp.squeeze() # 变为 (30, 2)
+            else:
+                fp = torch.tensor(fp, dtype=torch.float32)
+                
+            batch_x.append(fp)
+            batch_y.append(flow.label)
+
+        # 堆叠成高维张量
+        inputs = torch.stack(batch_x).to(self.device)   # 形状: (batch_size, 30, 2)
+        labels = torch.tensor(batch_y, dtype=torch.long).to(self.device) # 形状: (batch_size)
+
+        # 3. 标准批处理训练步骤
+        self.optimizer.zero_grad()
+        
+        # 前向传播 (一次性跑整个 batch)
+        outputs = self.lstm(inputs) # 形状: (batch_size, 2)
+        
+        # 计算损失
+        loss = self.criterion(outputs, labels)
+        
+        # 反向传播与优化
+        loss.backward()
+        self.optimizer.step()
+        
+        return loss.item()
+</file>
+
+<file path="src/multi_service/trainers/ospf_trainer.py">
+import torch
+import torch.nn.functional as F
+from torch.utils.tensorboard import SummaryWriter
+import os
+
+class OSPFPreTrainer:
+  def __init__(self, agent, config, writer=None):
+    """
+    OSPF 预训练引擎：利用模仿学习初始化 GNN 骨干网络
+    """
+    self.agent = agent 
+    self.config = config
+    self.writer = writer
+    self.device = torch.device(config.device if torch.cuda.is_available() else "cpu")
+
+    # 预训练阶段主要优化 GNN、Actor 和 Critic
+    # 建议过滤掉 FilmGenerator 以保持其初始 Identity 状态
+    trainable_params = [
+      {'params': self.agent.gnn.parameters()},
+      {'params': self.agent.actor.parameters()},
+      {'params': self.agent.critic.parameters()}]
+    
+    self.optimizer = torch.optim.Adam(trainable_params, lr=config.train.lr)
+    self.global_step = 0
+
+  def train_epoch(self, loader, epoch):
+    self.agent.train()
+    # 显式冻结 Film 模块参数
+    self.agent.film.requires_grad_(False) 
+    
+    total_actor_loss = 0
+    total_critic_loss = 0
+    correct_edges = 0
+    total_edges = 0
+
+    for i, batch in enumerate(loader):
+      batch = batch.to(self.device)
+      # 使用全 1 占位指纹，因为 OSPF 与业务意图无关
+      fingerprints = torch.ones((batch.num_graphs, self.config.model.fingerprint_dim, 2)).to(self.device)
+      
+      # 1. 批量获取节点嵌入 (全图并行)
+      node_embeds = self.agent.get_node_embeddings(batch, fingerprints) 
+      
+      # 2. 向量化构造 Actor 输入 (满足 3H + Edge_Dim 规范) 
+      u_idx, v_idx = batch.edge_index
+      curr_feats = node_embeds[u_idx]     # (E_total, H)
+      neigh_feats = node_embeds[v_idx]    # (E_total, H)
+      edge_feats = batch.edge_attr        # (E_total, E_dim) 
+      
+      # 处理目标节点特征映射
+      target_global_idx = batch.target_idx + batch.ptr[:-1] 
+      graph_ids_per_edge = batch.batch[u_idx] # 获取每条边属于哪张图
+      target_feats = node_embeds[target_global_idx[graph_ids_per_edge]] # (E_total, H)
+
+      # 拼接: [Current | Target | Neighbor | Edge] 
+      actor_input = torch.cat([curr_feats, target_feats, neigh_feats, edge_feats], dim=-1) 
+
+      logits = self.agent.actor(actor_input).squeeze(-1) 
+
+      # 3. 计算 Actor Loss (二分类：边是否在最短路上) 
+      pos_weight = torch.tensor([5.0]).to(self.device) # 给正样本 5 倍权重
+      actor_loss = F.binary_cross_entropy_with_logits(logits, batch.y, pos_weight=pos_weight)
+
+      # 4. 计算 Critic Loss (路径代价 MSE)
+      curr_global_idx = batch.curr_idx + batch.ptr[:-1]
+      predicted_val = self.agent.evaluate_value(node_embeds, curr_global_idx, target_global_idx).squeeze(-1) 
+      critic_loss = F.mse_loss(predicted_val, batch.target_value) 
+
+      # 5. 反向传播
+      loss = actor_loss + 0.5 * critic_loss
+      self.optimizer.zero_grad()
+      loss.backward()
+      self.optimizer.step()
+
+      # 统计
+      preds = (torch.sigmoid(logits) > 0.5).float()
+      correct_edges += (preds == batch.y).sum().item()
+      total_edges += batch.y.size(0)
+      total_actor_loss += actor_loss.item()
+      total_critic_loss += critic_loss.item()
+      pos_mask = (batch.y == 1.0)
+      if pos_mask.sum() > 0:
+        pos_correct = (preds[pos_mask] == 1.0).sum().item()
+        pos_total = pos_mask.sum().item()
+        recall = pos_correct / pos_total
+
+      if self.writer:
+        # step = epoch * len(loader) + i
+        self.writer.add_scalar("Pretrain/Actor_Loss_Step", actor_loss.item(), self.global_step)
+        self.writer.add_scalar("Pretrain/Critic_Loss_Step", critic_loss.item(), self.global_step)
+        self.global_step += 1
+
+    avg_actor = total_actor_loss / (i+1)
+    avg_critic = total_critic_loss / (i+1)
+    accuracy = correct_edges / total_edges
+    
+    return avg_actor, avg_critic, accuracy, recall
+</file>
+
+<file path="src/multi_service/utils/math_utils.py">
+import torch
+
+def compute_advantages(rewards, values, is_terminals, gamma=0.99, lam=0.95):
+  """
+  计算 GAE 优势函数
+  rewards: [T], values: [T+1] (需要多存一个最后状态的 value)
+  """
+  
+  advantages = []
+  gae = 0
+  
+  # 从后往前计算
+  for i in reversed(range(len(rewards))):
+    # TD 误差 delta = 当前奖励 + 下一步折扣价值 - 当前价值
+    # 如果是最后一步，next_value 就是 0
+
+    mask = 1.0 - is_terminals[i]
+    next_value = 0 if is_terminals[i] else values[i+1]
+    delta = rewards[i] + gamma * next_value * mask - values[i]
+
+    # GAE 公式：优势 = 当前 TD 误差 + 后续优势的加权累加
+    gae = delta + gamma * lam * mask * gae
+    advantages.insert(0, gae)
+  
+  return torch.tensor(advantages, dtype=torch.float32)
+</file>
+
+<file path="src/multi_service/utils/networkx_watcher.py">
+from loguru import logger
+from omegaconf import DictConfig
+import torch
+import networkx as nx
+from torch_geometric.data import Data
+
+
+def get_graph_data(G: nx.Graph, Cur_node: int, D_node: int,
+                   config: DictConfig):
+    """
+    get_graph_data 的 Docstring
+    
+    :param G: 要提取特征的图
+    :param Cur_node: 当前节点 (Agent 所在位置)
+    :param D_node: 目的节点
+    :param config: 配置对象
+
+    returns: PyG Data 对象和带有特征的 NetworkX 图
+    :rtype: tuple[Data, nx.Graph]
+    
+    特征维度说明：
+        - 节点特征 (5维):
+            - Is_Destination (0/1)
+            - Is_Current_Node (0/1)
+            - Dist_To_Destination (归一化)
+            - Buffer Occupancy 
+            - Processing Delay
+        - 边特征 (4维): 
+            - Delay (归一化)
+            - Bandwidth (归一化)
+            - Loss (归一化)
+            - Utilization (直接使用 0-1)
+    """
+
+    # --- 2. 边特征处理 (移除 Avail BW) ---
+    source_nodes, target_nodes = [], []
+    edge_attrs_raw = []
+
+    for u, v, data in G.edges(data=True):
+        source_nodes.extend([u, v])
+        target_nodes.extend([v, u])
+
+        l = float(data.get('loss', 0.0))
+        d = float(data.get('delay', 1.0))
+        b = float(data.get('bandwidth', 100.0))
+        u_load = float(data.get('utilization', 0.0))
+
+        # [Change] 只保留 4 个核心特征
+        attr = [d, b, l, u_load]
+        edge_attrs_raw.extend([attr, attr])
+
+    edge_index = torch.tensor([source_nodes, target_nodes], dtype=torch.long)
+
+    # 转换为 Tensor
+    if len(edge_attrs_raw) > 0:
+        edge_attr_tensor = torch.tensor(edge_attrs_raw, dtype=torch.float)
+
+        # 归一化
+        edge_attr = torch.zeros_like(edge_attr_tensor)
+
+        # [Fix] 索引范围修正为 0~3
+        # 0: Delay
+        edge_attr[:,
+                  0] = (edge_attr_tensor[:, 0] - config.env.min_link_delay) / (
+                      config.env.max_link_delay - config.env.min_link_delay +
+                      1e-6)
+        # 1: Bandwidth
+        edge_attr[:, 1] = (edge_attr_tensor[:, 1] - config.env.min_link_bw) / (
+            config.env.max_link_bw - config.env.min_link_bw + 1e-6)
+        # 2: Loss
+        edge_attr[:,
+                  2] = edge_attr_tensor[:,
+                                        2] / config.env.max_link_loss  # Loss (假设最大5%)
+        # 3: Utilization (本身就是 0-1，不需要额外归一化，Clamp一下即可)
+        edge_attr[:, 3] = edge_attr_tensor[:, 3].clamp(0.0, 1.0)
+
+        # [Removed] edge_attr[:, 4] = Avail_BW (已删除)
+
+        edge_attr = edge_attr.clamp(0.0, 1.0)
+    else:
+        # 防止空图报错
+        edge_attr = torch.tensor([], dtype=torch.float)
+
+    # --- 3. 节点特征处理 (移除 Source 相关) ---
+    # [Removed] dist_from_s 计算块已删除
+
+    # 只保留 Dist_To_Destination
+    try:
+        dist_to_d = nx.single_source_shortest_path_length(G, D_node)
+    except:
+        dist_to_d = {n: 999 for n in G.nodes()}
+
+    node_features_list = []
+    loggest_path_len = config.topo.train.max_steps
+
+    for u, data in G.nodes(data=True):
+        node_data = data
+
+        # [Change] 这里的特征列表精简为 8 维
+        is_c = 1.0 if u == Cur_node else 0.0
+        is_d = 1.0 if u == D_node else 0.0
+        dd = 1.0 * min(dist_to_d.get(u, 999),
+                       loggest_path_len) / loggest_path_len
+
+        bo = float(node_data.get('buffer_occupancy', 0.0))
+        pd = float(node_data.get('proc_delay', 0.0))
+
+        # 基础特征 (5维)
+        basic_feat = [is_d, is_c, dd, bo, pd]
+
+        node_features_list.append(basic_feat)
+
+    x = torch.tensor(node_features_list, dtype=torch.float)
+
+    return Data(x=x, edge_index=edge_index, edge_attr=edge_attr), G
+</file>
+
+<file path="src/multi_service/utils/ppo_memory.py">
+from typing import Any
+
+
+from torch._tensor import Tensor
+
+
+import torch
+from torch_geometric.data import Batch # 必须导入这个用于处理图批处理
+
+class PPOMemory:
+  def __init__(self, device: str="cpu") -> None:
+    self.device = device
+    self.states = []
+    self.values = []
+    self.actions = []
+    self.rewards = []
+    self.log_probs = []
+    self.is_terminals = []
+    # 为了 evaluate_batch 增加的辅助数据
+    self.fingerprints = []  
+    self.curr_indices = []  
+    self.target_indices = [] 
+
+  def store(self, state, action, log_prob, value, reward, is_terminal,
+            fingerprint, curr_idx, target_idx) -> None:
+    self.states.append(state)
+    self.values.append(value)
+    self.rewards.append(reward)
+    self.actions.append(action)
+    self.log_probs.append(log_prob)
+    self.curr_indices.append(curr_idx)
+    self.is_terminals.append(is_terminal)
+    self.fingerprints.append(fingerprint)
+    self.target_indices.append(target_idx)
+
+  def get_all(self) -> tuple[Any, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+    """
+    核心转化函数：将 List 转化为符合训练要求的 Tensor/Batch
+    """
+    # 1. 图状态处理
+    states_batch = Batch.from_data_list(self.states).to(self.device) # type: ignore
+
+    # 2. 基础数据转化
+    log_probs = torch.stack(self.log_probs).to(self.device).detach() 
+    actions = torch.tensor(self.actions, dtype=torch.long).to(self.device) 
+    values = torch.tensor(self.values, dtype=torch.float32).to(self.device) 
+    rewards = torch.tensor(self.rewards, dtype=torch.float32).to(self.device) 
+    is_terminals = torch.tensor(self.is_terminals, dtype=torch.float32).to(self.device)
+    
+    # 3. 辅助训练数据转化  
+    fingerprints = torch.cat(self.fingerprints, dim=0).to(self.device).detach()
+    
+    curr_indices = torch.tensor(self.curr_indices, dtype=torch.long).to(self.device)
+    target_indices = torch.tensor(self.target_indices, dtype=torch.long).to(self.device)
+
+    return (
+      states_batch, actions, log_probs, values, rewards, 
+      is_terminals, fingerprints, curr_indices, target_indices)
+
+  def clear(self):
+    del self.states[:]
+    del self.values[:]
+    del self.actions[:]
+    del self.rewards[:]
+    del self.log_probs[:]
+    del self.is_terminals[:]
+    del self.fingerprints[:]
+    del self.curr_indices[:]
+    del self.target_indices[:]
+</file>
+
+<file path="src/multi_service/utils/sdn_paraser.py">
+import argparse
+import sys
+from argparse import ArgumentParser
+
+class SdnParaser(ArgumentParser):
+  def __init__(self):
+    ArgumentParser.__init__(
+      self,
+      description="调整构建Mininet网络拓扑时的参数")
+    self.add_argument(
+      "-rp", "--remote_port",
+      type=int,
+      default=None,
+      help="远程流表控制器的端口"
+    )
+    self.add_argument(
+      "-dv","--device",
+      type=str,
+      default=None,
+      help="指定使用gpu-'0,1,2,3'"
+    )
+    self.add_argument(
+      '--yaml', 
+      type=str, 
+      default='config.yaml', 
+      help='Path to the YAML configuration file (default: ./config.yaml)'
+    )
+    self.add_argument(
+      '--checkpoint',
+      type=str,
+      default=None,
+      help='Path to the training checkpoint file'
+    )
+    self.add_argument(
+      '--verbose',
+      action='store_true',
+      help='Enable verbose output for debugging'
+    )
+    self.add_argument(
+      '--load_flow',
+      type=int,
+      default=0,
+      help='Load flow rate in Mbps for evaluation (default: 0)'
+    )
+</file>
+
+<file path="src/multi_service/env/core/controller.py">
+import torch
+import networkx as nx
+from collections import defaultdict
+from time import sleep
+from loguru import logger
+
+# 根据gnn输出的 logits来生成路径--贪婪/概率选择：
+# 替换 MS/Env/MininetController.py 中的 sample_path 函数
+def sample_path(edge_logits, edge_index, s_node, d_node, max_steps=100, G_fallback=None, greedy=False):
+    """
+    增强版路径采样：支持 Masking (防环) + Dijkstra Fallback (兜底)
+    返回: path, log_prob_sum, ai_success, path_complete
+    """
+    # 1. 构建邻接表
+    adj = {}
+    num_edges = edge_index.shape[1]
+    for i in range(num_edges):
+        u = edge_index[0, i].item()
+        v = edge_index[1, i].item()
+        if u not in adj: adj[u] = []
+        adj[u].append((v, i)) 
+
+    current = s_node
+    path = [current]
+    visited = {current}
+    log_probs = [] 
+  
+    # ---------------------------------------------------------
+    # A. AI 游走阶段
+    # ---------------------------------------------------------
+    for _ in range(max_steps):
+        if current == d_node: break
+        if current not in adj: break
+    
+        # Action Masking: 禁止走回头路
+        neighbors = adj[current]
+        valid_options = [n for n in neighbors if n[0] not in visited]
+        if not valid_options: break # 死胡同
+    
+        # 提取 Logits
+        candidate_logits = []
+        candidate_nodes = []
+        for next_node, edge_idx in valid_options:
+            candidate_logits.append(edge_logits[edge_idx])
+            candidate_nodes.append(next_node)
+      
+        logits_tensor = torch.stack(candidate_logits)
+        if greedy:
+            action_idx = torch.argmax(logits_tensor).item()
+            log_prob = torch.tensor(0.0).to(logits_tensor.device)
+        else:
+            probs = torch.softmax(logits_tensor, dim=0)
+            dist = torch.distributions.Categorical(probs)
+            action_tensor = dist.sample()
+            action_idx = action_tensor.item()
+            log_prob = dist.log_prob(action_tensor)
+    
+        log_probs.append(log_prob)
+    
+        next_hop = candidate_nodes[int(action_idx)]
+        path.append(next_hop)
+        visited.add(next_hop)
+        current = next_hop
+
+    # ---------------------------------------------------------
+    # B. 状态判定与兜底 (Safety Net) [核心修复]
+    # ---------------------------------------------------------
+    ai_success = False      # AI 是否独立完成
+    path_complete = False   # 最终路径是否连通 (含兜底)
+
+    if path[-1] == d_node:
+        # Case 1: AI 独立成功
+        ai_success = True
+        path_complete = True
+    else:
+        # Case 2: AI 失败，尝试 Dijkstra 兜底
+        if G_fallback is not None:
+            try:
+                # 从断点找最短路补全
+                remaining_path = nx.shortest_path(G_fallback, source=path[-1], target=d_node, weight='delay')
+                path.extend(remaining_path[1:]) # 拼接到路径后
+        
+                ai_success = False    # AI 没完成
+                path_complete = True  # 但路通了
+            except nx.NetworkXNoPath:
+                # 物理隔离，彻底失败
+                ai_success = False
+                path_complete = False
+        else:
+            # 没有兜底机制，且 AI 没走通
+            ai_success = False
+            path_complete = False
+  
+    # 汇总 Log Probs
+    if log_probs:
+        log_prob_sum = torch.stack(log_probs).sum()
+    else:
+        log_prob_sum = torch.tensor(0.0).to(edge_logits.device)
+
+    # 返回 4 个值：路径，梯度概率，AI是否成功，最终是否连通
+    return path, log_prob_sum, ai_success, path_complete
+  
+def verify_cleanup(net, cookie=0xA000):
+    """
+    检查网络中是否还有残留的指定 cookie 的流表。
+    返回: True (清理干净了), False (还有残留)
+    """
+    has_residue = False
+  
+    for sw in net.switches:
+        # 获取该交换机的所有流表
+        # 注意: grep 是 shell 命令，通过 sw.cmd 调用
+        # result 包含查询结果字符串
+        result = sw.cmd(f'ovs-ofctl -O OpenFlow13 dump-flows {sw.name} | grep "cookie={hex(cookie)}"')
+    
+        # 如果 result 不为空，说明找到了残留
+        if result.strip():
+            logger.info(f"Residue flows found on {sw.name}:\n{result.strip()}")
+            has_residue = True
+        
+    if not has_residue:
+        # logger.log(f"Flow cleanup verified. No rules with cookie={hex(cookie)} found.", tag="Clean OK")
+        return True
+    else:
+        logger.error(f"Flow cleanup failed. Error cookie: {cookie}")
+        return False
+
+# 清除流表规则
+def clean_flow_rules(net, cookie=0xA000, mask=0xF000):
+    """
+    清理流表。
+    :param cookie: 要匹配的 Cookie 值 (前缀)
+    :param mask: 掩码。0xF000 表示只匹配前 4 位 (即 0xA...)，忽略后面具体的步数。
+    """
+  
+    # 构造匹配字符串: cookie=0xA000/0xF000
+    # 这告诉 OVS: "只要 Cookie 以 A 开头 (高4位是A)，不管后面几位是什么，统统删掉！"
+    match_str = f"cookie={hex(cookie)}/{hex(mask)}"
+  
+    # logger.log(f"Cleaning flows matching {match_str}...", tag="Rule Clean")
+
+    for sw in net.switches:
+        # 注意：这里去掉了 /-1，改用我们计算出的掩码
+        cmd = f'ovs-ofctl -O OpenFlow13 del-flows {sw.name} "{match_str}"'
+        sw.cmd(cmd)
+      
+    sleep(0.5) # 给 OVS 一点反应时间
+    verify_cleanup(net, cookie)
+
+# 下发流表规则
+def install_path_rules(net, path_nodes, cookie, actual_sig_port=15000, tos=None, dst_port=None, protocol='UDP'):
+    """
+    安装端到端路径流表 (严格模式)
+    140: 只放行 ARP、Ping 和 TCP 握手 (SYN)
+    150: 放行信令数据和带 ToS 的业务数据
+    100: 反向回包保底
+    """
+    # 1. 获取基础网络对象与 IP
+    src_id, dst_id = path_nodes[0], path_nodes[-1]
+    h_src, h_dst = net.get(f'h{src_id}'), net.get(f'h{dst_id}')
+    src_ip, dst_ip = h_src.IP(), h_dst.IP()
+
+    # [Optimization] 批量规则缓冲区
+    batch_rules = defaultdict(list)
+
+    for i, current_node_id in enumerate(path_nodes):
+        sw_name = f's{current_node_id}'
+        switch = net.get(sw_name)
+
+        # ==========================================
+        # A. 端口预计算 (必须先算好正向和反向，才能下流表)
+        # ==========================================
+    
+        # 1. 正向输出端口 (Out Port)
+        out_port = None
+        if i == len(path_nodes) - 1:
+            links = net.linksBetween(switch, h_dst)
+            if links:
+                link = links[0]
+                out_intf = link.intf1 if link.intf1.node == switch else link.intf2
+                out_port = switch.ports[out_intf]
+        else:
+            next_sw = net.get(f's{path_nodes[i+1]}')
+            links = net.linksBetween(switch, next_sw)
+            if links:
+                link = links[0]
+                out_intf = link.intf1 if link.intf1.node == switch else link.intf2
+                out_port = switch.ports[out_intf]
+
+        # 2. 反向输出端口 (Reverse Port)
+        rev_port = None
+        if i == 0:
+            links_rev = net.linksBetween(switch, h_src)
+            if links_rev:
+                link_rev = links_rev[0]
+                rev_intf = link_rev.intf1 if link_rev.intf1.node == switch else link_rev.intf2
+                rev_port = switch.ports[rev_intf]
+        else:
+            prev_sw = net.get(f's{path_nodes[i-1]}')
+            links_rev = net.linksBetween(switch, prev_sw)
+            if links_rev:
+                link_rev = links_rev[0]
+                rev_intf = link_rev.intf1 if link_rev.intf1.node == switch else link_rev.intf2
+                rev_port = switch.ports[rev_intf]
+
+        if out_port is None or rev_port is None:
+            continue # 容错处理
+
+        # ==========================================
+        # B. 收集流表 (批量模式)
+        # ==========================================
+
+        # [Priority 140: 基础设施层] 
+    
+        # [ARP 规则]: 允许二层地址解析。匹配: dl_type=0x0806 (ARP 协议)。
+        batch_rules[sw_name].append(f"priority=140,dl_type=0x0806,actions=NORMAL")
+
+        # [Ping 正向]: 匹配: dl_type=0x0800 (IP), nw_proto=1 (ICMP), 目标 IP。
+        batch_rules[sw_name].append(f"cookie={cookie},priority=140,dl_type=0x0800,nw_proto=1,nw_dst={dst_ip},actions=output:{out_port}")
+        # [Ping 反向]: 匹配: 目标 IP 为源主机。
+        batch_rules[sw_name].append(f"cookie={cookie},priority=140,dl_type=0x0800,nw_proto=1,nw_dst={src_ip},actions=output:{rev_port}")
+
+        # [TCP 握手正向]: 匹配: nw_proto=6 (TCP), tcp_flags=0x002/0x002 (仅 SYN 位为 1)。
+        batch_rules[sw_name].append(f"cookie={cookie},priority=140,dl_type=0x0800,nw_proto=6,tcp_flags=0x002/0x002,nw_dst={dst_ip},actions=output:{out_port}")
+        # [TCP 握手反向]: 匹配: 反向路径的 SYN/ACK。
+        batch_rules[sw_name].append(f"cookie={cookie},priority=140,dl_type=0x0800,nw_proto=6,tcp_flags=0x002/0x002,nw_dst={src_ip},actions=output:{rev_port}")
+        # tcp_flags=0x010/0x010 匹配 ACK 位。
+        batch_rules[sw_name].append(f"cookie={cookie},priority=140,tcp,nw_dst={dst_ip},tcp_flags=0x010/0x010,actions=output:{out_port}")
+        
+        # [Priority 150: 业务通道层] 
+        if tos is not None:
+            # [信令通道 15000]: 匹配: TCP 协议, 目的端口 15000。
+            batch_rules[sw_name].append(f"cookie={cookie},priority=150,dl_type=0x0800,nw_proto=6,tp_dst={actual_sig_port},nw_dst={dst_ip},actions=output:{out_port}")
+            # [信令回包]: 匹配: 源端口 15000 (ACK)。
+            batch_rules[sw_name].append(f"cookie={cookie},priority=150,dl_type=0x0800,nw_proto=6,tp_src={actual_sig_port},nw_dst={src_ip},actions=output:{rev_port}")
+
+            # [VIP 数据流]: 匹配: 指定协议, 指定 ToS, 目标 IP。
+            p_num = 6 if protocol.upper() == 'TCP' else 17
+            match_data = f"cookie={cookie},priority=150,dl_type=0x0800,nw_proto={p_num},nw_tos={tos},nw_dst={dst_ip}"
+            # 仅 UDP 精确匹配数据端口，TCP 建议放宽端口以兼容。
+            if protocol.upper() == 'UDP' and dst_port:
+                match_data += f",tp_dst={dst_port}"
+      
+            batch_rules[sw_name].append(f"{match_data},actions=output:{out_port}")
+
+        # [Priority 100: 反向回包保底] 
+    
+        # [反向保底]: 匹配: 只要发往源主机的 IP 包。用于承载所有 ACK/Reply，优先级最低。
+        batch_rules[sw_name].append(f"cookie={cookie},priority=100,dl_type=0x0800,nw_dst={src_ip},actions=output:{rev_port}")
+
+    # [Optimization] 批量下发流表
+    for sw_name, rules in batch_rules.items():
+        switch = net.get(sw_name)
+        if not rules: continue
+        
+        # 使用 printf + pipe 一次性下发所有规则
+        # 注意: rules 中不能包含单引号，否则会破坏 printf 语法
+        rules_str = "\\n".join(rules)
+        cmd = f"printf '{rules_str}' | ovs-ofctl -O OpenFlow13 add-flows {sw_name} -"
+        switch.cmd(cmd)
+</file>
+
+<file path="src/multi_service/env/core/generator.py">
+import networkx as nx
+from functools import partial
+from contextlib import contextmanager
+from mininet.net import Mininet
+from mininet.topo import Topo
+from mininet.node import OVSKernelSwitch, RemoteController
+from mininet.link import TCLink
+from mininet.log import setLogLevel, info
+from loguru import logger
+
+# Generator :
+# 生成一个mininet网络
+
+# mininet 定义
+class GraphTopo(Topo):
+    def __init__(self, blueprint_g: nx.Graph, is_test: bool = False, **opts):
+        """
+        初始化一个基于蓝图图的 Mininet 拓扑。
+        params:
+            blueprint_g: 蓝图图，节点属性包含 'bandwidth', 'delay', 'loss', 'queue_size'
+            is_test: 是否为测试环境，若为 True 则在节点 ID 前添加 'T' 前缀
+            opts: Topo 类的其他参数
+        """
+        Topo.__init__(self, **opts)
+        test_str = "T" if is_test else ""
+
+        for node_id in blueprint_g.nodes():
+            self.addSwitch(f'{test_str}s{node_id}', protocols='OpenFlow13')
+            self.addHost(f'{test_str}h{node_id}')
+            self.addLink(f'{test_str}h{node_id}', f'{test_str}s{node_id}', delay='0ms')
+
+        for u, v, data in blueprint_g.edges(data=True):
+            bw = data.get('bandwidth', 30.0) # Mbps
+            delay = f"{data.get('delay', 10)}ms"
+            loss = data.get('loss', 0)
+            
+            if 'queue_size' in data:
+                q_limit = data['queue_size']
+            else:
+                # 估算每秒包转发率 (pps)
+                pps = (bw * 1000000) / (1500 * 8)
+                # 设置 20ms 的缓冲
+                q_limit = int(max(50, pps * 0.02))
+
+            rate_bytes = bw * 1000000 / 8
+            # 2. 计算最佳 r2q (确保 quantum ≈ 1500)
+            r2q = int(max(1, rate_bytes / 1500))
+            # 这里沿用 Mininet 构造函数中设置的 r2q
+            logger.debug(
+                f"Link {u:>2} <-> {v:<2} | "
+                f"BW: {bw:>5} Mbps | "
+                f"Delay: {delay:>6} | "
+                f"Loss: {loss:>3}% | "
+                f"R2Q: {r2q:>5} | "
+                f"QLimit: {q_limit:>4}", 
+            )
+
+            self.addLink(
+                f'{test_str}s{u}', f'{test_str}s{v}', 
+                cls=TCLink, 
+                bw=bw, 
+                delay=delay, 
+                loss=loss, 
+                r2q=r2q, 
+                use_htb=True, 
+                max_queue_size=q_limit
+            ) 
+
+# mininet 启动
+@contextmanager
+def get_a_mininet(g: nx.Graph, is_test=False, remote_port=None):
+    if remote_port:
+        controller = partial(RemoteController, ip='127.0.0.1', port=remote_port)
+    else:
+        controller = None
+
+    net = Mininet(
+        topo=GraphTopo(g, is_test),
+        switch=OVSKernelSwitch,
+        link=TCLink,
+        controller=controller,
+        autoSetMacs=True, 
+        autoStaticArp=True)
+
+    try:
+        logger.debug("Disabling TCP Offload (TSO/GSO/GRO) on all switches...")
+        for h in net.hosts:
+            for intf in h.intfList():
+                if intf.name != 'lo':
+                    # 使用 ethtool 关闭卸载
+                    h.cmd(f"ethtool -K {intf.name} tso off gso off gro off > /dev/null 2>&1")
+        for sw in net.switches:
+            for intf in sw.intfList():
+                if intf.name != 'lo':
+                    sw.cmd(f"ethtool -K {intf.name} tso off gso off gro off > /dev/null 2>&1")
+            
+        net.start()
+        yield net
+    finally:
+        logger.info("stopping mininet ...")
+        net.stop()
+
+    return net
+</file>
+
+<file path="src/multi_service/env/core/monitor.py">
+import re
+import networkx as nx
+from time import time, sleep
+from loguru import logger
+
+# 监视器，负责动态提取mininet拓扑状态
+class NetworkMonitor:
+
+    def __init__(self, net):
+        self.net = net
+
+    def _read_sys_file(self, path):
+        """快速读取系统文件"""
+        try:
+            with open(path, 'r') as f:
+                return int(f.read().strip())
+        except:
+            return 0
+
+    def _get_queue_limit(self, node_name, intf_name):
+        """
+        动态读取接口的队列上限 (Capacity)
+        返回: limit (int, 单位: packets)
+        """
+        try:
+            node = self.net.get(node_name)
+            # -d 参数用于显示详细配置 (details)，包含 limit
+            cmd = f"tc -d qdisc show dev {intf_name}"
+            output = node.cmd(cmd)
+
+            # 1. 尝试匹配 'limit 100p' (pfifo/bfifo_fast 等)
+            # 这里的 p 代表 packets
+            match_p = re.search(r'limit\s+(\d+)p', output)
+            if match_p:
+                return int(match_p.group(1))
+
+            # 2. 尝试匹配 'limit 10000b' (bfifo，基于字节)
+            # 如果是字节，我们需要估算包数。假设平均包大小 1500B
+            match_b = re.search(r'limit\s+(\d+)b', output)
+            if match_b:
+                bytes_limit = int(match_b.group(1))
+                return max(1, bytes_limit // 1500)
+
+            # 3. 如果没找到 limit，通常是默认的 txqueuelen (通常是 1000)
+            # 可以读取 /sys/class/net/.../tx_queue_len
+            cmd_tx = f"cat /sys/class/net/{intf_name}/tx_queue_len"
+            tx_len = int(node.cmd(cmd_tx).strip())
+            return tx_len
+
+        except Exception as e:
+            logger.error(f"Error reading queue limit: {e}")
+            return 100  # 兜底默认值
+
+    def _get_all_interfaces_stats(self, G):
+        """
+        获取图中所有涉及接口的 tx_bytes 和 backlog
+        返回: dict { (u, v): {'bytes': int, 'qlen': int} }
+        """
+        stats = {}
+        for u, v in G.edges():
+            # 映射节点名
+            s_u_name = f"Ts{u}" if f"Ts{u}" in self.net else f"s{u}"
+            s_v_name = f"Ts{v}" if f"Ts{v}" in self.net else f"s{v}"
+
+            if s_u_name not in self.net: continue
+            s_u = self.net.get(s_u_name)
+            s_v = self.net.get(s_v_name)
+
+            # 查找接口
+            links = self.net.linksBetween(s_u, s_v)
+            if not links: continue
+            link = links[0]
+            intf = link.intf1 if link.intf1.node == s_u else link.intf2
+
+            # 1. 读取 Bytes (直接读宿主机文件，假设是在 Root Namespace 或路径正确)
+            # 注意: Mininet 的虚拟接口通常在 Root NS 可见 (/sys/class/net/s1-eth2/...)
+            # 如果读不到，可能需要用 node.cmd('cat ...')，但那样太慢。
+            # 这里假设是标准 Mininet OVS 环境，接口都在 Root NS。
+            tx_bytes = self._read_sys_file(
+                f"/sys/class/net/{intf.name}/statistics/tx_bytes")
+
+            # 2. 读取队列 (只能通过 tc 命令，较慢，但在 sampling 期间只读一次也行)
+            # 为了速度，这里我们可以只在采样结束时读一次队列
+            # 这里先存名字，稍后处理
+            stats[(u, v)] = {'bytes': tx_bytes, 'intf': intf.name, 'node': s_u}
+
+        return stats
+
+    def _batch_get_qdisc_stats(self, nodes):
+        """
+        批量获取节点的 TC 统计信息，减少 shell 调用次数。
+        返回: {node_name: {intf_name: q_len_packets}}
+        """
+        results = {}
+        for node in nodes:
+            results[node.name] = {}
+            try:
+                # 一次性获取该节点所有接口的 qdisc 信息
+                output = node.cmd("tc -s qdisc show")
+
+                # 解析输出
+                current_intf = None
+                for line in output.split('\n'):
+                    line = line.strip()
+                    # 匹配 qdisc 行获取接口名
+                    match_dev = re.search(r'qdisc \w+ .* dev ([^\s]+) ', line)
+                    if match_dev:
+                        current_intf = match_dev.group(1)
+                        continue
+
+                    # 匹配 backlog 行获取队列长度
+                    if current_intf:
+                        match_backlog = re.search(r'backlog\s+\d+b\s+(\d+)p',
+                                                  line)
+                        if match_backlog:
+                            results[node.name][current_intf] = int(
+                                match_backlog.group(1))
+            except Exception as e:
+                logger.error(f"Batch TC error on {node.name}: {e}")
+        return results
+
+    def get_topology(self):
+        """
+        获取当前 Mininet 的实时拓扑结构和链路属性。
+        只包含交换机，名字转换为整型 (e.g. 's1' -> 1)。
+        链路属性包含: bw, delay, loss。
+        """
+        G = nx.Graph()
+
+        # 1. 添加交换机节点
+        for sw in self.net.switches:
+            try:
+                # 提取数字ID
+                match = re.search(r'\d+', sw.name)
+                if match:
+                    sw_id = int(match.group())
+                    G.add_node(sw_id, label=sw.name)
+            except Exception as e:
+                logger.warning(f"Error parsing switch name {sw.name}: {e}")
+                continue
+
+        # 2. 添加链路
+        for link in self.net.links:
+            node1 = link.intf1.node
+            node2 = link.intf2.node
+
+            # 仅处理交换机之间的链路
+            if node1 not in self.net.switches or node2 not in self.net.switches:
+                continue
+
+            try:
+                u_match = re.search(r'\d+', node1.name)
+                v_match = re.search(r'\d+', node2.name)
+
+                if not u_match or not v_match:
+                    continue
+
+                u = int(u_match.group())
+                v = int(v_match.group())
+            except Exception:
+                continue
+
+            # 获取链路参数 (优先取 intf1)
+            # Mininet 的 TCLink 会将参数存储在 intf.params 中
+            params = link.intf1.params
+
+            bw = params.get('bw', 0)
+            loss = params.get('loss', 0)
+            delay_str = params.get('delay', '0ms')
+
+            # 处理 delay 字符串 (e.g., '5ms' -> 5)
+            # 如果是数字则直接使用
+            delay = 0.0
+            if isinstance(delay_str, str):
+                match = re.search(r'([\d\.]+)', delay_str)
+                if match:
+                    delay = float(match.group(1))
+            elif isinstance(delay_str, (int, float)):
+                delay = float(delay_str)
+
+            # 添加边及属性 (capacity 对应 bw)
+            G.add_edge(u, v, bw=bw, delay=delay, loss=loss, capacity=bw)
+
+        # Debug: 打印拓扑信息
+        if G.number_of_edges() > 0:
+            # 表头
+            header = f"{'Link':<15} | {'BW (Mbps)':<12} | {'Delay (ms)':<12} | {'Loss (%)':<10}"
+            sep = "-" * len(header)
+
+            log_lines = ["\nTopology Links:"]
+            log_lines.append(sep)
+            log_lines.append(header)
+            log_lines.append(sep)
+
+            for u, v, data in sorted(G.edges(data=True)):
+                link_name = f"s{u}-s{v}"
+                bw = data.get('bw', 0)
+                delay = data.get('delay', 0)
+                loss = data.get('loss', 0)
+
+                row = f"{link_name:<15} | {bw:<12} | {delay:<12} | {loss:<10}"
+                log_lines.append(row)
+
+            log_lines.append(sep)
+            logger.trace("\n".join(log_lines))
+
+        return G
+
+    def sync_state_to_graph(self, duration=0.05):
+        """
+        同步网络状态到拓扑图 (Active Sampling)
+
+        采用主动采样模式，通过两次快照计算链路的瞬时速率和利用率，
+        并批量获取队列状态更新节点负载信息。
+
+        Args:
+            G (nx.Graph): NetworkX 拓扑图对象，边属性需包含 'capacity' (Mbps)。
+            duration (float): 采样窗口时长 (秒)，默认为 0.05s。
+                              该时间段内的流量差值用于计算速率。
+
+        Returns:
+            nx.Graph: 更新状态后的拓扑图。
+                - Edge attributes updated: 'utilization', 'measured_speed'
+                - Node attributes updated: 'buffer_occupancy', 'proc_delay'
+        """
+        G = self.get_topology()
+        SAMPLE_WINDOW = duration  # 采样窗口 50ms
+
+        # 1. 第一次快照
+        snapshot1 = self._get_all_interfaces_stats(G)
+        t1 = time()
+        # 2. 等待
+        sleep(SAMPLE_WINDOW)
+        # 3. 第二次快照
+        snapshot2 = self._get_all_interfaces_stats(G)
+        t2 = time()
+
+        delta_t = t2 - t1
+        if delta_t <= 0: delta_t = 1e-6
+
+        # [Optimization] 批量获取队列状态
+        unique_nodes = set()
+        for v in snapshot2.values():
+            unique_nodes.add(v['node'])
+        batch_q_stats = self._batch_get_qdisc_stats(list(unique_nodes))
+
+        node_stats_buffer = {n: [] for n in G.nodes()}
+        node_stats_util = {n: [] for n in G.nodes()}
+
+        # 4. 计算并更新
+        for u, v, data in G.edges(data=True):
+            key = (u, v)
+            if key not in snapshot1 or key not in snapshot2:
+                continue
+
+            # --- A. 计算瞬时利用率 ---
+            b1 = snapshot1[key]['bytes']
+            b2 = snapshot2[key]['bytes']
+
+            # 速率 (Mbps)
+            speed_mbps = ((b2 - b1) * 8) / (delta_t * 1_000_000)
+
+            capacity = data.get('capacity', 30.0)
+            assert (capacity >= 10.0 and capacity <= 100.0)
+            util = min(speed_mbps / (capacity + 1e-6), 1.0)
+
+            # 写入图
+            # 更新 (平滑一点)
+
+            data['utilization'] = 0.3 * data.get('utilization',
+                                                 util) + 0.7 * util
+            data['measured_speed'] = speed_mbps
+
+            # --- B. 获取瞬时队列 (Buffer) ---
+            # 队列长度只需要读一次（取最新状态）
+            node = snapshot2[key]['node']
+            intf_name = snapshot2[key]['intf']
+
+            q_len = 0
+            if node.name in batch_q_stats and intf_name in batch_q_stats[
+                    node.name]:
+                q_len = batch_q_stats[node.name][intf_name]
+
+            max_q = 2000  # 假设最大队列长度为 2000 packets
+            buf_occ = min(q_len / max_q, 1.0)
+            if u in node_stats_buffer:
+                node_stats_buffer[u].append(buf_occ)
+                node_stats_util[u].append(util)
+
+        # 写入节点特征 (源节点 Buffer)
+        # 更新源节点 u 的状态
+        for n in G.nodes():
+            # --- 聚合 Buffer (取最大值) ---
+            # 含义：如果有一个方向堵了，这个节点就标红
+            buffer_list = node_stats_buffer[n]
+            if buffer_list:
+                max_buffer = max(buffer_list)
+            else:
+                max_buffer = 0.0
+
+            util_list = node_stats_util[n]
+            if util_list:
+                max_util = max(util_list)
+            else:
+                max_util = 0.0
+
+            # 简单估算 Proc Delay
+            proc_delay = 0.01 * (1 + 5 * max_util**2)  # 拥塞时 CPU 处理变慢
+
+            G.nodes[n]['buffer_occupancy'] = 0.3 * G.nodes[n].get(
+                'buffer_occupancy', 0) + 0.7 * max_buffer
+            G.nodes[n]['proc_delay'] = 0.3 * G.nodes[n].get(
+                'proc_delay', 0) + 0.7 * proc_delay
+
+        return G
+</file>
+
+<file path="src/multi_service/env/network_generator.py">
+import pickle
+import networkx as nx
+import random
+import torch
+import os
+import math
+from torch_geometric.data import Data
+from loguru import logger
+
+class TopologyGenerator:
+    def __init__(self) -> None:
+        self.G = None
+        pass
+
+  # [Insert into src/env/network_generator.py inside TopologyGenerator class]
+
+    def generate_topology(self, mode='random', min_nodes=10, max_nodes=20) -> nx.Graph:
+        """
+        生成拓扑的统一入口。
+        
+        Args:
+        mode (str): 'random' (随机生成) 或 'fixed' (返回固定的 NSFNet)
+        min_nodes (int): 随机生成的最小节点数
+        max_nodes (int): 随机生成的最大节点数
+        """
+        if mode == 'fixed':
+            # 如果还没有加载过固定图，就加载一次
+            if not hasattr(self, 'G') or self.G is None:
+                # 假设 config 里有 graph_path，或者硬编码默认路径
+                default_path = "nsfnet.graphml" 
+                self.load_topology(default_path)
+      
+            # 返回固定图的深拷贝，防止数据污染
+            assert self.G is not None, "Fixed graph is not loaded"
+            G = self.G.copy()
+            # 刷新一下动态状态 (拥塞程度)
+            return self.refresh_dynamic_state(G, difficulty=0.5)
+
+        else:
+            # === 随机生成模式 (推荐预训练使用) ===
+            # 随机决定节点数量
+            n = random.randint(min_nodes, max_nodes)
+            
+            # 生成骨架
+            G = self._create_random_graph(n)
+            
+            # 计算中心性指标 (Betweenness, PageRank...)
+            G = self.update_graph_metric(G)
+            
+            # 初始化动态状态 (赋予随机的拥塞)
+            G = self.refresh_dynamic_state(G, difficulty=random.random())
+
+            self.G = G
+            
+            return G
+
+    def _create_random_graph(self, n_nodes) -> nx.Graph:
+        """
+        [内部方法] 使用 Barabási-Albert 模型生成无标度网络。
+        并初始化物理链路属性 (Bandwidth, Delay)。
+        """
+        # 1. 生成连通图骨架
+        # m=2 表示每个新加入的节点会连接 2 个旧节点 (保证稀疏性但连通)
+        while True:
+            G = nx.barabasi_albert_graph(n_nodes, m=2)
+            if nx.is_connected(G):
+                break
+
+        # 2. 初始化物理属性
+        for u, v in G.edges():
+            cap = random.choice([20.0, 40.0, 50.0, 100.0])
+            
+            # 1ms ~ 10ms 之间
+            delay = random.uniform(1.0, 10.0)
+            
+            # 写入属性 (注意: 必须与 refresh_dynamic_state 兼容)
+            G[u][v]['loss'] = 0.0         # 初始无丢包
+            G[u][v]['delay'] = delay      # 基础传播延迟 (refresh 时会加上排队延迟)
+            G[u][v]['capacity'] = cap     # 物理容量 (不变)
+            G[u][v]['bandwidth'] = cap    # 初始可用带宽 = 容量
+            G[u][v]['utilization'] = 0.0  # 初始空闲
+            G[u][v]['base_delay'] = delay # 备份基础延迟
+        
+        # 3. 初始化节点属性
+        for n in G.nodes():
+            G.nodes[n]['buffer_occupancy'] = 0.0
+            G.nodes[n]['proc_delay'] = 0.0
+
+        return G
+  
+    def load_topology(self, filename: str) -> nx.Graph:
+        """
+        加载固定的 GraphML 文件 (NSFNet)，并初始化 RL 环境所需的动态属性。
+        自动搜索路径：当前目录 -> TopoGraph/ 目录
+        """
+
+        #  传完整路径 "TopoGraph/nsfnet.graphml"
+        if os.path.exists(filename):
+            loadpath = filename
+        else:
+            raise FileNotFoundError(f"[Error] Load Topology: file not found: {filename} (Checked root and TopoGraph/)")
+
+        # --- 2. 加载文件 (使用找到的 loadpath) ---
+        if loadpath.endswith('.graphml'):
+            # node_type=int: 尝试将节点 ID 转为整数 (NSFNet graphml 中 id="0")
+            try:
+                G = nx.read_graphml(loadpath, node_type=int)
+            except Exception as e:
+                logger.error(f"Load Topology: {e}, trying default loader...")
+                G = nx.read_graphml(loadpath) # Fallback to default loader
+
+            # [关键] 强制转换节点 Label 为连续整数 (0, 1, 2...)
+            # 确保兼容 Mininet 的 h0, h1 命名规则
+            G = nx.convert_node_labels_to_integers(G, ordering='sorted')
+        
+        elif loadpath.endswith('.pkl'):
+            with open(loadpath, 'rb') as f:
+                G = pickle.load(f)
+        else:
+            raise ValueError(f"Unsupported format: {loadpath}")
+
+        # --- 3. 初始化动态属性 ---
+        # self.scale_topology_bandwidth(G, scale=0.1)  # 默认不缩放
+        self.G = self.update_graph_metric(G)
+        logger.info(f"Loaded Fixed Topo: {loadpath} | Nodes: {len(G.nodes())}")
+
+        return G
+  
+    def update_graph_metric(self, G):
+        """ 
+        手动计算图的中心性指标，并更新到 NetworkX 节点属性中。 
+        这样 vprint 函数才能读到非零值。 
+        """ 
+        # 1. 计算介数中心性 (Betweenness Centrality) 
+        # weight='delay' 表示计算基于延迟的最短路介数，比默认的跳数更准 
+        bet_dict = nx.betweenness_centrality(G, weight='delay', normalized=True)
+        
+        # 2. 计算 PageRank
+        try:
+            pr_dict = nx.pagerank(G, weight='bandwidth')
+        except:
+            # 某些图如果不连通可能会报错，给个兜底
+            pr_dict = {n: 0.0 for n in G.nodes()}
+
+        # 3. 计算聚类系数
+        clust_dict = nx.clustering(G)
+        
+        assert isinstance(clust_dict, dict), "clust_dict is not a dict"
+
+        # 4. 赋值回图节点
+        for n in G.nodes():
+            G.nodes[n]['pagerank'] = pr_dict.get(n, 0.0)
+            G.nodes[n]['betweenness'] = bet_dict.get(n, 0.0)
+            G.nodes[n]['clustering'] = clust_dict.get(n, 0.0)
+        
+        return G
+  
+    def scale_topology_bandwidth(self, G: nx.Graph, scale: float):
+        """
+        等比例缩放图中所有边的带宽。
+
+        Args:
+        G (nx.Graph): NetworkX 图对象 (会被原地修改)
+        scale (float): 缩放比例 (例如 1.5 代表增加 50%，0.8 代表减少 20%)
+
+        Returns:
+        nx.Graph: 修改后的图对象
+        """
+        # 遍历图中所有的边
+        # data=True 表示我们会获取边的属性字典
+        for u, v, data in G.edges(data=True):
+
+            # 检查这条边是否有带宽属性
+            # 获取旧带宽
+            old_bw = data['bandwidth']
+            # 计算新带宽
+            new_bw = old_bw * scale
+            # 更新属性
+            data['capacity'] = new_bw
+            data['bandwidth'] = new_bw
+
+        # vprint(f"[Graph] 已将拓扑带宽缩放 {scale} 倍 (Key: {bw_key})")
+        return G
+
+    def refresh_dynamic_state(self, G, difficulty=1.0):
+        """
+        [核心逻辑] 模拟网络动态变化
+        1. 随机生成背景流量 (Utilization)
+        2. 基于 M/M/1 模型推导 Delay 和 Loss
+        """
+        for u, v in G.edges():
+
+            for u, v in G.edges():
+                if difficulty < 0.3:
+                    # [简单模式] 几乎无拥塞，Agent 只需要学会连通性
+                    utilization = random.uniform(0.0, 0.1)
+                elif difficulty < 0.7:
+                    # [中等模式] 偶尔有拥塞
+                    utilization = random.uniform(0.2, 0.5)
+                else:
+                    # [困难模式] 真实的 Beta 分布，包含严重拥塞
+                    utilization = random.betavariate(2, 5)
+                
+            G[u][v]['utilization'] = utilization
+            # 获取物理属性
+            capacity = float(G[u][v].get('capacity', 100.0)) # Mbps
+            base_delay = float(G[u][v].get('delay', 5.0))    # ms (物理传播延迟)
+            
+            # 2. M/M/1 推导排队延迟 (Queueing Delay)
+            # Delay_total = Delay_prop + Delay_queue
+            # Delay_queue = (1 / (µ - λ)) - (1/µ)  => 简化为  Base / (1 - rho)
+            # 为了防止除以0，rho 上限设为 0.99
+            rho = min(utilization, 0.99)
+            
+            # 估算排队因子 (Scaling Factor)
+            # 假设当利用率 0% 时，延迟 = base_delay
+            # 当利用率 90% 时，延迟会显著增加
+            # 这里使用一个简化的排队公式:
+            queue_delay = (10.0 * rho) / (1.0 - rho) # 10.0 是排队系数
+            
+            total_delay = base_delay + queue_delay
+            
+            # 3. M/M/1/K 推导丢包率 (Packet Loss)
+            # 假设队列长度有限 (K)，根据利用率估算丢包概率
+            # 当利用率低时，丢包几乎为0；利用率接近1时，丢包指数上升
+            if rho < 0.8:
+                    loss = 0.0
+            else:
+                    loss = 1.0 * math.pow((rho - 0.8) / 0.2, 2)
+                
+            # 更新图属性 (供 Agent 观测)
+            G[u][v]['delay'] = total_delay
+            G[u][v]['loss' ] = loss
+            
+            # 更新带宽 (剩余带宽)
+            # available_bw = capacity * (1 - rho)
+            G[u][v]['bandwidth'] = capacity * (1.0 - rho)
+
+        return G
+
+    def select_source_destination(self) -> tuple[int, int]:
+        """随机选择不重复的源和目的节点。"""
+        if self.G is None:
+            raise ValueError("Topology must be generated first.")
+            
+        nodes = list(self.G.nodes())
+        
+        # 确保源和目的一定是连通的
+        while True:
+            s, d = random.sample(nodes, 2)
+            if nx.has_path(self.G, s, d):
+                return s, d
+</file>
+
+<file path="src/multi_service/models/encoders.py">
+from networkx import config
+from omegaconf import DictConfig, ListConfig
+import torch
+import torch.nn as nn
+from torch_geometric.nn import GATv2Conv
+import torch.nn.functional as F
+
+class FilmGenerator(nn.Module):
+    """
+    [模块1] 意图生成器
+    输入: 流量指纹 (Sequence)
+    输出: GNN 的调制参数 (Gamma, Beta)
+    """
+
+    def __init__(self, fingerprint_dim, hidden_dim, gnn_layers, dropout=0.1):
+        super().__init__()
+        self.lstm = nn.LSTM(fingerprint_dim, hidden_dim, batch_first=True)
+        
+        # Dropout
+        self.dropout = nn.Dropout(dropout)
+
+        # 输出层生成所有 GNN 层的 Gamma 和 Beta
+        # 每一层需要 2 个参数向量 (gamma, beta)，共 gnn_layers 层
+        self.head = nn.Linear(hidden_dim, hidden_dim * 2 * gnn_layers)
+        
+        # 初始化为 Identity (Gamma=1, Beta=0)
+        self._init_weights()
+
+    def _init_weights(self):
+        # 将 head 的权重和偏置设为极小值/零，使得初始输出接近 0
+        nn.init.constant_(self.head.weight, 0.0)
+        nn.init.constant_(self.head.bias, 0.0)
+
+    def forward(self, fingerprint):
+        """
+        forward 的 Docstring
+        
+        :param fingerprint: 流量指纹 (Batch, Seq_Len, fingerprint_dim)
+        :return: GNN FiLM 调制参数 (Batch, gnn_layers * 2 * hidden_dim)
+        """
+    
+        # fingerprint: (Batch, Seq_Len, 2)
+        _, (h_n, _) = self.lstm(fingerprint)
+        # h_n: (1, Batch, Hidden) -> (Batch, Hidden)
+        intent = h_n.squeeze(0)
+        
+        # Apply Dropout
+        intent = self.dropout(intent)
+
+        # 生成参数 (Batch, Layers * 2 * Hidden)
+        params = self.head(intent)
+        # 由于初始化为0，这里 +1.0 让 Gamma 初始为 1
+        # Split 逻辑: [Layer1_Gamma, Layer1_Beta, Layer2_Gamma, ...]
+        return params
+
+class FilmGNN(nn.Module):
+    """
+    [模块2] 全局感知骨干
+    融合: 节点特征 + 边特征 + FiLM 调制
+    """
+    def __init__(self, node_dim, edge_dim, hidden_dim, gnn_layers, gnn_heads, dropout=0.1):
+            """
+            __init__ 的 Docstring
+            
+            :param node_dim: 节点特征维度
+            :param edge_dim: 边特征维度
+            :param hidden_dim: GNN 隐藏层维度
+            :param gnn_layers: GNN 层数
+            :param gnn_heads: 多头注意力头数
+            :param dropout: Dropout 率
+            """
+            super().__init__()
+            self.num_layers = gnn_layers
+            self.hidden_dim = hidden_dim
+
+            # 初始编码
+            self.node_encoder = nn.Linear(node_dim, hidden_dim)
+            self.edge_encoder = nn.Linear(edge_dim, edge_dim) # 边特征维度通常较小，可先升维或保持
+            
+            # GAT 层列表
+            self.convs = nn.ModuleList()
+            self.norms = nn.ModuleList()
+            self.dropout = nn.Dropout(dropout)
+            
+            for _ in range(self.num_layers):
+                # edge_dim 参数开启边特征融合
+                self.convs.append(GATv2Conv(hidden_dim, hidden_dim, edge_dim=edge_dim, heads=gnn_heads, concat=False, dropout=dropout))
+                self.norms.append(nn.LayerNorm(hidden_dim))
+
+    def forward(self, x, edge_index, edge_attr, film_params, batch_vector=None):
+        
+        x = self.node_encoder(x)
+        edge_attr = self.edge_encoder(edge_attr)
+        
+        # 2. 确保 view 的维度包含 Batch Size
+        batch_size = film_params.size(0)
+        params = film_params.view(batch_size, self.num_layers, 2, self.hidden_dim)
+        
+        for i in range(self.num_layers):
+            x_in = x
+            x = self.convs[i](x, edge_index, edge_attr=edge_attr)
+            x = self.norms[i](x)
+            
+            # 3. 取出第 i 层的参数 (Batch, Hidden)
+            layer_params = params[:, i, :, :] 
+            gamma = layer_params[:, 0, :] + 1.0 
+            beta = layer_params[:, 1, :]        
+            
+            # ================= [标准解法核心] =================
+            if batch_vector is not None:
+                # 利用 batch_vector (N,) 从 gamma (B, H) 中查表
+                # 结果变为 (N, H)，与节点数量一一对应
+                gamma_expanded = gamma[batch_vector] 
+                beta_expanded = beta[batch_vector]
+                x = x * gamma_expanded + beta_expanded
+            else:
+                # 兼容单图推理的情况 (batch_size=1)
+                x = x * gamma + beta
+            # ==================================================
+
+            x = F.relu(x)
+            x = self.dropout(x)
+            x = x + x_in 
+            
+        return x
+</file>
+
+<file path="src/multi_service/trainers/__init__.py">
+from .ppo_trainer import PPOTrainer
+</file>
+
+<file path="src/multi_service/utils/__init__.py">
+from .config_loadder import load_yaml_config, AttrDict
+from .networkx_watcher import get_graph_data
+
+from .ppo_memory import PPOMemory
+from .sdn_paraser import SdnParaser
+from .math_utils import compute_advantages
+from .fingerprint_manager import BankTrafficManager
+from .create_unique_log_dir import create_unique_log_dir
+from .routing_kernels import RoutingKernels
+from .checkpoint_manager import CheckpointManager
+</file>
+
+<file path="src/multi_service/utils/checkpoint_manager.py">
+import os
+import glob
+import re
+import json
+import subprocess
+import torch
+import tempfile
+
+from loguru import logger
+from typing import Optional, List, Dict, Any, Union
+from pathlib import Path
+from datetime import datetime
+
+# 假设 logger 已定义
+
+class CheckpointManager:
+    def __init__(self, checkpoint_dir: str, keep_count: int = 3, save_optimizer: bool = True):
+        self.checkpoint_dir = Path(checkpoint_dir)
+        self.keep_count = keep_count
+        self.save_optimizer = save_optimizer
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        # 维护一个 history 文件来避免加载大模型文件查找 best
+        self.history_file = self.checkpoint_dir / "history.json"
+        self._history = self._load_history()
+
+    def _load_history(self) -> List[Dict]:
+        if self.history_file.exists():
+            try:
+                with open(self.history_file, 'r') as f:
+                    return json.load(f)
+            except:
+                return []
+        return []
+
+    def _save_history(self) -> None:
+        with open(self.history_file, 'w') as f:
+            json.dump(self._history, f, indent=2)
+
+    @staticmethod
+    def get_git_commit_hash():
+        try:
+            return subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode('ascii').strip()
+        except Exception:
+            return "unknown"
+
+    def save(
+        self, 
+        model: torch.nn.Module, 
+        epoch: int | None = None, 
+        save_file: str | None = None,
+        metrics: Dict[str, float]| None = None, 
+        optimizer: torch.optim.Optimizer | None = None,
+        scheduler: torch.optim.lr_scheduler._LRScheduler | None = None,
+        **kwargs) -> str:
+        """
+        保存模型检查点，包含模型状态、优化器状态、学习率调度器状态、指标和 Git 提交哈希。
+        
+        参数:
+            model: 要保存的模型实例
+            epoch: 当前训练轮次（整数）
+            metrics: 训练指标字典（可选）
+            optimizer: 优化器实例（可选）
+            scheduler: 学习率调度器实例（可选）
+            **kwargs: 其他自定义字段（会被保存但不影响加载）
+            
+        返回:
+            检查点文件路径（字符串）
+        """
+        # --- 前置检查 (Pre-checks) ---
+        
+        # 1. 检查模型是否为空
+        if model is None:
+            raise ValueError("Cannot save checkpoint: 'model' is None.")
+            
+        # 2. 检查 Epoch 格式（防止传入 'last' 这种字符串导致后续排序崩溃）
+        # 只有当 save_file 未提供时，才严格检查 epoch
+        if save_file is None and (not isinstance(epoch, int) or epoch < 0):
+            raise ValueError(f"Epoch must be a non-negative integer, got {epoch} (type: {type(epoch)})")
+            
+        # 3. 检查保存目录是否存在（防止训练途中被人手滑删了文件夹）
+        # 如果不存在，这里可以做一个"自愈"操作，自动重建
+        if not self.checkpoint_dir.exists():
+            logger.warning(f"Checkpoint directory {self.checkpoint_dir} was missing. Re-creating it.")
+            self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+        # 4. 检查 Metrics 格式
+        if metrics is not None and not isinstance(metrics, dict):
+            logger.warning("'metrics' is not a dictionary. It might cause issues in history tracking.")
+            # 这里可以选择报错，也可以选择只是警告，看你对严谨性的要求
+
+        assert epoch is not None or save_file is not None, "Either epoch or save_file must be provided."
+
+        if epoch is not None:
+            filename = f"checkpoint_epoch_{epoch:06d}.pth"
+        
+        if save_file is not None:
+            checkpoint_path = self.checkpoint_dir / save_file
+        else :
+            checkpoint_path = self.checkpoint_dir / filename
+        
+        # 构造数据
+        checkpoint_data = {
+            'epoch': epoch,
+            'metrics': metrics,
+            'model_state_dict': model.state_dict(),
+
+            'optimizer_state_dict': optimizer.state_dict() if optimizer else None,
+            'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
+
+            'git_commit': self.get_git_commit_hash(),
+        }
+        
+        # 1. 原子化写入：先写临时文件，再 rename
+        try:
+            tmp_path = checkpoint_path.with_suffix('.tmp')
+            torch.save(checkpoint_data, tmp_path)
+            tmp_path.rename(checkpoint_path) # 原子操作，防止损坏
+            
+            # 2. 更新 history
+            self._history.append({
+                'epoch': epoch,
+                'path': str(checkpoint_path),
+                'metrics': metrics or {},
+                'timestamp': datetime.now().isoformat()
+            })
+            self._save_history()
+            
+            # 3. 清理旧权重 (基于 Epoch 排序，而非时间)
+            self._cleanup_old_checkpoints()
+            
+            return str(checkpoint_path)
+        except Exception as e:
+            logger.error(f"Error saving checkpoint: {e}")
+            raise e
+
+    def get_best_checkpoint(self, metric_key: str = 'reward', higher_is_better: bool = True) -> Optional[str]:
+        """
+        获取历史记录中最佳检查点路径，基于指定指标排序。
+        
+        参数:
+            metric_key: 要排序的指标键名（默认 'reward'）
+            higher_is_better: 是否指标值越高越好（默认 True）
+            
+        返回:
+            最佳检查点路径（字符串）或 None（如果没有记录或指标不存在）
+        """
+        if not self._history:
+            return None
+            
+        # 过滤掉没有该指标的记录
+        valid_records = [r for r in self._history if r.get('metrics') and metric_key in r['metrics']]
+        if not valid_records:
+            return None
+            
+        # 排序查找
+        sorted_records = sorted(
+            valid_records, 
+            key=lambda x: x['metrics'][metric_key], 
+            reverse=higher_is_better
+        )
+        best_record = sorted_records[0]
+        
+        # 验证文件是否存在
+        if os.path.exists(best_record['path']):
+            return best_record['path']
+        return None
+
+    def get_latest_checkpoint(self) -> str | None:
+        """
+        获取最新的 checkpoint 路径，基于 Epoch 排序。
+        
+        返回:
+            最新检查点路径（字符串）或 None（如果没有记录）
+        """
+        if not self._history:
+            return None
+            
+        # 按 epoch 从大到小排序
+        sorted_records = sorted(
+            self._history, 
+            key=lambda x: x['epoch'], 
+            reverse=True
+        )
+        latest_record = sorted_records[0]
+        
+        # 验证文件是否存在
+        if os.path.exists(latest_record['path']):
+            return latest_record['path']
+        return None
+    
+    def _cleanup_old_checkpoints(self) -> None:
+        # 基于文件名中的 epoch 数字解析，比 getmtime 更可靠
+        files = list(self.checkpoint_dir.glob("*_epoch_*.pth"))
+        
+        def parse_epoch(p: Path):
+            # 提取 000123
+            match = re.search(r'epoch_(\d+)', p.name)
+            return int(match.group(1)) if match else -1
+
+        # 按 epoch 从小到大排序
+        files.sort(key=parse_epoch)
+        
+        if len(files) > self.keep_count:
+            files_to_delete = files[:-self.keep_count]
+            for f in files_to_delete:
+                try:
+                    f.unlink() # Pathlib 的删除方法
+                    # 同步从 history 中移除
+                    self._history = [h for h in self._history if h['path'] != str(f)]
+                except Exception:
+                    pass
+            self._save_history()
+
+    def load(
+        self,
+        model: torch.nn.Module,
+        checkpoint_path: str | None = None,
+        optimizer: torch.optim.Optimizer | None = None,
+        scheduler: torch.optim.lr_scheduler._LRScheduler | None = None,
+        normalizer: Any | None = None,  # 新增：RL 专用的 RunningMeanStd 归一化器
+        device: str | torch.device = 'cpu',
+        strict: bool = True
+    ) -> Dict[str, Any]:
+        """
+        全能加载函数：支持断点续训和推理评估
+        
+        Args:
+            model: 模型实例 (必须)
+            checkpoint_path: 指定路径。如果为 None，自动查找最新的。
+            optimizer: 优化器。续训时必须传，推理时为 None。
+            scheduler: 学习率调度器。续训时建议传。
+            normalizer: RL 的状态归一化器 (RunningMeanStd)。RL 必须传！
+            device: 'cpu' 或 'cuda:0'。自动处理跨设备加载。
+            strict: 是否严格匹配模型键值 (微调时可设为 False)。
+            
+        Returns:
+            info_dict: 包含 'start_epoch', 'global_step', 'config', 'metrics' 等信息的字典
+        """
+        # 1. 确定加载哪个文件
+        if checkpoint_path is None:
+            checkpoint_path = self.get_latest_checkpoint()
+            if checkpoint_path is None:
+                logger.warning("No checkpoint found to load.")
+                return {} # 返回空字典，由外部判断是否报错
+        
+        ckpt_path_obj = Path(checkpoint_path)
+        if not ckpt_path_obj.exists():
+            logger.error(f"Checkpoint file not found: {ckpt_path_obj}")
+            raise FileNotFoundError(f"Checkpoint file not found: {ckpt_path_obj}")
+
+        logger.info(f"Loading checkpoint from: {ckpt_path_obj} ...")
+
+        try:
+            # 2. 加载文件 (处理 map_location 防止 GPU/CPU 不匹配报错)
+            checkpoint_data = torch.load(ckpt_path_obj, map_location=device)
+
+            # 3. 加载模型权重 (Model)
+            # state_dict key 可能会有 'module.' 前缀 (如果你用了 DataParallel)，这里可以自动修剪
+            state_dict = checkpoint_data['model_state_dict']
+            # consume_prefix_in_state_dict_if_present(state_dict, "module.") # 如果需要兼容多卡
+
+            new_state_dict = {}
+            for k, v in state_dict.items():
+                # 将旧的 gnn. 前缀替换为新的 encoder. 前缀
+                if k.startswith('gnn.'):
+                    new_key = k.replace('gnn.', 'encoder.')
+                    new_state_dict[new_key] = v
+                else:
+                    new_state_dict[k] = v
+            model.load_state_dict(new_state_dict, strict=strict)
+            
+            # 4. 加载优化器 (Optimizer) - 仅当传入且存在时
+            if optimizer is not None:
+                if 'optimizer_state_dict' in checkpoint_data:
+                    optimizer.load_state_dict(checkpoint_data['optimizer_state_dict'])
+                else:
+                    logger.warning("Optimizer provided but missing in checkpoint.")
+                    
+            # 5. 加载调度器 (Scheduler)
+            if scheduler is not None:
+                if 'scheduler_state_dict' in checkpoint_data:
+                    scheduler.load_state_dict(checkpoint_data['scheduler_state_dict'])
+                else:
+                    logger.warning("Scheduler provided but missing in checkpoint.")  
+            
+            # 6. 加载 RL 归一化器 (Normalizer) - 关键！
+            if normalizer is not None:
+                # 兼容不同的命名习惯，尝试找 obs_normalizer 或 running_mean_std
+                if 'obs_normalizer' in checkpoint_data:
+                    normalizer.load_state_dict(checkpoint_data['obs_normalizer'])
+                elif 'obs_rms' in checkpoint_data: # 另一种常见的命名
+                    normalizer.load_state_dict(checkpoint_data['obs_rms'])
+                else:
+                    logger.warning("Normalizer provided but missing in checkpoint.")
+
+            # 7. 提取元数据用于恢复训练状态
+            loaded_epoch = checkpoint_data.get('epoch', -1)
+            loaded_epoch = -1 if loaded_epoch is None else loaded_epoch
+            info = {
+                'start_epoch': loaded_epoch + 1,  # 续训应该从下一轮开始
+                'global_step': checkpoint_data.get('global_step', 0),
+                'config': checkpoint_data.get('config', {}),
+                'metrics': checkpoint_data.get('metrics', {}),
+                'best_metric': checkpoint_data.get('best_metric', None), # 如果你有存这个
+                'checkpoint_path': str(ckpt_path_obj)
+            }
+            
+            logger.info(f"Successfully loaded. Resume from Epoch {info['start_epoch']}.")
+            return info
+
+        except Exception as e:
+            logger.error(f"Failed to load checkpoint: {e}")
+            raise e
+</file>
+
+<file path="src/multi_service/utils/config_loadder.py">
+import yaml
+import os
+import shutil
+from pathlib import Path
+from .create_unique_log_dir import create_unique_log_dir
+
+class AttrDict(dict):
+    """
+    一个简单的扩展类，允许通过 . 访问字典属性，并支持递归嵌套。
+    例如：config.QOS_REWARD_PARAMS.GAMING.max_delay
+    """
+    def __init__(self, *args, **kwargs):
+        super(AttrDict, self).__init__(*args, **kwargs)
+        for key, value in self.items():
+            if isinstance(value, dict):
+                self[key] = AttrDict(value)
+
+    def __getattr__(self, key: str):
+        try:
+            return self[key]
+        except KeyError:
+            raise AttributeError(f"Configuration has no attribute '{key}'")
+
+def load_yaml_config(yaml_path: str) -> AttrDict:
+    """
+    调用 YAML 文件的核心函数。
+    """
+    if not os.path.exists(yaml_path):
+        raise FileNotFoundError(f"Config file not found: {yaml_path}")
+
+    with open(yaml_path, 'r', encoding='utf-8') as f:
+        try:
+            config_dict = yaml.safe_load(f)
+            # 封装为对象形式返回 
+            config = AttrDict(config_dict)
+            if hasattr(config, 'path'):
+                if hasattr(config.path, 'output_dir'):
+                    debug_mode = config.get("debug_mode", False)
+                    if debug_mode:
+                        # In debug mode, redirect everything to /tmp to avoid cluttering the workspace
+                        base_tmp = f"workspace/tmp/{config.name.exp_name}_debug"
+                        config.path.output_dir = base_tmp
+                        config.path.log_dir = os.path.join(base_tmp, "logs/")
+                        config.path.ckpt_dir = os.path.join(base_tmp, "checkpoints/")
+                        config.path.eval_dir = os.path.join(base_tmp, "eval_results/")
+                        config.path.config_dir = os.path.join(base_tmp, "configs/")
+                        
+                        if os.path.exists(base_tmp):
+                            shutil.rmtree(base_tmp)
+
+                        os.makedirs(config.path.log_dir, exist_ok=True)
+                        os.makedirs(config.path.ckpt_dir, exist_ok=True)
+                        os.makedirs(config.path.eval_dir, exist_ok=True)
+                        os.makedirs(config.path.config_dir, exist_ok=True)
+                        try:
+                            os.chmod(base_tmp, 0o777)
+                        except OSError:
+                            pass
+
+                    elif not "eval" in config.name.exp_name:
+                        config.path.output_dir = create_unique_log_dir(config.path.output_dir, experiment_name=config.name.exp_name)
+                        config.path.log_dir = os.path.join(config.path.output_dir, "logs/")
+                        config.path.ckpt_dir = os.path.join(config.path.output_dir, "checkpoints/")
+                        config.path.eval_dir = os.path.join(config.path.output_dir, "eval_results/")
+                        config.path.config_dir = os.path.join(config.path.output_dir, "configs/")
+
+                        os.chmod(config.path.output_dir, mode=0o777)
+                        if hasattr(config.path, 'log_dir'):
+                            os.makedirs(config.path.log_dir , exist_ok=True)
+                            os.chmod(config.path.log_dir, mode=0o777)
+                        if hasattr(config.path, 'ckpt_dir'):
+                            os.makedirs(config.path.ckpt_dir, exist_ok=True)
+                            os.chmod(config.path.ckpt_dir, mode=0o777)
+                        if hasattr(config.path, 'eval_dir'):
+                            os.makedirs(config.path.eval_dir, exist_ok=True)
+                            os.chmod(config.path.eval_dir, mode=0o777)
+                        if hasattr(config.path, 'config_dir'):
+                            os.makedirs(config.path.config_dir, exist_ok=True)
+                            os.chmod(config.path.config_dir, mode=0o777)
+
+            # 延迟导入 save_configs 以避免循环导入
+            from .config_saver import save_configs
+            return config
+        except yaml.YAMLError as e:
+            print(f"Error parsing YAML file: {e}")
+            return None  # pyright: ignore[reportReturnType]
+</file>
+
+<file path="src/multi_service/utils/config_saver.py">
+import os
+from omegaconf import DictConfig
+import yaml
+
+from loguru import logger
+
+def save_configs(config: DictConfig):
+    # 1. 保存完整的训练配置 (Train Config)
+    train_cfg_path = os.path.join(config.path.config_dir, "train_eval.yaml")
+    eval_cfg_path = os.path.join(config.path.config_dir, "eval_config.yaml")
+
+    with open(train_cfg_path, 'w', encoding='utf-8') as f:
+        # 将 AttrDict 转回 dict 进行 dump 
+        yaml.dump(dict(config), f, indent=2, sort_keys=False, allow_unicode=True)
+    
+    # 2. 构造精简的评估配置 (Eval Config)
+    # 只挑选评估需要的核心参数，例如模型架构和环境归一化参数 
+
+    eval_dict = {
+        "model": dict(config.model),
+        "env": dict(config.env) if hasattr(config, "env") else None,
+        "path": {
+        "eval_output" : config.path.eval_dir,
+        "ckpt_dir": config.path.ckpt_dir
+        }
+    }
+    
+    with open(eval_cfg_path, 'w', encoding='utf-8') as f:
+        yaml.dump(eval_dict, f, indent=2, sort_keys=False, allow_unicode=True)
+    
+    logger.info(f"Configs saved to {config.path.config_dir}")
+</file>
+
+<file path="src/multi_service/utils/create_unique_log_dir.py">
+from datetime import datetime
+import os
+
+def create_unique_log_dir(base_log_path, experiment_name="Exp"):
+    """
+    在基础路径下创建一个带有时间戳的子文件夹
+    输入: workspace/logs, "PPO_Training"
+    输出: workspace/logs/20251219_143005_PPO_Training
+    """
+    # 1. 生成时间戳字符串 (年月日_时分秒)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # 2. 拼接完整的文件夹路径 
+    unique_dir_name = f"{timestamp}_{experiment_name}"
+    full_path = os.path.join(base_log_path, unique_dir_name)
+    
+    # 3. 物理创建文件夹
+    os.makedirs(full_path, exist_ok=True)
+    
+    return full_path
+</file>
+
+<file path="src/multi_service/env/qos/evaluator.py">
+import re
+import math
+import numpy as np
+from typing import Any
+from loguru import logger
+from omegaconf import DictConfig
+from ..flow_generator import FlowType, FLOW_PROFILES
+from ..e_model import (
+    FullG107Calculator, 
+    RigorousVideoEvaluator, 
+    RigorousLegacyFPSEvaluator)
+
+# [Global Instances - Stateful/Stateless managers]
+voip_calc = FullG107Calculator()
+video_calc = RigorousVideoEvaluator(target_bitrate_kbps=5000) # 1080p Video
+fps_game_calc = RigorousLegacyFPSEvaluator() # CSa
+
+def parse_ditg_output(output_str: str) -> tuple[dict[str, Any], bool]:
+    """
+    解析 ITGDec 的标准输出文本，提取关键 QoS 指标。
+    处理包括正常数值和异常值 (如 nan) 的情况。
+    """
+
+    metrics = {
+        'delay': 0.0,      # 单位: ms
+        'jitter': 0.0,     # 单位: ms
+        'bandwidth': 0.0,  # 单位: Mbps
+        'loss_rate': 1.0}  # 范围: 0.0 - 1.0 (默认为1.0即全丢，防止无数据时误判为满分)
+  
+    no_packet_arrive = False
+  
+    if not output_str:
+        logger.debug("can't catch output str -- the str is None")
+        return metrics, True
+
+    logger.debug("parsing ditg output ...")
+    # logger.log(output_str)
+    try:
+        # --- 1. 提取平均延迟 (Average delay) ---
+        # 示例行: Average delay            =     0.000234 s
+        delay_match = re.search(r"Average delay\s+=\s+([-\d\.nan]+)\s+s", output_str)
+        if delay_match:
+            val = delay_match.group(1)
+            if 'nan' not in val.lower(): # 过滤掉 -nan
+                metrics['delay'] = float(val) * 1000.0 # 秒 -> 毫秒
+        else:
+            logger.debug("no delay found")
+            logger.debug(f"原始输出片段:\n{output_str[:200]}") # 调试用
+    
+        jitter_match = re.search(r"Average jitter\s+=\s+([-\d\.nan]+)\s+s", output_str)
+        if jitter_match:
+            val = jitter_match.group(1)
+            if 'nan' not in val.lower():
+                metrics['jitter'] = float(val) * 1000.0 # 秒 -> 毫秒
+        else:
+            logger.debug("no jitter found")
+            # logger.debug(f"原始输出片段:\n{output_str[:200]}") # 调试用
+
+        # --- 3. 提取吞吐量 (Average bitrate) ---
+        # 示例行: Average bitrate          =  4096.000000 Kbit/s
+        bitrate_match = re.search(r"Average bitrate\s+=\s+([-\d\.nan]+)\s+Kbit/s", output_str)
+        if bitrate_match:
+            val = bitrate_match.group(1)
+            if 'nan' not in val.lower():
+                metrics['bandwidth'] = float(val) / 1000.0 # Kbit/s -> Mbps
+        else:
+            logger.debug("no bitrate found")
+            # logger.debug(f"原始输出片段:\n{output_str[:200]}") # 调试用
+
+        # --- 4. 提取丢包率 (Packets dropped) ---
+        # 示例行: Packets dropped          =            5 (0.50 %)
+        # 注意：如果没有发包成功，分母为0可能导致 nan，或者 dropped 为 0 但 total 也为 0
+        loss_match = re.search(r"Packets dropped\s+=\s+\d+\s+\(([-\d\.nan]+)\s+%\)", output_str)
+        if loss_match:
+            val = loss_match.group(1)
+            if 'nan' not in val.lower():
+                metrics['loss_rate'] = float(val)/100.0
+        else: 
+            logger.debug("no loss found")
+            # logger.debug(f"原始输出片段:\n{output_str[:200]}") # 调试用
+
+        # 如果总包数 (Total packets) 为 0，说明完全没通，强制设置最差指标
+        total_pkts_match = re.search(r"Total packets\s+=\s+(\d+)", output_str)
+        if total_pkts_match and int(total_pkts_match.group(1)) == 0:
+            no_packet_arrive = True
+            metrics['loss_rate'] = 1.0
+            metrics['bandwidth'] = 0.0
+
+    except Exception as e:
+        logger.debug(f"解析 D-ITG 输出时出错: {e}")
+        logger.debug(f"原始输出片段:\n{output_str[:200]}") # 调试用
+
+    return metrics, no_packet_arrive
+
+def calculate_qoe_reward(qos_metrics: dict, flow_profile: dict) -> float:
+    """
+    Enhanced QoE Reward Calculation with Gradient Shaping.
+  
+    Logic:
+    1. Base: ITU-T E-model MOS (1.0 - 4.5).
+    2. Shaping: Add small bonuses for lower delay/higher BW even if MOS is maxed out.
+    3. Normalize: Map to [-1.0, 1.0].
+    """
+    # 1. 解析 QoS 数据
+    d = qos_metrics.get('delay', 1.0)       # ms
+    j = qos_metrics.get('jitter', 0.1)      # ms
+    l = qos_metrics.get('loss_rate', 0.0) * 100.0 # Convert to % (0-100)
+    b = qos_metrics.get('bandwidth', 0.0) * 1000.0 # Convert to kbps
+  
+    # 2. 识别业务类型
+
+    f_type_enum = flow_profile.get('type') 
+
+    assert f_type_enum is not None, "flow type is None"
+
+    f_type = f_type_enum.name.lower() if hasattr(f_type_enum, 'name') else str(f_type_enum).lower()
+
+    mos = 1.0
+    shaping_bonus = 0.0
+  
+    # 3. 计算 Base MOS 和 Shaping Bonus
+    if 'voip' in f_type:
+        # --- VoIP Logic ---
+        # Base: ITU G.107 (假设 voip_calc 已实现)
+        mos = voip_calc.calculate_mos(delay_ms=d, loss_pct=l, jitter_ms=j)
+    
+        # Shaping: 鼓励延迟 < 150ms。每降低 10ms，奖励增加约 0.003
+        # 范围: [0.0, 0.05]
+        if mos > 4.0: # 只有体验良好时才谈优化
+            shaping_bonus = 0.05 * (1.0 - min(d, 150.0) / 150.0)
+
+    elif 'streaming' in f_type:
+        # --- Video Logic ---
+        # Base: ITU P.1203 简化版
+        mos = video_calc.calculate_mos(
+            loss_pct=l, rtt_ms=d*2, physical_bw_kbps=b, 
+            duration_sec=6.0, stateless_mode=True
+        )
+    
+        # Shaping: 鼓励带宽冗余。
+        # 假设 1080p 需要 5000kbps，如果能提供 8000kbps，给一点奖励作为缓冲安全区
+        target_bw = 5000.0 
+        if mos > 4.0 and b > target_bw:
+            # 范围: [0.0, 0.05]
+            # Log函数让收益边际递减，避免Agent为了无限带宽而绕远路
+            shaping_bonus = 0.05 * np.tanh((b - target_bw) / 2000.0)
+
+    elif 'gaming' in f_type:
+        # --- Gaming Logic ---
+        # Base: 针对 FPS 优化的模型
+        mos = fps_game_calc.calculate_mos(delay_ms=d, loss_pct=l, jitter_ms=j)
+    
+        # Shaping: Gaming 对延迟极度敏感，给予更高的引导权重
+        # 范围: [0.0, 0.1]
+        # 强迫 Agent 区分 20ms 和 5ms
+        if mos > 3.5:
+            shaping_bonus = 0.1 * (1.0 - min(d, 50.0) / 50.0)
+
+    # 4. 归一化 Reward (Normalization)
+    # 原始 MOS: 1.0 (Bad) ~ 4.5 (Excellent)
+    # 目标区间: -1.0 ~ 1.0
+  
+    # 先把 MOS 线性映射到 [-1.0, 0.9] (留 0.1 给 Bonus)
+    # (MOS - 1.0) / 3.5 * 1.9 - 1.0 
+    # 简化版: (MOS - 3.0) / 1.5 范围约为 [-1.33, 1.0]
+  
+    # 我们使用更保守的映射，确保加上 Bonus 后不超过 1.0
+    normalized_base = (mos - 1.0) / 3.5 # 映射到 [0, 1]
+    reward = (normalized_base * 2) - 1 # 映射到 [-1, 1]
+  
+    # 5. 叠加 Bonus
+    final_reward = reward + shaping_bonus
+  
+    # 6. 悬崖惩罚 (Cliff Penalty) & 边界截断
+    # 如果 MOS 太低，说明完全不可用，直接给 -1.0，忽略任何带宽优势
+    if mos < 1.5:
+        return -1.0
+      
+    # 确保数值稳定，截断在 [-1.0, 1.0]
+    return float(np.clip(final_reward, -1.0, 1.0))
+
+def calculate_qos_reward(delay_ms: float, loss_percent: float, jitter_ms: float, flow_type_str: str, config: DictConfig) -> float:
+    qos_reward_info = config.qos_reward
+    loss_normalized = loss_percent
+    min_path_delay = qos_reward_info[flow_type_str.upper()]['min_path_delay']
+    max_path_delay = qos_reward_info[flow_type_str.upper()]['max_path_delay']
+    delay_normalized = min(max((delay_ms - min_path_delay) / (max_path_delay - min_path_delay), 0.0), 1.0)
+    min_path_jitter = qos_reward_info[flow_type_str.upper()]['min_path_jitter']
+    max_path_jitter = qos_reward_info[flow_type_str.upper()]['max_path_jitter']
+    jitter_normalized = min(max((jitter_ms - min_path_jitter) / (max_path_jitter - min_path_jitter), 0.0), 1.0)
+    
+    
+    weight = qos_reward_info[flow_type_str.upper()]['w']
+
+    qos_reward = 5 - (
+        weight[0] * delay_normalized +
+        weight[1] * jitter_normalized +
+        weight[2] * loss_normalized 
+    ) 
+
+    # qos reward in range [-sum_w, sum_w]
+    qos_reward = qos_reward/2.5-1
+    return qos_reward
+</file>
+
+<file path="src/multi_service/env/traffic/ditg_driver.py">
+import os
+import subprocess
+import shlex
+import signal
+import uuid
+import torch
+from time import sleep
+from typing import Optional
+from loguru import logger
+from ..flow_generator import FlowType, FLOW_PROFILES
+from ..qos.evaluator import parse_ditg_output, calculate_qoe_reward, calculate_qos_reward
+
+# 根据流类型，返回不同的 D-ITG 命令。
+def get_flow_command(
+    flow_type: FlowType, 
+    target_ip: str, 
+    duration_sec: int, 
+    sig_port: int = 15000,
+    log_file: str | None = None,
+    **kwargs
+    ) -> str:
+    """
+    Generates a high-priority D-ITG command string.
+    Supports both TCP (Streaming) and UDP (VoIP/Gaming).
+    """
+    # Map friendly names to FlowType Enum or dict keys
+    # Assuming FLOW_PROFILES is a global dict defined elsewhere
+    profile = FLOW_PROFILES.get(flow_type) 
+  
+    assert profile is not None, f"FlowType {flow_type} not found in FLOW_PROFILES"
+    protocol = profile['protocol'] # 'UDP' or 'TCP'
+
+    assert protocol in ['UDP', 'TCP'], f"Invalid protocol: {protocol}"
+    duration_ms = int(duration_sec * 1000)
+  
+    # Log file argument
+    log_str = f"-x {log_file}" if log_file else ""
+    flow_tos = 32
+    # 1. Base ITGSend Arguments
+    # -a: Target IP
+    # -rp: Remote Port (Must match server!)
+    # -Sdp: Signaling Port (Must match server!)
+    # -t: Duration in ms
+    # -T: Transport Protocol
+    itg_args = (
+        f"-a {shlex.quote(target_ip)} "
+        f"-rp 12000 "
+        f"-b {flow_tos} "
+        f"-Sdp {sig_port} "  # Use same port for signaling to keep it simple
+        f"{log_str} "
+        f"-t {duration_ms} "
+        f"-T {protocol}")
+
+    # 2. Add Payload Parameters (Size/Rate)
+    # Priority: Manual args > Preset profile > Default
+    if 'ditg_manual' in profile:
+        specific_args = profile['ditg_manual']
+    elif 'ditg_preset' in profile:
+        specific_args = profile['ditg_preset']
+    else:
+        specific_args = "-C 100 -c 100 " # Safe default
+
+    # 3. Apply "Nuclear Option" (Real-Time Priority)
+    # chrt -r 99: Run as Real-Time Round-Robin process with max priority
+    # This ensures the marker flow isn't starved by background traffic.
+    # wrapper = "chrt -r 99" 
+    wrapper = "" 
+  
+    # 4. Construct Final Command
+    final_cmd = f"{wrapper} ITGSend {itg_args} {specific_args}"
+  
+    return final_cmd
+
+# 启动itg命令
+def ensure_server_surgical(host_node, start_port=15000, max_retries=3):
+    """
+    Ensures an ITGRecv instance is listening on a specific port.
+    If the port is busy (TIME_WAIT), it tries the next one (9002, 9003...).
+    Does NOT kill all ITGRecv processes, preserving background traffic.
+    """
+    current_port = start_port
+  
+    for attempt in range(max_retries):
+        # A. Surgical Clean: Kill only the process holding this port
+        # netstat flags: -n(numeric) -l(listening) -p(show pid)
+        # awk vprints the "PID/ProgramName" column
+        check_cmd = f"netstat -nlp | grep :{current_port} | awk '{{print $7}}'"
+        pid_info = host_node.cmd(check_cmd).strip()
+    
+        if pid_info:
+            pid = pid_info.split('/')[0]
+            if pid.isdigit():
+                logger.trace(f"Port {current_port} busy by PID {pid}. Cleaning...")
+                host_node.cmd(f"kill -9 {pid}")
+                sleep(0.1) # Yield to OS
+
+        # B. Start New Server (High Priority)
+        try:
+            # Note: -Sp defines the signaling port. ITGRecv uses this for setup.
+            # chrt is used here too so the receiver doesn't drop packets due to CPU load.
+            cmd = f"chrt -r 99 ITGRecv -Sp {current_port}"
+      
+            # Start process via Mininet's popen
+            proc = host_node.popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+      
+            # C. Verification (The most important step)
+            sleep(0.2) # Allow bind
+      
+            # Check 1: Is process alive?
+            if proc.poll() is not None:
+                # Process died immediately
+                continue 
+
+            # Check 2: Is port actually listening?
+            # -u (udp) -t (tcp) -l (listening) -n (numeric)
+            out = host_node.cmd(f"netstat -an | grep :{current_port}")
+            if str(current_port) in out:
+                return proc, current_port # Success!
+      
+            # If we got here, process is alive but port isn't open? Kill and retry.
+            proc.kill()
+        
+        except Exception as e:
+            logger.error(f"Start failed on {current_port}: {e}")
+        
+        # Increment port and retry
+        current_port += 1
+
+    raise RuntimeError(f"Failed to start ITGRecv on {host_node.name} after {max_retries} attempts.")
+
+# --- 3. Safe Client Execution ---
+def run_itg_safe(client_node, server_node, log_file, flow_type, duration_sec, timeout_sec, retry_count=0):
+    """
+    Orchestrates the measurement:
+    1. Starts Server (Surgical) -> Gets Port
+    2. Starts Client (Safe Popen) -> Sends to that Port
+    3. Handles Timeouts -> Sends SIGINT to save logs
+    """
+    server_proc = None
+
+    try:
+        # --- Step 1: Start Server ---
+        server_proc, actual_port = ensure_server_surgical(server_node)
+        logger.trace(f"Server {server_node.name} listening on {actual_port}")
+
+        # --- Step 2: Generate Client Command ---
+        # Crucial: Client must send to 'actual_port'
+        target_ip = server_node.IP()
+        cmd = get_flow_command(
+            flow_type=flow_type,
+            target_ip=target_ip,
+            duration_sec=duration_sec,
+            sig_port=actual_port, # Sync ports!
+            log_file=log_file )
+
+        logger.trace(f"{client_node.name} -> {target_ip}:{actual_port} ({flow_type}); Timeout: {timeout_sec}")
+        logger.trace(f"Send command: {cmd}")
+        # --- Step 3: Start Client ---
+        # os.setsid creates a new process group, allowing us to kill the whole tree later
+        client_proc = client_node.popen(
+            cmd, 
+            shell=True, 
+            stdout=subprocess.PIPE, 
+            stderr=subprocess.PIPE,
+            preexec_fn=os.setsid 
+        )
+
+        # --- Step 4: Wait with Timeout ---
+        try:
+            stdout, stderr = client_proc.communicate(timeout=timeout_sec)
+            # Check for immediate D-ITG errors in stderr
+            logger.trace(f"{stdout}")
+            if stderr:
+                err_str = stderr.decode('utf-8', errors='ignore')
+                if "Connection refused" in err_str or "Connect error" in err_str:
+                    raise ConnectionError(err_str)
+      
+            return True # Success
+
+        except subprocess.TimeoutExpired as e:
+            logger.trace(f"Flow timed out (> {timeout_sec}s). Saving logs...")
+            logger.trace(f"ITGSend output: {e.stdout}")
+            # Graceful Shutdown: Send SIGINT to the Process Group
+            # This tells D-ITG to stop sending and flush logs to disk
+            try:
+                os.killpg(os.getpgid(client_proc.pid), signal.SIGINT)
+                client_proc.communicate(timeout=2) # Give it 2s to write file
+            except:
+                logger.trace("Process unresponsive.")
+                os.killpg(os.getpgid(client_proc.pid), signal.SIGKILL)
+      
+            # For TCP, a timeout is a valid result (congestion), not necessarily a crash.
+            # We return True so the log parser can see the packet loss/delay.
+            return True 
+
+    except ConnectionError as e:
+        # --- Step 5: Retry Logic ---
+        if retry_count < 2: # Retry once
+            logger.trace(f"Connection failed. Retrying...")
+            # Clean up server before retrying
+            if server_proc: 
+                server_proc.terminate()
+                server_proc.wait()
+            return run_itg_safe(client_node, server_node, log_file, flow_type, duration_sec, timeout_sec, retry_count + 1)
+        else:
+            logger.trace(f"Connection refused after retries.")
+            return False
+
+    except Exception as e:
+        logger.error(f"Execution failed: {e}")
+        return False
+
+    finally:
+        # --- Step 6: Cleanup Server ---
+        if server_proc:
+            try:
+                server_proc.terminate()
+                server_proc.wait(timeout=1)
+            except:
+                server_proc.kill()
+
+def measure_path_qos(server, client, path_route, flow_type, config, resend=False):
+    """
+    [完美健壮版] 解决时序竞争与解析失败
+    """
+    # --- 1. 给 OVS 流表下发一点“呼吸时间” ---
+    # 解决代码跑得比交换机快的问题
+    sleep(0.2) 
+
+    # --- 3. 准备 D-ITG 参数 ---
+    random_id = uuid.uuid4().hex[:8]
+    log_prefix = f"/dev/shm/itg_{client.name}_{server.name}_{random_id}"
+    recv_log = f"{log_prefix}.recv"  
+  
+    # target_duration = 6 if flow_type==FlowType.STREAMING else 2
+
+    target_duration = 1.5
+
+    if flow_type == FlowType.STREAMING:
+        # TCP 给 2.5 倍余量，防止拥塞误杀
+        safe_timeout = target_duration* 2.5 + 4  # 6*2.5 + 2 = 17s
+    else:
+        # UDP 给 2 秒余量即可
+        safe_timeout = target_duration + 4  # 2 + 4 = 6s
+  
+    success = run_itg_safe(
+        client_node=client,
+        server_node=server,
+        log_file=recv_log,
+        flow_type=flow_type,
+        duration_sec =target_duration,
+        timeout_sec=int(safe_timeout))
+
+    if not success:
+        # 如果 run_itg_safe 返回 False (连接彻底失败)，直接返回 -1
+        return -1.0, -1.0
+
+    # if stderr: return 0
+    # 检查文件是否存在 (防止传输完全失败导致无日志)
+    check_log = server.cmd(f"ls {recv_log}")
+    if "No such file" in check_log and not resend:
+        logger.trace("No log generated. Resend same cmd again")
+        client.cmd(f"rm -f {recv_log}")
+        return measure_path_qos(server, client, path_route, flow_type, config, resend=True)
+
+    # 运行解码器拿到文本结果 
+    # 解析结果 
+    # Meta-DRL 
+    try:
+        logger.trace(f"Running ITGDec on {recv_log}...")
+
+        # 1. 启动进程
+        with client.popen(
+            f"ITGDec {recv_log}", 
+            shell=True,
+            stdout=subprocess.PIPE, 
+            stderr=subprocess.PIPE, 
+            text=True 
+        ) as dec_proc:
+
+            # 2. 等待进程结束并获取输出 (Block until finished)
+            # communicate 会读取 stdout 直到 EOF，确保拿到了所有输出
+            stdout, stderr = dec_proc.communicate(timeout=6) # 设置个超时防止卡死
+
+            if dec_proc.returncode != 0 and not resend:
+                dec_proc.kill()
+                logger.trace(f"ITGDec failed with code {dec_proc.returncode}")
+                return measure_path_qos(server, client, path_route, flow_type, config, resend=True)
+            else:
+                dec_output = stdout
+                logger.trace("Success dec recieve file")
+
+    except subprocess.TimeoutExpired:
+        logger.trace("ITGDec Timed out!")
+        dec_proc.kill()
+        dec_output = ""
+
+    finally:
+        # 清理所有临时文件 
+        client.cmd(f"rm -f {recv_log}")
+
+    # 2. 解析 D-ITG 输出
+    qos_metrics, no_packet_arrive = parse_ditg_output(dec_output)    
+    if no_packet_arrive:
+        if not resend :
+            logger.trace(f"No packet arrive : Resend cmd again")
+            return measure_path_qos(server, client, path_route, flow_type, config, resend=True)
+        else :
+            logger.trace(f"Fail to send packet, bad path")
+            return -1.0, -1.0
+
+    # 假设 qos_metrics 里的数值已经拿到了
+    d = qos_metrics['delay']
+    j = qos_metrics['jitter']
+    b = qos_metrics['bandwidth']
+    l = qos_metrics['loss_rate']
+    
+    logger.debug(f"QoS attrabutes:")
+    logger.debug(f"    bw    ={b:.3f}Mbps")
+    logger.debug(f"    loss  ={l:.3f}%")
+    logger.debug(f"    delay ={d:.3f}ms") 
+    logger.debug(f"    jitter={j:.3f}ms")
+
+    # 计算 Reward
+    qoe_reward = calculate_qoe_reward(qos_metrics, FLOW_PROFILES[flow_type])
+    qos_reward = calculate_qos_reward(
+        delay_ms=qos_metrics['delay'],
+        loss_percent=qos_metrics['loss_rate'],
+        jitter_ms=qos_metrics['jitter'],
+        flow_type_str=flow_type.name,
+        config=config
+    )
+
+    return qos_reward, qoe_reward
+
+# 发送流量并捕获包特征
+def send_packet_and_capture(
+    server, 
+    client, 
+    flow_type: FlowType, 
+    duration_sec=15, 
+    n_packets_to_capture=30, 
+    **flow_params):
+    """
+    在 Mininet 中运行 D-ITG 流量, 并同时使用 tshark 管道实时捕获特征。
+    [Fix] 集成了 ensure_server_surgical 以防止端口冲突。
+    """
+
+    server_ip = server.IP()
+    client_ip = client.IP()
+  
+    # 1. 查找监听接口
+    server_intf = None
+    for intf in server.intfList():
+        if intf.name != 'lo' and intf.link:
+            server_intf = intf
+            break
+    if server_intf is None:
+        raise Exception(f"在 {server.name} 上找不到已连接的数据接口!")
+
+    switch_intf = server_intf.link.intf2 if server_intf.link.intf1 == server_intf else server_intf.link.intf1
+    switch_intf_name = switch_intf.name
+  
+    feature_matrix = []
+    client_proc = None
+    tshark_proc = None
+    server_proc = None
+
+    try:
+        # 2. [Action 1] 安全启动服务端 (获取动态端口)
+        # 这会清理旧进程并返回一个干净的端口
+        server_proc, actual_port = ensure_server_surgical(server)
+
+        # 3. [Action 2] 获取客户端命令 (使用动态端口)
+        client_cmd = get_flow_command(
+            flow_type=flow_type,
+            target_ip=server_ip,
+            duration_sec=duration_sec,
+            sig_port=actual_port, # [Fix] 使用实际端口
+            **flow_params)
+
+        MARK_TOS = 32
+    
+        # 4. [Action 3] 启动 tshark
+        display_filter = f"src host {client_ip} and dst host {server_ip} and ip[1] == {MARK_TOS}"
+        # 增加一点超时余量
+        timeout_duration = duration_sec + 5
+
+        tshark_cmd = [
+            'sudo', 'tshark',
+            '-c', str(n_packets_to_capture),
+            '-a', f'duration:{timeout_duration}',
+            '-i', switch_intf_name,
+            '-l', 
+            '-T', 'fields',
+            '-e', 'frame.len',
+            '-e', 'frame.time_delta',
+            '-e', 'ip.src',
+            '-e', 'ip.dst',
+            '-E', 'separator=,',
+            '-f', display_filter]
+  
+        tshark_proc = subprocess.Popen(
+            tshark_cmd, 
+            stdout=subprocess.PIPE, 
+            stderr=subprocess.DEVNULL,
+            text=True
+        )
+
+        # 5. [Action 4] 启动客户端流量
+        sleep_time = 1.0 # 给 tshark 一点启动时间
+        sleep(sleep_time)
+    
+        # 使用 popen 启动客户端
+        client_proc = client.popen(client_cmd, shell=True)
+
+        # 6. [核心] 实时读取
+        assert tshark_proc.stdout is not None, "tshark stdout is None"
+  
+        for line in tshark_proc.stdout:
+            line = line.strip()
+            if not line: continue
+            try:
+                size_str, iat_str, src_ip, dst_ip = line.split(',')
+                size = float(size_str)
+                try:
+                    iat = float(iat_str)
+                except ValueError:
+                    iat = 0.0
+        
+                feature_vector = [size, iat]
+                feature_matrix.append(feature_vector)
+            except ValueError:
+                logger.error("Grap packet failed!")
+                pass # 忽略解析错误
+      
+    except Exception as e:  
+        logger.error(f"采集指纹出错: {e}")
+  
+    finally:
+        # [Fix] 统一清理资源
+        if tshark_proc:
+            tshark_proc.kill()
+    
+        if client_proc:
+            # 向进程组发送信号，确保杀死 chrt 启动的子进程
+            try:
+                client_proc.kill()
+                # 如果使用了 os.setsid (虽然这里没显式用，但为了保险)
+                # os.killpg(os.getpgid(client_proc.pid), signal.SIGKILL)
+            except:
+                pass
+          
+        if server_proc:
+            try:
+                server_proc.terminate()
+                server_proc.wait(timeout=0.5)
+            except:
+                server_proc.kill()
+
+    # 如果没抓到包，返回全0或者随机噪声防止报错，但在训练初期这可能导致冷启动问题
+    if len(feature_matrix) == 0:
+        return torch.zeros((n_packets_to_capture, 2), dtype=torch.float32)
+
+    fingerprint_tensor = torch.tensor(feature_matrix, dtype=torch.float32)
+    return fingerprint_tensor
+
+# 将特征向量归一化
+def normalize_fingerprint(tensor: torch.Tensor) -> torch.Tensor:
+    """
+    对流量指纹 Tensor 进行归一化处理。
+    输入形状: (N, 3) -> [Size, IAT, Direction]
+    """
+    # 1. 克隆 Tensor 以免修改原始数据 (可选)
+    norm_tensor = tensor.clone()
+  
+    # --- 列 0: 包大小 (Size) ---
+    # 使用 Min-Max 归一化。
+    # 网络包最大通常是 1514 (MTU + Ethernet Header)。
+    # 将其缩放到 [0, 1] 范围内。
+    norm_tensor[:, 0] = norm_tensor[:, 0] / 1600.0
+    
+    iat_cap = 0.1  # 100ms
+    iat_clamped = torch.clamp(norm_tensor[:, 1], max=iat_cap)   # 截断 (Clamp)
+    norm_tensor[:, 1] = iat_clamped / iat_cap                   # 归一化
+    
+    return norm_tensor
+
+# 获取一个流量特征张量
+def get_a_fingerprint(
+    server, 
+    client, 
+    flow_type: FlowType, 
+    n_packets_to_capture=30, 
+    **flow_params):
+
+    duration_sec = 15 
+
+    final_tensor = send_packet_and_capture(
+        server=server,
+        client=client,
+        flow_type=flow_type,
+        duration_sec=duration_sec,
+        n_packets_to_capture=n_packets_to_capture)
+  
+    while final_tensor.size(0) < 30:
+        sleep(1)
+        final_tensor = send_packet_and_capture(
+            server=server,
+            client=client,
+            flow_type=flow_type,
+            duration_sec=duration_sec,
+            n_packets_to_capture=n_packets_to_capture)
+  
+    return normalize_fingerprint(final_tensor).unsqueeze(0)
+</file>
+
+<file path="src/multi_service/env/flow_generator.py">
+import random
+import networkx as nx
+import time
+import heapq
+import os  # 需要引入 os 模块来创建目录
+from enum import Enum
+from loguru import logger
+
+# === 配置与定义 ===
+class FlowType(Enum):
+    VOIP = 1
+    STREAMING = 2
+
+FLOW_PROFILES = {
+    FlowType.VOIP: {
+        'type': 'VOIP', 'protocol': 'UDP', 'ditg_preset': 'VoIP -x G.711.2',
+        'qoe_critical': {'max_delay': 150, 'max_jitter': 50}, 'reward_fn': 'E-Model'
+    },
+    FlowType.STREAMING: {
+        'type': 'STREAMING', 'protocol': 'UDP',
+        'ditg_manual': ' -c 1000 -C 3000',
+        'qoe_critical': {'min_bandwidth': 5, 'max_loss_rate': 1e-6}, 'reward_fn': '3GPP-QCI6'
+    }
+}
+
+class FlowGenerator:
+    def __init__(self):
+        pass
+
+    def get_random_flow(self) -> tuple[FlowType, dict]:
+        """随机选择一个流类型及其配置文件。"""
+        flow_type = random.choice(list(FlowType))
+        profile = FLOW_PROFILES[flow_type]
+        return flow_type, profile
+
+    # =========================================================================
+    # [核心模块] 背景流量生成 (Gravity Model + Aggregation)
+    # =========================================================================
+
+    def generate_traffic_matrix(self, nodes, G_nx, total_load_mbps=500.0):
+        """
+        [终极完整版] 基于等级重力 + 瓶颈约束 + 信令保留的流量生成算法
+        
+        Args:
+        nodes: 节点列表
+        G_nx: NetworkX 图对象 (必须包含 'capacity' 和 'tier' 属性)
+        total_load_mbps: 期望生成的全网总流量
+        """
+        tm = {}
+        
+        # ==========================================
+        # 1. 配置参数
+        # ==========================================
+        # [信令保护] 预留 0.5 Mbps 给 LLDP/OpenFlow/心跳包
+        SIGNALING_RESERVE = 0.5 
+        
+        # [等级重力] 定义不同等级节点的权重范围
+        # Tier 1 (Core): 权重 20-30 (引力极大)
+        # Tier 2 (Agg) : 权重 5-10  (引力中等)
+        # Tier 3 (Edge): 权重 1-3   (引力小)
+        TIER_MULTIPLIERS = {
+            1: (20.0, 30.0),
+            2: (5.0, 10.0),
+            3: (1.0, 3.0)
+        }
+
+        # ==========================================
+        # 2. 预计算路径瓶颈 (Bottleneck Calculation)
+        # ==========================================
+        # 目的：找出两点之间最窄的那段路，作为流量上限
+        path_bottlenecks = {}
+        
+        for u in nodes:
+            for v in nodes:
+                if u == v: continue
+                try:
+                    # 假设背景流走最短路 (Shortest Path)
+                    path = nx.shortest_path(G_nx, u, v)
+                    
+                    min_bw = float('inf')
+                    for i in range(len(path) - 1):
+                        u_curr, v_next = path[i], path[i+1]
+                        
+                        # 获取物理容量，默认为 100.0
+                        raw_cap = G_nx[u_curr][v_next].get('capacity', 100.0)
+                        
+                        # [关键] 强制扣除信令保留带宽
+                        usable_cap = max(0.0, raw_cap - SIGNALING_RESERVE)
+                        
+                        if usable_cap < min_bw:
+                            min_bw = usable_cap
+                    
+                    path_bottlenecks[(u, v)] = min_bw
+                    
+                except nx.NetworkXNoPath:
+                    path_bottlenecks[(u, v)] = 0.0
+
+        # ==========================================
+        # 3. 计算节点权重 (Tier-Aware Gravity)
+        # ==========================================
+        node_weights = {}
+        for node in nodes:
+            # 获取节点等级，默认为 3 (Edge)
+            # 注意：请确保你的图是通过 apply_gravity_bandwidth_model 处理过的
+            tier = G_nx.nodes[node].get('tier', 3)
+            
+            # 根据等级获取权重范围
+            min_w, max_w = TIER_MULTIPLIERS.get(tier, (1.0, 3.0))
+            node_weights[node] = random.uniform(min_w, max_w)
+
+        total_weight_score = sum(node_weights.values())
+
+        # ==========================================
+        # 4. 生成初步流量 (Initial Allocation)
+        # ==========================================
+        potential_flows = []
+        total_interaction_score = 0.0
+        
+        for u in nodes:
+            for v in nodes:
+                if u == v: continue
+                
+                bottleneck = path_bottlenecks.get((u, v), 0)
+                if bottleneck <= 0.1: continue # 路不通或带宽太小，跳过
+
+                # 重力公式：流量 ~ 权重u * 权重v
+                # Tier 1 <-> Tier 1 的得分将远高于 Edge <-> Edge
+                score = node_weights[u] * node_weights[v]
+                
+                # 加入随机扰动 (0.8 - 1.2)
+                score *= random.uniform(0.8, 1.2)
+                
+                potential_flows.append({
+                    'src': u,
+                    'dst': v,
+                    'score': score,
+                    'limit': bottleneck # 携带物理上限
+                })
+                total_interaction_score += score
+
+        if total_interaction_score == 0: return {}
+
+        # ==========================================
+        # 5. 分配实际带宽 (Apply Constraints)
+        # ==========================================
+        for flow in potential_flows:
+            # 按比例瓜分总负载
+            # 乘以 1.5 是因为后面会有截断，为了让总流量接近预期，稍微给点盈余
+            target_bw = (flow['score'] / total_interaction_score) * total_load_mbps * 1.5
+            
+            # [铁律] 绝对截断：不超过路径瓶颈的 95%
+            # 既留出了信令空间，又防止了单流撑爆链路
+            safe_max = flow['limit'] * 0.95
+            
+            final_bw = min(target_bw, safe_max)
+            
+            # 过滤掉小于 0.1M 的无意义微小流
+            if final_bw > 0.1:
+                tm[(flow['src'], flow['dst'])] = final_bw
+
+        # ==========================================
+        # 6. 聚合优化 (Aggregation)
+        # ==========================================
+        MAX_BG_FLOWS = 80 # 限制总流数，防止 Mininet 卡死
+
+        if len(tm) > MAX_BG_FLOWS:
+            # 选出 Top N 大流
+            top_flows = heapq.nlargest(MAX_BG_FLOWS, tm.items(), key=lambda x: x[1])
+            
+            # [注意] 这里不再进行 Scale Up (放大)
+            # 原因：如果放大，可能会导致原本被 limit 限制住的流再次突破瓶颈
+            # 我们宁愿流量少一点，也要保证物理安全
+            final_tm = dict(top_flows)
+            
+            logger.info(f"Optimized: kept top {MAX_BG_FLOWS} flows. Max flow: {top_flows[0][1]:.2f} Mbps")
+            return final_tm
+        
+        return tm
+
+    def simulate_tm_on_graph(self, G, tm_dict):
+        """
+        [Step 2: Simulate]
+        在内存中预演流量矩阵，计算利用率、延迟和丢包。
+        """
+        edge_loads = {e: 0.0 for e in G.edges()}
+
+        # 模拟最短路路由
+        for (s, d), bw in tm_dict.items():
+            try:
+                path = nx.shortest_path(G, s, d, weight=None)
+                for i in range(len(path) - 1):
+                    u, v = path[i], path[i+1]
+                    if (u, v) in edge_loads: edge_loads[(u, v)] += bw
+                    elif (v, u) in edge_loads: edge_loads[(v, u)] += bw
+            except nx.NetworkXNoPath:
+                continue 
+
+        # 更新图属性 (MM1 模型)
+        for u, v, data in G.edges(data=True):
+            capacity = float(data.get('capacity', 100.0))
+            prop_delay = float(data.get('base_delay', 5.0)) # 假设原始延迟存为 base_delay
+            
+            current_load = edge_loads.get((u, v), 0.0) + edge_loads.get((v, u), 0.0)
+            rho = min(current_load / (capacity + 1e-6), 0.999)
+            
+            # M/M/1 延迟公式
+            queue_delay = 10.0 * (rho / (1.0 - rho))
+            total_delay = prop_delay + min(queue_delay, 500.0)
+            
+            # 丢包率模型 (Soft Threshold)
+            if rho < 0.8: loss = 0.0
+            else: loss = 0.05 * ((rho - 0.8) / 0.2) ** 2
+
+            data['utilization'] = rho
+            data['bandwidth'] = capacity * (1.0 - rho)
+            data['delay'] = total_delay
+            data['loss'] = loss
+
+        return G
+
+    def apply_traffic_matrix_to_mininet(self, net, tm_dict, G_nx, install_rules_func, duration=1000):
+        """
+        [Step 4: Execute]
+        注入背景流 (Ghost Traffic)。
+        增强功能：详细的生命周期打印 & 独立日志记录。
+        """
+        logger.info(f"Injecting {len(tm_dict)} background flows (Ghost Strategy)...")
+        logger.debug(f"Duration set to: {duration} seconds (Ensure this > target flow time!)")
+        
+        BG_COOKIE = 0xB000
+        BG_TOS = 184
+
+        # ==========================================
+        # Phase 0: 确保接收端在线 (Signaling Ready)
+        # ==========================================
+        logger.debug("Starting ITGRecv daemons on all hosts...")
+        for h in net.hosts:
+        # 建议记录 Recv 日志以便排查控制平面问题
+            h.popen(f"nice -n 2 ITGRecv > /tmp/itgrecv_{h.name}.log 2>&1 &")
+        
+        time.sleep(1)
+        # ==========================================
+        # Phase 1: 铺设路径 & 设置陷阱
+        # ==========================================
+        logger.debug("Installing routing rules & Ghost drop policies...")
+        configured_drops = set()
+
+        for (u, v) in tm_dict.keys():
+            try:
+                path_nodes = nx.shortest_path(G_nx, u, v, weight=None)
+            except:
+                continue
+
+            # 1.1 全程铺路 (Forwarding)
+            if len(path_nodes) > 1:
+                install_rules_func(net, path_nodes, tos=BG_TOS, dst_port=11000, cookie=BG_COOKIE)
+
+            # 1.2 终点设卡 (Drop UDP Only)
+            dst_host = net.get(f'h{v}')
+            dst_ip = dst_host.IP()
+            last_switch_name = f's{path_nodes[-1]}'
+            last_switch = net.get(last_switch_name)
+            
+            drop_key = (last_switch_name, dst_ip)
+            if drop_key not in configured_drops:
+                # [CRITICAL FIX] 只丢弃 UDP 数据包 (nw_proto=17)，放行 TCP 握手信令
+                cmd_drop = (
+                f'ovs-ofctl -O OpenFlow13 add-flow {last_switch_name} '
+                f'"cookie={hex(BG_COOKIE)},priority=200,dl_type=0x0800,'
+                f'nw_dst={dst_ip},nw_proto=17,nw_tos={BG_TOS},actions=drop"'
+                )
+                last_switch.cmd(cmd_drop)
+                configured_drops.add(drop_key)
+
+        time.sleep(1.0) # 稍微多给点时间让流表同步到 Datapath
+
+        # ==========================================
+        # Phase 2: 启动发送端 (带详细监控)
+        # ==========================================
+
+        bg_processes = [] # 存储进程对象，防止被垃圾回收
+
+        count = 0
+        for (u, v), bw in tm_dict.items():
+            h_src = net.get(f'h{u}')
+            h_dst = net.get(f'h{v}')
+            dst_ip = h_dst.IP()
+            
+            # 计算 PPS
+            pps = min(int(bw * 1_000_000 / 8000), 3000)
+            if pps < 1: pps = 1
+            # ITGSend 命令
+            # 使用 nohup 或直接后台运行，并将输出重定向到文件
+            cmd_send = (
+                f"ITGSend -a {dst_ip} "
+                f"-T UDP "
+                f"-C {pps*2} "
+                f"-c 1000 "
+                f"-rp 11000 "
+                f"-t {duration * 1000} "
+                f"-b {BG_TOS} "
+            )
+            
+            # 使用 popen 启动并在 Python 层持有句柄
+            proc = h_src.popen(cmd_send, shell=True)
+            bg_processes.append(proc)
+        
+            count += 1
+            if count % 10 == 0: time.sleep(0.1)
+
+        return bg_processes
+</file>
+
+<file path="src/multi_service/env/sdn_wrapper.py">
+from omegaconf import DictConfig, ListConfig
+from torch_geometric.data.data import Data
+from loguru import logger
+import time
+from typing import Any, Literal
+import torch
+import networkx as nx
+import random
+from mininet.cli import CLI
+from omegaconf import DictConfig
+from . import sdn_controller as mc
+from .flow_generator import FLOW_PROFILES, FlowType
+from .flow_generator import FlowGenerator
+from .network_generator import TopologyGenerator
+from ..utils import AttrDict, get_graph_data
+
+
+
+class SdnWrapper:
+    # 初始化背景流
+    def __init__(self, topo: nx.Graph, config: DictConfig, bg_traffic_nodes: list | None = None) -> None:
+        """
+        __init__ 的 Docstring
+        
+        :param 
+            topo: 拓扑图
+            config: 
+                max_steps: 最大寻路跳数
+                bg_cookie: 背景流cookie
+                flow_cookie: 业务流cookie
+                bg_duration: 背景流持续时间
+                total_flow_load: 默认背景流负载
+            bg_traffic_nodes: 允许生成背景流的节点列表 (默认为 None，表示全图)
+        """
+        self.config = config
+        self.bg_traffic_nodes = bg_traffic_nodes
+
+        # --- 1. 基础组件初始化 ---
+        self.flow_gen = FlowGenerator()
+        self.topo_gen = TopologyGenerator()
+
+        self.blueprint_G = topo
+        self.current_G = self.blueprint_G.copy()
+
+        self.src_nodes = config.topo.train.src_nodes
+        self.dst_nodes = config.topo.train.dst_nodes
+
+        # --- 2. 启动 Mininet (修复顺序 Bug) ---
+        # 必须先创建生成器对象，再 enter
+        self.net_gen = mc.get_a_mininet(self.blueprint_G.copy(), is_test=False)
+        self.net = self.net_gen.__enter__()
+        
+        # 启动后才能初始化监控
+        self.monitor = mc.NetworkMonitor(self.net)
+        
+        # --- 3. 状态管理 ---
+        self.bg_processes = []
+        self.bg_start_time = 0
+        self.active_cookies = set()
+
+        # --- 4. Cookie 与 配置 ---
+        self.cookie_mask = 0xF000
+        self.bg_cookie_start = getattr(config.env, 'bg_cookie', 0xB000)
+        self.agent_cookie_start = getattr(config.env, 'flow_cookie', 0xA000)
+        self.bg_duration = getattr(config.env, 'bg_duration', 60) 
+        
+        # 任务状态
+        self.s_node = None
+        self.d_node = None
+        self.current_flow_type = None
+        self.step_count = 0 
+        self.path_so_far = [] 
+        self.current_node = None 
+        self.dist_matrix = dict(nx.all_pairs_shortest_path_length(self.blueprint_G))
+        self.shaping_weight = getattr(config.env, 'shaping_weight', 0.1)
+    
+    # 重新启动背景流量/重新发送业务流
+    def reset_bg(self, current_load_mbps: float | None = None) -> Data:
+        """
+        Args:
+            force_hard (bool): 强制执行 Hard Reset
+            current_load_mbps (float): [课程学习] 指定当前的背景流量负载
+        """
+        target_load = current_load_mbps if current_load_mbps else self.config.env.total_load_mbps
+        self._hard_reset_background_traffic(target_load)
+
+        return self.get_observation()
+
+    def reset_flow(self):
+        mc.clean_flow_rules(self.net, cookie=self.agent_cookie_start, mask=self.cookie_mask)
+        return self.get_observation()
+    
+    # 动作掩码
+    def get_action_mask(self):
+        """
+        生成最终可用的动作掩码 (True 代表合法动作)
+        统一处理所有掩码规则：
+            1. 边的起点必须是当前节点
+            2. 禁止走回头路（除非只有回头路可走）
+            3. 排除已访问过的所有节点（不仅是前一个）
+        """
+
+        edge_index = self.observation_data.edge_index
+
+        assert(edge_index is not None)
+        num_edges = edge_index.shape[1]
+        mask = torch.zeros(num_edges, dtype=torch.bool)
+        
+        # 获取所有边的起点和终点
+        source_nodes = edge_index[0, :]
+        target_nodes = edge_index[1, :]
+        
+        # 1. 基础规则：边的起点必须是当前节点
+        is_current_node_edge = (source_nodes == self.current_node)
+        
+        # 2. 获取已访问节点集合
+        visited_nodes = set(self.path_so_far)
+        
+        # 3. 生成掩码：只允许到未访问节点的边
+        valid_edges = torch.zeros(num_edges, dtype=torch.bool)
+        for i in range(num_edges):
+            if is_current_node_edge[i]:
+                target_node = target_nodes[i].item()
+                if target_node not in visited_nodes:
+                    valid_edges[i] = True
+        
+        # 4. 严格规则：只返回有效边，如果是死胡同则全为False
+        mask = valid_edges
+            
+        return mask
+    
+    # 更新图状态，返回图状态
+    def get_observation(self):
+        # --- 1. 物理同步 ---
+        self.current_G = self.monitor.sync_state_to_graph(duration=0.05)
+        
+        # --- 2. 特征提取 ---
+        # Hop-by-Hop 关键：S_node 填 self.current_node
+        assert isinstance(self.current_node, int), "self.current_node 必须是整数"
+        assert(self.current_node is not None)
+        assert(self.d_node is not None)
+
+        data, _ = get_graph_data(
+            self.current_G.copy(), 
+            self.current_node, 
+            self.d_node,      
+            self.config 
+        )
+        
+        self.observation_data = data
+        data.action_mask = self.get_action_mask()
+
+        return data
+    
+    # 结束环境
+    def close(self):
+        logger.info("Closing environment...")
+        self._kill_bg_processes()
+        # 退出前最后清理一次，保持宿主机干净
+        mc.clean_flow_rules(self.net, cookie=self.bg_cookie_start, mask=self.cookie_mask)
+        mc.clean_flow_rules(self.net, cookie=self.agent_cookie_start, mask=self.cookie_mask)
+        
+        if hasattr(self, 'net_gen') and self.net_gen:
+            try:
+                self.net_gen.__exit__(None, None, None)
+            except Exception as e:
+                print(f"Error closing mininet context: {e}")
+
+    # 重置背景流，打印新的网络状态
+    def _hard_reset_background_traffic(self, load_mbps: float):
+        """
+        环境重置：注入指定负载的背景流
+        """
+        logger.info(f">>> Hard Reset | Load: {load_mbps:.1f} Mbps <<<")
+        
+        # 1. 清理
+        self._kill_bg_processes()
+        mc.clean_flow_rules(self.net, cookie=self.bg_cookie_start, mask=self.cookie_mask)
+        mc.clean_flow_rules(self.net, cookie=self.agent_cookie_start, mask=self.cookie_mask)
+        self.active_cookies.clear()
+        
+        # 2. 生成 (使用传入的动态负载)
+        
+        # 确定生成背景流的节点集合
+        bg_nodes = self.bg_traffic_nodes if self.bg_traffic_nodes is not None else list(self.blueprint_G.nodes())
+        
+        tm = self.flow_gen.generate_traffic_matrix(
+            bg_nodes, 
+            self.blueprint_G.copy(), 
+            total_load_mbps=load_mbps 
+        )
+        
+        # 3. 注入 (1.5倍冗余时长)
+        safe_duration = int(self.bg_duration * 1.5)
+        self.bg_processes = self.flow_gen.apply_traffic_matrix_to_mininet(
+            self.net, tm, self.blueprint_G.copy(), 
+            install_rules_func=mc.install_path_rules,
+            duration=safe_duration
+        )
+        
+        # 4. 更新时间戳
+        self.bg_start_time = time.time()
+        
+        # 5. 等待流量稳定 (给 TCP 爬坡和队列积压一点时间)
+        time.sleep(3)
+
+        for _ in range(3):
+            self.get_observation()
+            time.sleep(0.5)
+
+    # 清空背景流
+    def _kill_bg_processes(self):
+        for proc in self.bg_processes:
+            try:
+                proc.terminate() # 先尝试温和终止
+                proc.wait(timeout=0.1)
+            except:
+                try:
+                    proc.kill() # 强制杀死
+                except:
+                    pass
+        self.bg_processes = []
+
+    # 执行一跳动作，获取环境奖励
+    def step(
+        self, action_edge_idx: int
+    ) -> tuple[Data, float | Any, Literal[True], dict[str, Any]] | tuple[Any | Data, Any, bool, dict[str, Any]]:
+        """
+        执行一跳动作，返回下一个状态、奖励、是否结束、额外信息
+        params:
+            action_edge_idx: 动作索引，对应 edge_index 中的边
+
+        Returns: 
+            next_state: 下一个状态
+            reward: 奖励
+            done: 是否结束
+            info: 额外信息
+        """
+        info: dict[str, Any] = {}
+
+        # 1. 解析动作
+        assert(self.observation_data.edge_index is not None)
+
+        try:
+            # 增加防越界保护
+            u = self.observation_data.edge_index[0, action_edge_idx].item()
+            v = self.observation_data.edge_index[1, action_edge_idx].item()
+        except IndexError:
+            logger.error("Action index out of bounds!")
+            import traceback
+            traceback.print_exc()
+            exit()
+        
+        # 2. 合法性检查
+        if u != self.current_node:
+            logger.error(f"Illegal Move: {self.current_node} -> {u} impossible. Valid edges start from {self.current_node}")
+            import traceback
+            traceback.print_exc()
+            exit()
+
+        # 3. 执行移动
+        self.current_node = v
+        self.path_so_far.append(v)
+        self.step_count += 1
+        
+        done = False
+
+        step_reward = 0
+        
+        assert(self.current_flow_type is not None)
+        
+        info['flow_type'] = self.current_flow_type.name
+
+        # 4. 状态判定
+        if v == self.d_node:
+            # === Success ===
+            done = True
+        
+            # 生成 Cookie
+            cookie = self.agent_cookie_start + len(self.active_cookies) % 4096
+            self.active_cookies.add(cookie)
+
+            # 打印路径状态 (用于调试)
+            logger.debug(f"Path: {self.path_so_far}, FlowType: {self.current_flow_type.name.upper()}")
+            
+            protocol_str = FLOW_PROFILES[self.current_flow_type]['protocol']
+            # A. 下发规则
+            mc.install_path_rules(
+                self.net, self.path_so_far, 
+                tos=32, dst_port=12000, cookie=cookie, protocol=protocol_str)
+
+            # B. 测量 QoS
+            src_host = self.net.get(f'h{self.s_node}')
+            dst_host = self.net.get(f'h{self.d_node}')
+            
+            qos_reward, qoe_reward = mc.measure_path_qos(
+                server=dst_host,
+                client=src_host,
+                path_route=self.path_so_far,
+                flow_type=self.current_flow_type,
+                config=self.config )
+            
+            logger.debug(f"QoS: {qos_reward:.4f} | QoE: {qoe_reward:.4f} | Path: {self.path_so_far}")
+            total_reward = qos_reward # 这里你可以选择返回 qos_reward 还是 qoe_reward
+
+            info['qos'] = qos_reward
+            info['path'] = self.path_so_far
+
+            return self.get_observation(), total_reward, True, info
+
+        elif v in self.path_so_far[:-1]:
+            # === Loop ===
+            done = True
+            step_reward -= 10.0 
+            info['error'] = 'loop_detected'
+
+        elif self.step_count >= self.config.topo.train.max_steps:
+            # === Timeout ===
+            done = True
+            step_reward -= 10.0 # 超时惩罚
+            info['error'] = 'max_steps'
+
+        # 5. 更新观察 (Observation)
+        # 下一跳的 Observation 中，Source 特征可能需要变为 Current Node
+        # 或者你需要让 GNN 知道 "Current Position" 在哪里
+        next_state = self.get_observation()
+        return next_state, step_reward, done, info
+
+    def get_path_reward(
+        self, s_node: int, d_node: int, path_route: list[int], flow_type: FlowType
+    ):
+        cookie = self.agent_cookie_start + len(self.active_cookies) % 4096
+        self.active_cookies.add(cookie)
+
+        # 打印路径状态 (用于调试)
+        logger.debug(f"Path: {path_route}, FlowType: {flow_type.name.upper()}")
+        
+        protocol_str = FLOW_PROFILES[flow_type]['protocol']
+        # A. 下发规则
+        mc.install_path_rules(
+            self.net, path_route, 
+            tos=32, dst_port=12000, cookie=cookie, protocol=protocol_str)
+
+        # B. 测量 QoS
+        src_host = self.net.get(f'h{s_node}')
+        dst_host = self.net.get(f'h{d_node}')
+        
+        qos_reward, qoe_reward = mc.measure_path_qos(
+            server=dst_host,
+            client=src_host,
+            path_route=path_route,
+            flow_type=flow_type,
+            config=self.config )
+        
+        logger.debug(f"QoS: {qos_reward:.4f} | QoE: {qoe_reward:.4f} | Path: {path_route}")
+        return qos_reward, qoe_reward
+</file>
+
+<file path="src/multi_service/trainers/ppo_trainer.py">
+import glob
+from pathlib import Path
+from typing import Any
+from hydra.utils import instantiate
+import torch
+import time
+import os
+from torch.utils.tensorboard import SummaryWriter
+from omegaconf import DictConfig, ListConfig, OmegaConf
+from loguru import logger
+
+from multi_service.agents.based_agent import BaseSDNAgent
+from ..env import SdnWrapper
+from ..env.flow_generator import FlowType
+from ..utils import CheckpointManager, PPOMemory, AttrDict, BankTrafficManager
+
+
+class PPOTrainer:
+
+    def __init__(
+        self,
+        env: SdnWrapper,
+        eval_src_nodes: list,
+        eval_dst_nodes: list,
+        pth_dir: str,
+        tensorboard_dir: str,
+        batch_size: int,
+        train_max_steps: int,
+        eval_max_steps: int,
+        max_epochs: int,
+        save_interval: int,
+        qos_reward: DictConfig,
+        agent: BaseSDNAgent,
+        memory: PPOMemory,
+        fgprt_bank: BankTrafficManager,
+    ) -> None:
+
+        self.start_epoch = 0
+        self.global_step = 0
+        self.global_flow = 0
+
+        self.env = env
+        self.agent = agent
+        self.memory = memory
+        self.fgprt_bank = fgprt_bank
+        
+        self.eval_max_steps = eval_max_steps
+        self.train_max_steps = train_max_steps
+
+        self.batch_size = batch_size
+        self.qos_reward = qos_reward
+        self.max_epochs = max_epochs
+
+        self.val_src_nodes = eval_src_nodes
+        self.val_dst_nodes = eval_dst_nodes
+        self.save_interval = save_interval
+
+        # 初始化 TensorBoard
+        self.checkpoint_manager = CheckpointManager(pth_dir)
+        self.writer = SummaryWriter(log_dir=tensorboard_dir)
+
+    def train_one_epoch(self):
+        """
+        训练一个 Epoch：采样数据 -> 存入 Memory -> 更新 Agent
+        """
+        flow_count = 0
+        total_batch_reward = 0  # 用于计算整个 Batch 平均分
+        self.agent.train()
+
+        # 1. 生成一批业务流任务
+        flows = self.fgprt_bank.generate_batch(self.batch_size)
+        logger.info(f"Starting rollout for {len(flows)} flows...")
+        for flow in flows:
+
+            # 覆盖任务设定
+            self.env.s_node = flow.src
+            self.env.d_node = flow.dst
+            self.env.current_flow_type = flow.flow_type
+
+            # 同步环境指针
+            self.env.current_node = flow.src
+            self.env.path_so_far = [flow.src]
+            self.env.step_count = 0
+
+            logger.info(
+                f"[Flow {flow_count+1:02d}] {flow.flow_type.name} Task: Node {flow.src} -> Node {flow.dst}"
+            )
+            state = self.env.reset_flow()
+            state = self.env.get_observation()
+            state = state.to(self.agent.device)
+
+            # 准备 Fingerprint
+            curr_node = flow.src
+            target_node = flow.dst
+            fingerprint = flow.fingerprint.to(self.agent.device)
+            if fingerprint.dim() == 2:
+                fingerprint = fingerprint.unsqueeze(0)
+
+            done = False
+            step_count = 0
+            episode_reward = 0  # 单条流的累积奖励
+
+            # 逐跳寻路循环
+            while not done and step_count < self.train_max_steps:
+                with torch.no_grad():
+                    # 1. 获取 Embedding
+                    node_embeds = self.agent.get_node_embeddings(
+                        state, fingerprint)
+
+                    # 2. Critic 估值提早计算 val，防止死胡同里 crash
+                    critc_val = self.agent.evaluate_value(  # pyright: ignore[reportCallIssue]
+                        node_embeds, curr_node, target_node)
+
+                    # 3. 准备邻居与掩码逻辑
+                    edge_attr = state.edge_attr
+                    edge_index = state.edge_index
+
+                    assert edge_index is not None, "edge_index 为空"
+                    assert edge_attr is not None, "edge_attr 为空"
+
+                    mask = (edge_index[0] == curr_node)
+                    neighbor_indices = edge_index[1][mask]
+                    neighbor_edge_attrs = edge_attr[mask]
+
+                    # 提取当前动作掩码
+                    current_action_mask = state.action_mask[mask]
+
+                    # 6. Agent 决策
+                    next_node, log_prob, logits, action_idx = self.agent.get_action(
+                        state,
+                        node_embeds,
+                        current_action_mask,
+                        curr_node,
+                        target_node,
+                        neighbor_indices.tolist(),
+                        neighbor_edge_attrs,
+                        deterministic=False)
+
+                    # 7. 死胡同处理
+                    if next_node is None:
+                        logger.debug(
+                            f"Dead path{self.env.path_so_far}, ai failed to find path !"
+                        )
+                        logger.debug(f"neighbor_indices: {neighbor_indices}")
+                        reward = self.qos_reward.penalty_dead_end
+                        done = True
+                        # 存入记忆
+                        self.memory.store(
+                            state=state,
+                            action=torch.tensor(
+                                0,
+                                device=self.agent.device),  # 使用-1表示无效action  
+                            log_prob=torch.log(
+                                torch.tensor(
+                                    1e-10, device=self.agent.device)),  # 极小的概率
+                            value=critc_val.item(),
+                            reward=float(reward),
+                            is_terminal=done,
+                            fingerprint=fingerprint,
+                            curr_idx=curr_node,
+                            target_idx=target_node)
+                        self.global_step += 1
+                        break
+
+                    assert action_idx is not None, f"action_idx 为空: {action_idx}"
+                    assert next_node is not None, f"next_node 为空: {next_node}"
+
+                    # 8. 环境执行
+                    assert self.env is not None, "self.env 为空"
+                    # 直接使用邻居索引获取对应的边索引
+                    selected_edge_idx = torch.where(mask)[0][action_idx].item()
+                    next_state, reward, done, info = self.env.step(
+                        int(selected_edge_idx))
+
+                    #  Clean Step Logging
+                    logger.debug(
+                        f"Step {len(self.env.path_so_far)-1:02d}|{curr_node} -> {next_node} | Reward: {reward:.4f}"
+                    )
+
+                    # Move detailed info to Debug tag
+                    for key, value in info.items():
+                        logger.debug(f"{key}: {value}")
+                    logger.debug(f"neighbor_indices: {neighbor_indices}")
+
+                    # 9. 存入记忆
+                    self.memory.store(state=state,
+                                      action=action_idx,
+                                      log_prob=log_prob,
+                                      value=critc_val.item(),
+                                      reward=float(reward),
+                                      is_terminal=done,
+                                      fingerprint=fingerprint,
+                                      curr_idx=curr_node,
+                                      target_idx=target_node)
+
+                    # 10. 更新状态流转
+                    state = next_state.to(self.agent.device)
+                    curr_node = next_node
+                    episode_reward += float(reward)  # 累加单条流得分
+                    step_count += 1
+
+                    # 11. 每步更新global_step
+                    self.global_step += 1
+
+            # 循环结束
+            flow_count += 1
+            total_batch_reward += episode_reward  # 累加到 Batch 总分
+
+            self.global_flow += 1
+            self.writer.add_scalar(f"/Reward/{flow.flow_type.name}",
+                                   episode_reward, self.global_flow)
+
+            # 打印的是 episode_reward
+            logger.debug(
+                f"[Flow {flow_count:02d}] Finished | Total Reward: {episode_reward:.2f} | Path: {'->'.join(map(str, self.env.path_so_far))}"
+            )
+
+        # Update Agent
+        actor_loss, critic_loss = 0.0, 0.0
+        if len(self.memory.rewards) > 0:
+            logger.debug("Updating Agent...")
+            actor_loss, critic_loss = self.agent.update(self.memory)
+
+            self.writer.add_scalar(f"/Loss/Actor", actor_loss,
+                                   self.global_step)
+            self.writer.add_scalar(f"/Loss/Critic", critic_loss,
+                                   self.global_step)
+        else:
+            logger.debug(
+                "No valid transitions collected, skipping agent update")
+
+        avg_reward = total_batch_reward / flow_count if flow_count > 0 else 0.0
+        self.writer.add_scalar("Reward/Average", avg_reward, self.global_step)
+
+        return avg_reward
+
+    def validate(self, epoch):
+        """
+        在线验证逻辑：
+        1. 切换到 eval 模式
+        2. 针对验证集节点运行固定任务
+        3. 记录指标
+        """
+        if not self.val_src_nodes or not self.val_dst_nodes:
+            logger.warning(
+                "No validation nodes provided, skipping validation.")
+            return -float('inf')
+
+        logger.info(f"Starting Validation (Epoch {epoch})...")
+        self.agent.eval()
+
+        # 使用 self.fgprt_bank 生成 10 个验证任务
+        flows = self.fgprt_bank.generate_batch(batch_size=10,
+                                               src_nodes=self.val_src_nodes,
+                                               dst_nodes=self.val_dst_nodes)
+
+        total_reward = 0
+        success_count = 0
+
+        for i, flow in enumerate(flows):
+            # 覆盖环境状态
+            self.env.s_node = flow.src
+            self.env.d_node = flow.dst
+            self.env.current_flow_type = flow.flow_type
+            self.env.current_node = flow.src
+            self.env.path_so_far = [flow.src]
+            self.env.step_count = 0
+
+            state = self.env.reset_flow()
+            state = self.env.get_observation()
+            state = state.to(self.agent.device)
+
+            # 使用生成的 Fingerprint
+            fingerprint = flow.fingerprint.to(self.agent.device)
+            if fingerprint.dim() == 2:
+                fingerprint = fingerprint.unsqueeze(0)
+
+            done = False
+            step = 0
+            episode_reward = 0
+
+            while not done and step < self.eval_max_steps:
+                with torch.no_grad():
+                    node_embeds = self.agent.get_node_embeddings(
+                        state, fingerprint)
+
+                    edge_attr = state.edge_attr
+                    edge_index = state.edge_index
+
+                    assert isinstance(
+                        edge_index,
+                        torch.Tensor), "edge_index should be a tensor"
+                    assert isinstance(
+                        edge_attr,
+                        torch.Tensor), "edge_attr should be a tensor"
+
+                    mask = (edge_index[0] == self.env.current_node)
+                    neighbor_indices = edge_index[1][mask]
+                    neighbor_edge_attrs = edge_attr[mask]
+                    current_action_mask = state.action_mask[mask]
+
+                    # Deterministic Action for Validation
+                    next_node, _, _, action_idx = self.agent.get_action(
+                        state,
+                        node_embeds,
+                        current_action_mask,
+                        self.env.current_node,
+                        self.env.d_node,
+                        neighbor_indices.tolist(),
+                        neighbor_edge_attrs,
+                        deterministic=True)
+
+                    if next_node is None:
+                        episode_reward += self.qos_reward.penalty_dead_end
+                        done = True
+                        break
+
+                    selected_edge_idx = torch.where(mask)[0][action_idx].item()
+                    next_state, reward, done, info = self.env.step(
+                        int(selected_edge_idx))
+
+                    state = next_state.to(self.agent.device)
+                    episode_reward += float(reward)
+                    step += 1
+
+            total_reward += episode_reward
+            if done and self.env.current_node == self.env.d_node:
+                success_count += 1
+
+            # logger.debug(f"[Val Case {i}] {case['type'].name} {case['src']}->{case['dst']} | Reward: {episode_reward:.2f} | Path: {self.env.path_so_far}")
+
+        avg_reward = total_reward / len(flows)
+        success_rate = success_count / len(flows)
+
+        logger.info(
+            f"Validation Result: Reward={avg_reward:.4f} | Success Rate={success_rate*100:.1f}%"
+        )
+
+        if self.writer:
+            self.writer.add_scalar("Val/Reward", avg_reward, epoch)
+            self.writer.add_scalar("Val/Success_Rate", success_rate, epoch)
+
+        self.agent.train()  # 恢复训练模式
+        return avg_reward
+
+    def run(self):
+        """
+        主训练入口
+        """
+        logger.info(f"Start training for {self.max_epochs} epochs...")
+
+        best_train_reward = -float('inf')
+        best_eval_reward = -float('inf')
+        no_improvement_count = 0
+
+        for epoch in range(self.start_epoch, self.max_epochs):
+            start_time = time.time()
+
+            # 1. 训练
+            train_reward = self.train_one_epoch()
+            self.agent.scheduler.step(train_reward)
+            # 2. 保存 Checkpoint
+            if epoch % self.save_interval == 0:
+                self.checkpoint_manager.save(
+                    model=self.agent,
+                    epoch=epoch,
+                    metrics={'train_reward': train_reward})
+
+            # 3. Validation
+            eval_reward = self.validate(epoch)
+
+            # Early Stopping Logic
+            if train_reward > best_train_reward or eval_reward > best_eval_reward:
+                best_train_reward = max(best_train_reward, train_reward)
+                best_eval_reward = max(best_eval_reward, eval_reward)
+                no_improvement_count = 0
+            else:
+                no_improvement_count += 1
+
+            if no_improvement_count >= 10:
+                logger.info(
+                    f"Early Stopping at Epoch {epoch}: No improvement for 10 consecutive epochs. Best Train: {best_train_reward:.4f}, Best Eval: {best_eval_reward:.4f}"
+                )
+                break
+
+            duration = time.time() - start_time
+            logger.info(
+                f"Epoch {epoch}: Reward={train_reward:.4f} | Current LR={self.agent.get_current_lr():.8f} |Time={duration:.2f}s"
+            )
+</file>
+
+<file path="src/multi_service/utils/fingerprint_manager.py">
+from omegaconf import DictConfig
+import torch
+import random
+
+from loguru import logger
+
+
+class BankTrafficManager:
+    """
+    使用预存指纹库的流量管理器
+    """
+
+    def __init__(self, src_nodes: list, dst_nodes: list,
+                 fgpt_path: str) -> None:
+        self.src_nodes = src_nodes
+        self.dst_nodes = dst_nodes
+        self.fgpt_path = fgpt_path
+        # 加载指纹库
+        raw_bank = torch.load(self.fgpt_path, map_location='cpu')
+
+        # 将所有 Tensor 统一为 (1, 30, 2) 维度
+        self.bank = {}
+        for k, v_list in raw_bank.items():
+            processed_list = []
+            for t in v_list:
+                if t.dim() == 2:
+                    t = t.unsqueeze(0)
+                processed_list.append(t)
+            self.bank[k.lower()] = processed_list
+
+        logger.debug(
+            f"Fingerprint Bank loaded and pre-processed from {self.fgpt_path}")
+
+    def generate_batch(self,
+                       batch_size: int,
+                       src_nodes: list | None = None,
+                       dst_nodes: list | None = None) -> list:
+        """
+        均衡生成各类型的流，从库中随机采样指纹
+        """
+        # 避免循环引用，在此处导入
+        from ..env.flow_generator import FlowType
+
+        flows = []
+        all_types = list(FlowType)
+        num_types = len(all_types)
+
+        # 1. 规划每种类型的数量 (Balanced Sampling)
+        base_count = batch_size // num_types
+        remainder = batch_size % num_types
+
+        target_types = []
+        for t in all_types:
+            target_types.extend([t] * base_count)
+
+        # 余数随机分配
+        if remainder > 0:
+            target_types.extend(random.sample(all_types, remainder))
+
+        # 打乱顺序
+        random.shuffle(target_types)
+
+        # 确定源宿节点池
+        src_pool = src_nodes if src_nodes is not None else self.src_nodes
+        dst_pool = dst_nodes if dst_nodes is not None else self.dst_nodes
+
+        for f_type in target_types:
+            # 2. 随机选择源宿节点
+            s = random.choice(src_pool)
+            d = random.choice(dst_pool)
+
+            # 3. 从预处理过的库中采样
+            type_key = f_type.name.lower()
+            available_fingerprints = self.bank.get(type_key, [])
+
+            if not available_fingerprints:
+                logger.error(f"No fingerprint data for type: {f_type.name}!")
+                # 兜底：生成全 0 的张量
+                fingerprint = torch.zeros((1, 30, 2))
+            else:
+                # 随机抽取并移动到目标设备
+                fingerprint = random.choice(available_fingerprints)
+
+            # 构建 Flow 对象
+            flow_obj = type(
+                'Flow', (), {
+                    'src': s,
+                    'dst': d,
+                    'label': f_type.value - 1,
+                    'flow_type': f_type,
+                    'fingerprint': fingerprint
+                })
+            flows.append(flow_obj)
+
+        return flows
+</file>
+
+<file path="src/multi_service/utils/routing_kernels.py">
+import networkx as nx
+
+class RoutingKernels:
+    @staticmethod
+    def calculate_hybrid_weight(delay: float, bandwidth: float, bw_priority: float=1.0) -> float:
+        """
+        在不考虑利用率的情况下，综合延迟和带宽计算链路代价。
+        
+        Args:
+            delay: 链路物理延迟 (ms) 
+            bandwidth: 链路物理容量 (Mbps) 
+            bw_priority: 带宽优先级系数。值越大，模型越倾向于避开低带宽路径。
+        """
+        
+        delay_cost = delay / 20  
+        
+        # 2. 带宽代价 (反比逻辑)
+        # 代价与带宽成反比：100M 链路贡献 1.0 代价，10M 链路贡献 10.0 代价
+        # 这能强迫 Dijkstra 避开窄带宽路，即使它延迟很低
+        bw_cost = -(bandwidth/100)
+        
+        # 3. 组合代价
+        # 返回两者的加权和
+        return delay_cost + bw_cost
+
+    @staticmethod
+    def get_smart_path_labels(G_nx: nx.Graph, target_node: str):
+        """
+        基于混合权重计算全图导航标签
+        """
+        # 1. 使用 Dijkstra 计算到 Target 的加权最短路
+        # 注意：这里的 weight 必须是我们刚才注入的 'hybrid_weight'
+        try:
+            weighted_dist = nx.single_source_dijkstra_path_length(
+                G_nx, target_node, weight='hybrid_weight'
+            )
+        except:
+            return {}, {}
+
+        # 2. 生成动作概率标签 (Softmax Target)
+        # 如果 v 是 u 的最优下一跳，则 prob=1，否则=0
+        next_hop_labels = {} 
+        
+        for u in G_nx.nodes():
+            if u == target_node or u not in weighted_dist:
+                continue
+            
+            best_neighbor = None
+            min_cost = float('inf')
+            
+            # 遍历邻居找最优解
+            # 逻辑：Dist(u) = Weight(u,v) + Dist(v)
+            for v in G_nx.neighbors(u):
+                if v not in weighted_dist: continue
+                
+                # 获取边权重
+                w = G_nx[u][v]['hybrid_weight']
+                path_cost = w + weighted_dist[v]
+                
+                if path_cost < min_cost:
+                    min_cost = path_cost
+                    best_neighbor = v
+            
+            # 记录最优下一跳 (这里做简单的 One-hot，也可以做 Multi-hot)
+            if best_neighbor is not None:
+                next_hop_labels[u] = best_neighbor
+                
+        return next_hop_labels
+</file>
+
+</files>

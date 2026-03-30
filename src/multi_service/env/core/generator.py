@@ -46,7 +46,7 @@ class GraphTopo(Topo):
             # 2. 计算最佳 r2q (确保 quantum ≈ 1500)
             r2q = int(max(1, rate_bytes / 1500))
             # 这里沿用 Mininet 构造函数中设置的 r2q
-            logger.info(
+            logger.debug(
                 f"Link {u:>2} <-> {v:<2} | "
                 f"BW: {bw:>5} Mbps | "
                 f"Delay: {delay:>6} | "
@@ -83,7 +83,7 @@ def get_a_mininet(g: nx.Graph, is_test=False, remote_port=None):
         autoStaticArp=True)
 
     try:
-        logger.info("Disabling TCP Offload (TSO/GSO/GRO) on all switches...")
+        logger.debug("Disabling TCP Offload (TSO/GSO/GRO) on all switches...")
         for h in net.hosts:
             for intf in h.intfList():
                 if intf.name != 'lo':

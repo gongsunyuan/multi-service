@@ -1,0 +1,26 @@
+defaults:
+  - topo: BQD
+
+qos_reward:
+  delay_sigma: 50.0
+  loss_sigma: 8
+  penalty_dead_end: -2
+  VOIP:
+    min_delay: 10.0
+    max_delay: 200.0
+    w: [1, 0] # [delay, loss_rate]
+  STREAMING:
+    min_delay: 10.0
+    max_delay: 200.0
+    w: [0.01, 0.99] # [delay, loss_rate]
+
+# configs/test/env/mininet.yaml
+
+wrapper:
+  _target_: multi_service.env.sdn_wrapper.SdnWrapper
+  src_nodes: ${env.topo.src_nodes} # -> 解析为列表 [0]
+  dst_nodes: ${env.topo.dst_nodes}
+  max_steps: ${env.topo.max_steps}
+  topo_stats: ${topo.stats}
+  qos_reward: ${env.qos_reward}
+  

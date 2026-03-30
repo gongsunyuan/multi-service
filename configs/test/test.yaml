@@ -1,28 +1,28 @@
 defaults:
   - hydra: info 
-  - agent: film
-  - env: BQD 
-  - eval: BQD
-  - topo: default
-  - trainer: ppo
+  - components: default
+  - env: theore
   - _self_
 
-name: "${agent.name}_ppo_train"
+name: "model_test"
 
 seed: 42
 device: cuda:0
 datestamp: ${now:%Y_%m%d}
 timestamp: ${now:%H%M_%S}
 
+test:
+  num_flows: 300
+  
 path:
   data: /home/gsy/multi-service/data
 
-  topo_path: ${path.data}/topologies/BQD.graphml
+  topo_path: ${path.data}/topologies/${env.topo.name}
   fgpt_path: ${path.data}/fingerprints/fingerprint_bank.pt 
   output_dir: "${hydra:runtime.output_dir}"
+  weight_dir: "${path.data}/weight/"
 
 new_dir:
-  checkpoint_dir: ${path.output_dir}/checkpoint/
   tensorboard_dir: ${path.output_dir}/tensorboard/
   eval_dir: ${path.output_dir}/eval/
   
@@ -39,21 +39,21 @@ model_hyperparamters:
   gnn_layers: 4
   hidden_dim: 256
   fingerprint_dim: 2
-  dropout: 0.0
+  dropout: 0
   
 # 训练参数
 train_hyperparameters:
   film_lr: 0.04
   gnn_lr: 0.0004
-  weight_decay: 1e-4
+  weight_decay: 0
   clip_eps: 0.2
   max_steps: 20
   batch_size: 30
   ppo_epochs: 10
-  max_epochs: 1000
-  save_interval: 10
-  entropy_coef: 0.0004
-  checkpoint_keep_count: 5
+  max_epochs: 200
+  save_interval: 2
+  entropy_coef: 0.1
+  checkpoint_keep_count: 2
 
 # QoS 奖励参数
 qos_reward:

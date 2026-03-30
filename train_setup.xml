@@ -1,3 +1,138 @@
+This file is a merged representation of a subset of the codebase, containing specifically included files, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of a subset of the repository's contents that is considered the most important context.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Only files matching these patterns are included: configs/train/*, scripts/train/*
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+configs/
+  train/
+    ppo.yaml
+scripts/
+  train/
+    ppo.py
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="configs/train/ppo.yaml">
+defaults:
+  - hydra: info 
+  - agent: full
+  - env: BQD 
+  - eval: BQD
+  - topo: default
+  - trainer: ppo
+  - _self_
+
+name: "multi_service_ppo_train"
+
+seed: 42
+device: cuda:0
+datestamp: ${now:%Y_%m%d}
+timestamp: ${now:%H%M_%S}
+
+path:
+  data: /home/gsy/multi-service/data
+
+  pth_dir:  ${path.data}/weight
+  topo_path: ${path.data}/topologies/abilene.graphml
+  fgpt_path: ${path.data}/fingerprints/fingerprint_bank.pt 
+  output_dir: "${hydra:runtime.output_dir}"
+
+new_dir:
+  tensorboard_dir: ${path.output_dir}/tensorboard/
+  eval_dir: ${path.output_dir}/eval/
+  
+new_file:
+  config_file: ${path.output_dir}/config.yaml
+  debug_file: ${path.output_dir}/debug.log
+  trace_file: ${path.output_dir}/trace.log
+
+# 网络架构
+model_hyperparamters:
+  edge_dim: 4
+  node_dim: 5
+  gnn_heads: 4
+  gnn_layers: 6
+  hidden_dim: 128
+  fingerprint_dim: 2
+  dropout: 0.1
+  
+# 训练参数
+train_hyperparameters:
+  lr: 0.0004
+  weight_decay: 0.0
+  clip_eps: 0.2
+  max_steps: 20
+  batch_size: 30
+  ppo_epochs: 10
+  max_epochs: 500
+  save_interval: 2
+  entropy_coef: 0.05
+  checkpoint_keep_count: 2
+
+# QoS 奖励参数
+qos_reward:
+  penalty_dead_end: -10
+  VOIP:
+    min_path_delay: 10.0
+    max_path_delay: 200.0
+    min_path_jitter: 0.0
+    max_path_jitter: 50.0
+    w: [10, 1, 0.5] # [delay, jitter, loss_rate]
+  STREAMING:
+    min_path_delay: 10.0
+    max_path_delay: 200.0
+    min_path_jitter: 0.0
+    max_path_jitter: 50.0
+    w: [0.01, 0.01, 10] # [delay, jitter, loss_rate]
+  GAMING:
+    min_path_delay: 10.0
+    max_path_delay: 100.0
+    min_path_jitter: 0.0
+    max_path_jitter: 50.0
+    w: [3, 1, 0.5] # [delay, jitter, loss_rate]
+</file>
+
+<file path="scripts/train/ppo.py">
 import sys
 import os
 from hydra.utils import instantiate
@@ -15,7 +150,7 @@ import networkx as nx
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent / "src"))
 
 from multi_service.utils import PPOMemory, BankTrafficManager
-from multi_service.env.theoretical_wrapper import TheoreticalWrapper
+from multi_service.env.sdn_wrapper import SdnWrapper
 from multi_service.env.network_generator import TopologyGenerator
 from multi_service.trainers.ppo_trainer import PPOTrainer
 
@@ -33,6 +168,7 @@ def set_seed(seed):
 
     logger.info(f"Set random seed to {seed}")
 
+
 def set_logger(config: DictConfig):
     from mininet.log import setLogLevel
     setLogLevel('critical')
@@ -47,15 +183,18 @@ def set_logger(config: DictConfig):
         "level": "INFO"
     }])
 
+
 def build_workspace(config: DictConfig):
     for key, val in config.new_dir.items():
         new_dir = Path(val)
         new_dir.mkdir(parents=True, exist_ok=True, mode=0o777)
+        logger.debug(f"Created directory {new_dir} with mode 0o777")
         OmegaConf.update(config, f"path.{key}", str(new_dir), force_add=True)
 
     for key, val in config.new_file.items():
         new_file = Path(val)
         new_file.touch(mode=0o777)
+        logger.debug(f"Created file {new_file} with mode 0o777")
         OmegaConf.update(config, f"path.{key}", str(new_file), force_add=True)
 
 def resolve_paths(config: DictConfig):
@@ -93,16 +232,6 @@ def load_and_merge_topologies(topo_path, val_topo_path, config):
     train_topo = topo_gen.load_topology(topo_path)
     val_topo = topo_gen.load_topology(val_topo_path)
 
-    train_stats = get_topology_stats(train_topo)
-    val_stats = get_topology_stats(val_topo)
-
-    OmegaConf.update(config, "topo.stats.train", train_stats, force_add=True)
-    OmegaConf.update(config, "topo.stats.eval", val_stats, force_add=True)
-    # 为了兼容原有环境初始化代码，保留一个默认的 topo.stats (通常指向训练集)
-    OmegaConf.update(config, "topo.stats", train_stats, force_add=True) 
-    
-    logger.info(f"Train stats: {train_stats}")
-    logger.info(f"Eval stats: {val_stats}")
     max_id = max(train_topo.nodes())
     offset = max_id + 1
     val_topo = nx.convert_node_labels_to_integers(val_topo, first_label=offset)
@@ -136,55 +265,12 @@ def load_and_merge_topologies(topo_path, val_topo_path, config):
 
     return combined_topo, bg_nodes
 
-def get_topology_stats(G: nx.Graph):
-    """通用的拓扑统计计算函数。"""
-    if G.number_of_edges() == 0:
-        return {
-            'bw': {'mu': 0.0, 'sigma': 0.0},
-            'delay': {'mu': 0.0, 'sigma': 0.0},
-            'loss': {'mu': 0.0, 'sigma': 0.0}
-        }
-
-    # 提取属性
-    bw_list = [float(d.get('bandwidth', 0)) for u, v, d in G.edges(data=True)]
-    delay_list = [float(d.get('delay', 0)) for u, v, d in G.edges(data=True)]
-    loss_list = [float(d.get('loss', 0)) for u, v, d in G.edges(data=True)]
-
-    stats = {
-        'bw': {
-            'mu': float(np.mean(bw_list)),
-            'sigma': float(np.std(bw_list))
-        },
-        'delay': {
-            'mu': float(np.mean(delay_list)),
-            'sigma': float(np.std(delay_list))
-        },
-        'loss': {
-            'mu': float(np.mean(loss_list)),
-            'sigma': float(np.std(loss_list))
-        }
-    }
-    return stats
-
 def initialize_components(config, combined_topo, bg_nodes):
     """Initialize environment, agent, and trainer."""
     # Initialize Environment
     logger.info("Initializing SDN Environment...")
     # Pass combined topology and restrict bg traffic to training nodes
-    env = TheoreticalWrapper(
-        topo=combined_topo,
-        src_nodes=config.topo.train.src_nodes,
-        dst_nodes=config.topo.train.dst_nodes,
-        max_steps=config.topo.train.max_steps,
-        train_stats=config.topo.stats.train,
-        eval_stats=config.topo.stats.eval,
-        qos_reward=config.qos_reward,
-        bg_cookie=getattr(config.env, 'bg_cookie', 0xB000),
-        flow_cookie=getattr(config.env, 'flow_cookie', 0xA000),
-        bg_duration=getattr(config.env, 'bg_duration', 60),
-        shaping_weight=getattr(config.env, 'shaping_weight', 0.1),
-        bg_traffic_nodes=bg_nodes
-    )
+    env = SdnWrapper(combined_topo, config, bg_traffic_nodes=bg_nodes)
 
     # Initialize Trainer
     logger.info("Initializing PPO Trainer...")
@@ -210,12 +296,11 @@ def train(config: DictConfig):
         combined_topo, bg_nodes = load_and_merge_topologies(
             topo_path, val_topo_path, config)
 
-        # 6. Initialize Components
+        # 5. Initialize Components
         trainer = initialize_components(config, combined_topo, bg_nodes)
 
-        # 7. Start Training
+        # 6. Start Training
         logger.info("Initialization complete. Starting training...")
-        # trainer.load_weight("data/weight/film.pth")  # Load checkpoint if specified
         trainer.run()
 
     except Exception as e:
@@ -228,7 +313,8 @@ def train(config: DictConfig):
             logger.info("Closing environment...")
             trainer.env.close()
 
-
 if __name__ == "__main__":
-    # os.system("sudo mn -c 2>/dev/null")  # Clean up Mininet before starting
     train()
+</file>
+
+</files>

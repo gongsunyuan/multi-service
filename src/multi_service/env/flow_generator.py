@@ -10,6 +10,7 @@ from loguru import logger
 class FlowType(Enum):
     VOIP = 1
     STREAMING = 2
+    # GAMING = 3
 
 FLOW_PROFILES = {
     FlowType.VOIP: {

@@ -1,0 +1,15 @@
+name: "gnn"
+
+model:
+  _target_: multi_service.agents.gnn_agent.GnnAgent
+  node_dim: ${model_hyperparamters.node_dim}
+  edge_dim: ${model_hyperparamters.edge_dim}
+  hidden_dim: ${model_hyperparamters.hidden_dim}
+  gnn_layers: ${model_hyperparamters.gnn_layers}
+  gnn_heads: ${model_hyperparamters.gnn_heads}
+  dropout: ${model_hyperparamters.dropout}
+  lr: ${train_hyperparameters.gnn_lr}
+  clip_eps: ${train_hyperparameters.clip_eps}
+  ppo_epochs: ${train_hyperparameters.ppo_epochs}
+  entropy_coef: ${train_hyperparameters.entropy_coef}
+  device_name: ${device}

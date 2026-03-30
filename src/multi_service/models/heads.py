@@ -13,14 +13,16 @@ class actor(nn.Module):
     输出:
         动作值，范围通常在 [-1, 1] 之间。
     """
-    def __init__(self, input_dim):
+    def __init__(self, input_dim, dropout=0.1):
         super().__init__()
         self.net = nn.Sequential(
-        nn.Linear(input_dim, 128),
-        nn.ReLU(),
-        nn.Linear(128, 64),
-        nn.ReLU(),
-        nn.Linear(64, 1))
+            nn.Linear(input_dim, 128),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(64, 1))
   
     def forward(self, x):
         return self.net(x)
@@ -36,13 +38,15 @@ class critic(nn.Module):
     输出:
         状态价值估计值。
     """
-    def __init__(self, input_dim):
+    def __init__(self, input_dim, dropout=0.1):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(input_dim, 128),
             nn.ReLU(),
+            nn.Dropout(dropout),
             nn.Linear(128, 64),
             nn.ReLU(),
+            nn.Dropout(dropout),
             nn.Linear(64, 1))
     
     def forward(self, x):

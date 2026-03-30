@@ -12,21 +12,16 @@ class FilmGenerator(nn.Module):
     输出: GNN 的调制参数 (Gamma, Beta)
     """
 
-    def __init__(self, config: DictConfig | ListConfig):
+    def __init__(self, fingerprint_dim, hidden_dim, gnn_layers, dropout=0.1):
         super().__init__()
-        self.config = config
-        self.lstm = nn.LSTM(config.model.fingerprint_dim, config.model.hidden_dim, batch_first=True)
+        self.lstm = nn.LSTM(fingerprint_dim, hidden_dim, batch_first=True)
+        
+        # Dropout
+        self.dropout = nn.Dropout(dropout)
+
         # 输出层生成所有 GNN 层的 Gamma 和 Beta
         # 每一层需要 2 个参数向量 (gamma, beta)，共 gnn_layers 层
-        self.head = nn.Linear(config.model.hidden_dim, config.model.hidden_dim * 2 * config.model.gnn_layers)
-        
-        # 初始化为 Identity (Gamma=1, Beta=0)
-        self._init_weights()
-
-    def _init_weights(self):
-        # 将 head 的权重和偏置设为极小值/零，使得初始输出接近 0
-        nn.init.constant_(self.head.weight, 0.0)
-        nn.init.constant_(self.head.bias, 0.0)
+        self.head = nn.Linear(hidden_dim, hidden_dim * 2 * gnn_layers)
 
     def forward(self, fingerprint):
         """
@@ -40,6 +35,9 @@ class FilmGenerator(nn.Module):
         _, (h_n, _) = self.lstm(fingerprint)
         # h_n: (1, Batch, Hidden) -> (Batch, Hidden)
         intent = h_n.squeeze(0)
+        
+        # Apply Dropout
+        intent = self.dropout(intent)
 
         # 生成参数 (Batch, Layers * 2 * Hidden)
         params = self.head(intent)
@@ -52,25 +50,20 @@ class FilmGNN(nn.Module):
     [模块2] 全局感知骨干
     融合: 节点特征 + 边特征 + FiLM 调制
     """
-    def __init__(self, config):
+    def __init__(self, node_dim, edge_dim, hidden_dim, gnn_layers, gnn_heads, dropout=0.1):
             """
             __init__ 的 Docstring
             
             :param node_dim: 节点特征维度
             :param edge_dim: 边特征维度
             :param hidden_dim: GNN 隐藏层维度
-            :param num_layers: GNN 层数
-            :param heads: 多头注意力头数
+            :param gnn_layers: GNN 层数
+            :param gnn_heads: 多头注意力头数
+            :param dropout: Dropout 率
             """
             super().__init__()
-            self.config = config
-            self.num_layers = config.model.gnn_layers
-            self.hidden_dim = config.model.hidden_dim
-
-            heads = config.model.gnn_heads  
-            node_dim = config.model.node_dim
-            edge_dim = config.model.edge_dim
-            hidden_dim = config.model.hidden_dim
+            self.num_layers = gnn_layers
+            self.hidden_dim = hidden_dim
 
             # 初始编码
             self.node_encoder = nn.Linear(node_dim, hidden_dim)
@@ -79,10 +72,11 @@ class FilmGNN(nn.Module):
             # GAT 层列表
             self.convs = nn.ModuleList()
             self.norms = nn.ModuleList()
+            self.dropout = nn.Dropout(dropout)
             
             for _ in range(self.num_layers):
                 # edge_dim 参数开启边特征融合
-                self.convs.append(GATv2Conv(hidden_dim, hidden_dim, edge_dim=edge_dim, heads=heads, concat=False))
+                self.convs.append(GATv2Conv(hidden_dim, hidden_dim, edge_dim=edge_dim, heads=gnn_heads, concat=False, dropout=dropout))
                 self.norms.append(nn.LayerNorm(hidden_dim))
 
     def forward(self, x, edge_index, edge_attr, film_params, batch_vector=None):
@@ -117,7 +111,7 @@ class FilmGNN(nn.Module):
             # ==================================================
 
             x = F.relu(x)
+            x = self.dropout(x)
             x = x + x_in 
             
         return x
-

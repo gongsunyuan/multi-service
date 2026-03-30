@@ -1,0 +1,9 @@
+defaults:
+  - train: BQD
+  - eval: BQD
+  - _self_
+
+topo_dir: "${path.data}/topologies"
+
+eval_topo: "${topo.topo_dir}/${topo.eval.topo_name}"
+train_topo: "${topo.topo_dir}/${topo.train.topo_name}"

@@ -1,0 +1,2109 @@
+This file is a merged representation of a subset of the codebase, containing specifically included files, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of a subset of the repository's contents that is considered the most important context.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Only files matching these patterns are included: src/multi_service/env/*, src/multi_service/utils/*
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+src/
+  multi_service/
+    env/
+      __init__.py
+      e_model.py
+      flow_generator.py
+      network_generator.py
+      sdn_controller.py
+      sdn_wrapper.py
+    utils/
+      __init__.py
+      checkpoint_manager.py
+      config_loadder.py
+      config_saver.py
+      create_unique_log_dir.py
+      fingerprint_manager.py
+      math_utils.py
+      networkx_watcher.py
+      ppo_memory.py
+      routing_kernels.py
+      sdn_paraser.py
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="src/multi_service/env/__init__.py">
+from .sdn_wrapper import SdnWrapper
+</file>
+
+<file path="src/multi_service/env/e_model.py">
+import numpy as np
+import math
+
+# ==============================================================================
+# 1. VoIP Model (G.107)
+# ==============================================================================
+class FullG107Calculator:
+    def __init__(self):
+      self.R0 = 93.2 
+      self.Is = 0.0
+      self.A = 0.0 
+      self.Ie_base = 0.0
+      self.Bpl = 4.3
+
+    def calculate_mos(self, delay_ms, loss_pct, jitter_ms):
+        Ta = delay_ms + (2 * jitter_ms) + 10.0 
+        if Ta <= 100:
+            Id = 0.0
+        else:
+            X = np.log(Ta / 100.0) / np.log(2.0)
+            Id_base = 25.0 * ( (1 + X**6)**(1/6) - 3 * (1 + (X/3)**6)**(1/6) + 2 )
+
+            if Ta > 150:
+                Id_penalty = (Ta - 150) * 0.2
+                Id = Id_base + Id_penalty
+            else:
+                Id = Id_base
+
+        Ppl = loss_pct
+        Ie_eff = self.Ie_base + (95 - self.Ie_base) * (Ppl / (Ppl + self.Bpl))
+        
+        R = self.R0 - self.Is - Id - Ie_eff + self.A
+        
+        if R < 0: return 1.0
+        if R > 100: return 4.5
+        return 1 + 0.035 * R + 7e-6 * R * (R - 60) * (100 - R)
+
+# ==============================================================================
+# 2. Video Model (Pure Math - High Performance)
+# ==============================================================================
+class RigorousVideoEvaluator:
+    def __init__(self, target_bitrate_kbps=5000, max_buffer_sec=10.0):
+        self.target_bitrate_kbps = target_bitrate_kbps
+        self.max_buffer_sec = max_buffer_sec
+        self.current_buffer_sec = 6.0 
+
+        # P.1203 Coefficients (Calibrated for 5Mbps = Excellent)
+        self.q1 = 4.66
+        self.q2 = 0.70
+        self.q3 = 500.0  # Calibrated inflection point
+        self.q4 = 2.5
+
+    def reset(self):
+        self.current_buffer_sec = 6.0
+
+    def _get_tcp_throughput_mathis(self, rtt_ms, loss_pct):
+        mss_bits = 1460 * 8  
+        rtt_sec = max(0.001, rtt_ms / 1000.0)
+        p = loss_pct / 100.0
+        if p <= 1e-6: return 99999999.0
+        c = 1.22
+        bw_bps = (mss_bits / rtt_sec) * (c / math.sqrt(p))
+        return bw_bps / 1000.0 
+
+    def _fallback_math_mos(self, bitrate, stall, duration):
+        # O.22 Video Quality
+        if bitrate <= 10: mos_v = 1.0
+        else:
+            term = self.q4 * (math.log10(self.q3) - math.log10(bitrate))
+            mos_v = self.q2 + (self.q1 - self.q2) / (1 + math.exp(term))
+        
+        # O.23 Stalling Penalty
+        if stall > 0.001:
+            ratio = stall / max(duration, 1.0)
+            penalty = math.exp(-15.0 * ratio)
+            final_mos = 1.0 + (mos_v - 1.0) * penalty
+        else:
+            final_mos = mos_v
+        
+        return max(1.0, min(5.0, final_mos))
+
+    def calculate_mos(self, loss_pct, rtt_ms, physical_bw_kbps, duration_sec, stateless_mode=True):
+        if stateless_mode: self.current_buffer_sec = 0.5
+
+        mathis_bw = self._get_tcp_throughput_mathis(rtt_ms, loss_pct)
+        effective_bw = min(physical_bw_kbps, mathis_bw)
+
+        downloaded_content_sec = (effective_bw * duration_sec) / self.target_bitrate_kbps
+        prev_buffer = self.current_buffer_sec
+        new_buffer = prev_buffer + downloaded_content_sec - duration_sec
+        
+        stall_duration = 0.0
+        if new_buffer < 0:
+            stall_duration = abs(new_buffer)
+            self.current_buffer_sec = 0.0
+        else:
+            self.current_buffer_sec = min(new_buffer, self.max_buffer_sec)
+
+        viewing_bitrate = min(effective_bw, self.target_bitrate_kbps)
+
+        # 直接调用数学公式，不再尝试调用官方库
+        return self._fallback_math_mos(viewing_bitrate, stall_duration, duration_sec)
+
+# ==============================================================================
+# 3. Cloud Gaming Model (G.1072)
+# ==============================================================================
+class RigorousCloudGamingEvaluator:
+    def __init__(self, target_bitrate_kbps=8000):
+        self.base_mos = 4.5
+        self.target_bitrate_kbps = target_bitrate_kbps 
+
+    def calculate_mos(self, delay_ms, loss_pct, physical_bw_kbps):
+        effective_bw = min(physical_bw_kbps, self.target_bitrate_kbps)
+        if effective_bw <= 100: I_coding = 3.5 
+        else:
+            ratio = effective_bw / self.target_bitrate_kbps
+            I_coding = 1.8 * np.exp(-3.0 * ratio) 
+
+        total_lag = delay_ms + 30.0 
+        if total_lag <= 30: I_delay = 0.0
+        else:
+            if total_lag < 100: I_delay = (total_lag - 30) * 0.015
+            else: I_delay = (100 - 30) * 0.015 + (total_lag - 100) * 0.06
+
+        I_loss = 4.0 * (loss_pct / 100.0) * 10.0 
+        mos = self.base_mos - I_coding - I_delay - I_loss
+        return np.clip(mos, 1.0, 4.5)
+
+# ==============================================================================
+# 4. Legacy FPS Model (CSa)
+# ==============================================================================
+class RigorousLegacyFPSEvaluator:
+    def __init__(self):
+        self.base_mos = 4.5
+        self.delay_threshold = 20.0 
+
+    def calculate_mos(self, delay_ms, loss_pct, jitter_ms):
+        if delay_ms <= self.delay_threshold: I_delay = 0.0
+        elif delay_ms <= 60: I_delay = (delay_ms - self.delay_threshold) * 0.02 
+        else: I_delay = 0.8 + (delay_ms - 60) * 0.08
+
+        if jitter_ms <= 5: I_jitter = 0.0
+        else: I_jitter = (jitter_ms - 5.0) * 0.15
+
+        # Aggressive Loss Penalty
+        I_loss = 80.0 * (loss_pct / 100.0) 
+        
+        mos = self.base_mos - I_delay - I_jitter - I_loss
+        return np.clip(mos, 1.0, 4.5)
+</file>
+
+<file path="src/multi_service/env/sdn_controller.py">
+"""
+[SDN Controller Facade]
+这是一个重构后的统一入口文件。
+为了保持向后兼容性，它重新导出了分散在 src/env/qos, src/env/traffic, src/env/core 中的函数。
+"""
+
+# 1. QoS 评估模块
+from .qos.evaluator import (
+    parse_ditg_output,
+    calculate_qoe_reward,
+    calculate_qos_reward,
+    voip_calc,
+    video_calc,
+    fps_game_calc
+)
+
+# 2. 流量生成驱动
+from .traffic.ditg_driver import (
+    get_flow_command,
+    ensure_server_surgical,
+    run_itg_safe,
+    measure_path_qos,
+    send_packet_and_capture,
+    normalize_fingerprint,
+    get_a_fingerprint
+)
+
+# 3. SDN 控制器 (流表管理)
+from .core.controller import (
+    sample_path,
+    verify_cleanup,
+    clean_flow_rules,
+    install_path_rules
+)
+
+# 4. 网络监控器
+from .core.monitor import NetworkMonitor
+
+# 5. Mininet 生成器
+from .core.generator import (
+    GraphTopo,
+    get_a_mininet
+)
+</file>
+
+<file path="src/multi_service/utils/math_utils.py">
+import torch
+
+def compute_advantages(rewards, values, is_terminals, gamma=0.99, lam=0.95):
+  """
+  计算 GAE 优势函数
+  rewards: [T], values: [T+1] (需要多存一个最后状态的 value)
+  """
+  
+  advantages = []
+  gae = 0
+  
+  # 从后往前计算
+  for i in reversed(range(len(rewards))):
+    # TD 误差 delta = 当前奖励 + 下一步折扣价值 - 当前价值
+    # 如果是最后一步，next_value 就是 0
+
+    mask = 1.0 - is_terminals[i]
+    next_value = 0 if is_terminals[i] else values[i+1]
+    delta = rewards[i] + gamma * next_value * mask - values[i]
+
+    # GAE 公式：优势 = 当前 TD 误差 + 后续优势的加权累加
+    gae = delta + gamma * lam * mask * gae
+    advantages.insert(0, gae)
+  
+  return torch.tensor(advantages, dtype=torch.float32)
+</file>
+
+<file path="src/multi_service/utils/networkx_watcher.py">
+from loguru import logger
+from omegaconf import DictConfig
+import torch
+import networkx as nx
+from torch_geometric.data import Data
+
+
+def get_graph_data(G: nx.Graph, Cur_node: int, D_node: int,
+                   config: DictConfig):
+    """
+    get_graph_data 的 Docstring
+    
+    :param G: 要提取特征的图
+    :param Cur_node: 当前节点 (Agent 所在位置)
+    :param D_node: 目的节点
+    :param config: 配置对象
+
+    returns: PyG Data 对象和带有特征的 NetworkX 图
+    :rtype: tuple[Data, nx.Graph]
+    
+    特征维度说明：
+        - 节点特征 (5维):
+            - Is_Destination (0/1)
+            - Is_Current_Node (0/1)
+            - Dist_To_Destination (归一化)
+            - Buffer Occupancy 
+            - Processing Delay
+        - 边特征 (4维): 
+            - Delay (归一化)
+            - Bandwidth (归一化)
+            - Loss (归一化)
+            - Utilization (直接使用 0-1)
+    """
+
+    # --- 2. 边特征处理 (移除 Avail BW) ---
+    source_nodes, target_nodes = [], []
+    edge_attrs_raw = []
+
+    for u, v, data in G.edges(data=True):
+        source_nodes.extend([u, v])
+        target_nodes.extend([v, u])
+
+        l = float(data.get('loss', 0.0))
+        d = float(data.get('delay', 1.0))
+        b = float(data.get('bandwidth', 100.0))
+        u_load = float(data.get('utilization', 0.0))
+
+        # [Change] 只保留 4 个核心特征
+        attr = [d, b, l, u_load]
+        edge_attrs_raw.extend([attr, attr])
+
+    edge_index = torch.tensor([source_nodes, target_nodes], dtype=torch.long)
+
+    # 转换为 Tensor
+    if len(edge_attrs_raw) > 0:
+        edge_attr_tensor = torch.tensor(edge_attrs_raw, dtype=torch.float)
+
+        # 归一化
+        edge_attr = torch.zeros_like(edge_attr_tensor)
+
+        # [Fix] 索引范围修正为 0~3
+        # 0: Delay
+        edge_attr[:,
+                  0] = (edge_attr_tensor[:, 0] - config.env.min_link_delay) / (
+                      config.env.max_link_delay - config.env.min_link_delay +
+                      1e-6)
+        # 1: Bandwidth
+        edge_attr[:, 1] = (edge_attr_tensor[:, 1] - config.env.min_link_bw) / (
+            config.env.max_link_bw - config.env.min_link_bw + 1e-6)
+        # 2: Loss
+        edge_attr[:,
+                  2] = edge_attr_tensor[:,
+                                        2] / config.env.max_link_loss  # Loss (假设最大5%)
+        # 3: Utilization (本身就是 0-1，不需要额外归一化，Clamp一下即可)
+        edge_attr[:, 3] = edge_attr_tensor[:, 3].clamp(0.0, 1.0)
+
+        # [Removed] edge_attr[:, 4] = Avail_BW (已删除)
+
+        edge_attr = edge_attr.clamp(0.0, 1.0)
+    else:
+        # 防止空图报错
+        edge_attr = torch.tensor([], dtype=torch.float)
+
+    # --- 3. 节点特征处理 (移除 Source 相关) ---
+    # [Removed] dist_from_s 计算块已删除
+
+    # 只保留 Dist_To_Destination
+    try:
+        dist_to_d = nx.single_source_shortest_path_length(G, D_node)
+    except:
+        dist_to_d = {n: 999 for n in G.nodes()}
+
+    node_features_list = []
+    loggest_path_len = config.topo.train.max_steps
+
+    for u, data in G.nodes(data=True):
+        node_data = data
+
+        # [Change] 这里的特征列表精简为 8 维
+        is_c = 1.0 if u == Cur_node else 0.0
+        is_d = 1.0 if u == D_node else 0.0
+        dd = 1.0 * min(dist_to_d.get(u, 999),
+                       loggest_path_len) / loggest_path_len
+
+        bo = float(node_data.get('buffer_occupancy', 0.0))
+        pd = float(node_data.get('proc_delay', 0.0))
+
+        # 基础特征 (5维)
+        basic_feat = [is_d, is_c, dd, bo, pd]
+
+        node_features_list.append(basic_feat)
+
+    x = torch.tensor(node_features_list, dtype=torch.float)
+
+    return Data(x=x, edge_index=edge_index, edge_attr=edge_attr), G
+</file>
+
+<file path="src/multi_service/utils/ppo_memory.py">
+from typing import Any
+
+
+from torch._tensor import Tensor
+
+
+import torch
+from torch_geometric.data import Batch # 必须导入这个用于处理图批处理
+
+class PPOMemory:
+  def __init__(self, device: str="cpu") -> None:
+    self.device = device
+    self.states = []
+    self.values = []
+    self.actions = []
+    self.rewards = []
+    self.log_probs = []
+    self.is_terminals = []
+    # 为了 evaluate_batch 增加的辅助数据
+    self.fingerprints = []  
+    self.curr_indices = []  
+    self.target_indices = [] 
+
+  def store(self, state, action, log_prob, value, reward, is_terminal,
+            fingerprint, curr_idx, target_idx) -> None:
+    self.states.append(state)
+    self.values.append(value)
+    self.rewards.append(reward)
+    self.actions.append(action)
+    self.log_probs.append(log_prob)
+    self.curr_indices.append(curr_idx)
+    self.is_terminals.append(is_terminal)
+    self.fingerprints.append(fingerprint)
+    self.target_indices.append(target_idx)
+
+  def get_all(self) -> tuple[Any, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+    """
+    核心转化函数：将 List 转化为符合训练要求的 Tensor/Batch
+    """
+    # 1. 图状态处理
+    states_batch = Batch.from_data_list(self.states).to(self.device) # type: ignore
+
+    # 2. 基础数据转化
+    log_probs = torch.stack(self.log_probs).to(self.device).detach() 
+    actions = torch.tensor(self.actions, dtype=torch.long).to(self.device) 
+    values = torch.tensor(self.values, dtype=torch.float32).to(self.device) 
+    rewards = torch.tensor(self.rewards, dtype=torch.float32).to(self.device) 
+    is_terminals = torch.tensor(self.is_terminals, dtype=torch.float32).to(self.device)
+    
+    # 3. 辅助训练数据转化  
+    fingerprints = torch.cat(self.fingerprints, dim=0).to(self.device).detach()
+    
+    curr_indices = torch.tensor(self.curr_indices, dtype=torch.long).to(self.device)
+    target_indices = torch.tensor(self.target_indices, dtype=torch.long).to(self.device)
+
+    return (
+      states_batch, actions, log_probs, values, rewards, 
+      is_terminals, fingerprints, curr_indices, target_indices)
+
+  def clear(self):
+    del self.states[:]
+    del self.values[:]
+    del self.actions[:]
+    del self.rewards[:]
+    del self.log_probs[:]
+    del self.is_terminals[:]
+    del self.fingerprints[:]
+    del self.curr_indices[:]
+    del self.target_indices[:]
+</file>
+
+<file path="src/multi_service/utils/sdn_paraser.py">
+import argparse
+import sys
+from argparse import ArgumentParser
+
+class SdnParaser(ArgumentParser):
+  def __init__(self):
+    ArgumentParser.__init__(
+      self,
+      description="调整构建Mininet网络拓扑时的参数")
+    self.add_argument(
+      "-rp", "--remote_port",
+      type=int,
+      default=None,
+      help="远程流表控制器的端口"
+    )
+    self.add_argument(
+      "-dv","--device",
+      type=str,
+      default=None,
+      help="指定使用gpu-'0,1,2,3'"
+    )
+    self.add_argument(
+      '--yaml', 
+      type=str, 
+      default='config.yaml', 
+      help='Path to the YAML configuration file (default: ./config.yaml)'
+    )
+    self.add_argument(
+      '--checkpoint',
+      type=str,
+      default=None,
+      help='Path to the training checkpoint file'
+    )
+    self.add_argument(
+      '--verbose',
+      action='store_true',
+      help='Enable verbose output for debugging'
+    )
+    self.add_argument(
+      '--load_flow',
+      type=int,
+      default=0,
+      help='Load flow rate in Mbps for evaluation (default: 0)'
+    )
+</file>
+
+<file path="src/multi_service/env/network_generator.py">
+import pickle
+import networkx as nx
+import random
+import torch
+import os
+import math
+from torch_geometric.data import Data
+from loguru import logger
+
+class TopologyGenerator:
+    def __init__(self) -> None:
+        self.G = None
+        pass
+
+  # [Insert into src/env/network_generator.py inside TopologyGenerator class]
+
+    def generate_topology(self, mode='random', min_nodes=10, max_nodes=20) -> nx.Graph:
+        """
+        生成拓扑的统一入口。
+        
+        Args:
+        mode (str): 'random' (随机生成) 或 'fixed' (返回固定的 NSFNet)
+        min_nodes (int): 随机生成的最小节点数
+        max_nodes (int): 随机生成的最大节点数
+        """
+        if mode == 'fixed':
+            # 如果还没有加载过固定图，就加载一次
+            if not hasattr(self, 'G') or self.G is None:
+                # 假设 config 里有 graph_path，或者硬编码默认路径
+                default_path = "nsfnet.graphml" 
+                self.load_topology(default_path)
+      
+            # 返回固定图的深拷贝，防止数据污染
+            assert self.G is not None, "Fixed graph is not loaded"
+            G = self.G.copy()
+            # 刷新一下动态状态 (拥塞程度)
+            return self.refresh_dynamic_state(G, difficulty=0.5)
+
+        else:
+            # === 随机生成模式 (推荐预训练使用) ===
+            # 随机决定节点数量
+            n = random.randint(min_nodes, max_nodes)
+            
+            # 生成骨架
+            G = self._create_random_graph(n)
+            
+            # 计算中心性指标 (Betweenness, PageRank...)
+            G = self.update_graph_metric(G)
+            
+            # 初始化动态状态 (赋予随机的拥塞)
+            G = self.refresh_dynamic_state(G, difficulty=random.random())
+
+            self.G = G
+            
+            return G
+
+    def _create_random_graph(self, n_nodes) -> nx.Graph:
+        """
+        [内部方法] 使用 Barabási-Albert 模型生成无标度网络。
+        并初始化物理链路属性 (Bandwidth, Delay)。
+        """
+        # 1. 生成连通图骨架
+        # m=2 表示每个新加入的节点会连接 2 个旧节点 (保证稀疏性但连通)
+        while True:
+            G = nx.barabasi_albert_graph(n_nodes, m=2)
+            if nx.is_connected(G):
+                break
+
+        # 2. 初始化物理属性
+        for u, v in G.edges():
+            cap = random.choice([20.0, 40.0, 50.0, 100.0])
+            
+            # 1ms ~ 10ms 之间
+            delay = random.uniform(1.0, 10.0)
+            
+            # 写入属性 (注意: 必须与 refresh_dynamic_state 兼容)
+            G[u][v]['loss'] = 0.0         # 初始无丢包
+            G[u][v]['delay'] = delay      # 基础传播延迟 (refresh 时会加上排队延迟)
+            G[u][v]['capacity'] = cap     # 物理容量 (不变)
+            G[u][v]['bandwidth'] = cap    # 初始可用带宽 = 容量
+            G[u][v]['utilization'] = 0.0  # 初始空闲
+            G[u][v]['base_delay'] = delay # 备份基础延迟
+        
+        # 3. 初始化节点属性
+        for n in G.nodes():
+            G.nodes[n]['buffer_occupancy'] = 0.0
+            G.nodes[n]['proc_delay'] = 0.0
+
+        return G
+  
+    def load_topology(self, filename: str) -> nx.Graph:
+        """
+        加载固定的 GraphML 文件 (NSFNet)，并初始化 RL 环境所需的动态属性。
+        自动搜索路径：当前目录 -> TopoGraph/ 目录
+        """
+
+        #  传完整路径 "TopoGraph/nsfnet.graphml"
+        if os.path.exists(filename):
+            loadpath = filename
+        else:
+            raise FileNotFoundError(f"[Error] Load Topology: file not found: {filename} (Checked root and TopoGraph/)")
+
+        # --- 2. 加载文件 (使用找到的 loadpath) ---
+        if loadpath.endswith('.graphml'):
+            # node_type=int: 尝试将节点 ID 转为整数 (NSFNet graphml 中 id="0")
+            try:
+                G = nx.read_graphml(loadpath, node_type=int)
+            except Exception as e:
+                logger.error(f"Load Topology: {e}, trying default loader...")
+                G = nx.read_graphml(loadpath) # Fallback to default loader
+
+            # [关键] 强制转换节点 Label 为连续整数 (0, 1, 2...)
+            # 确保兼容 Mininet 的 h0, h1 命名规则
+            G = nx.convert_node_labels_to_integers(G, ordering='sorted')
+        
+        elif loadpath.endswith('.pkl'):
+            with open(loadpath, 'rb') as f:
+                G = pickle.load(f)
+        else:
+            raise ValueError(f"Unsupported format: {loadpath}")
+
+        # --- 3. 初始化动态属性 ---
+        # self.scale_topology_bandwidth(G, scale=0.1)  # 默认不缩放
+        self.G = self.update_graph_metric(G)
+        logger.info(f"Loaded Fixed Topo: {loadpath} | Nodes: {len(G.nodes())}")
+
+        return G
+  
+    def update_graph_metric(self, G):
+        """ 
+        手动计算图的中心性指标，并更新到 NetworkX 节点属性中。 
+        这样 vprint 函数才能读到非零值。 
+        """ 
+        # 1. 计算介数中心性 (Betweenness Centrality) 
+        # weight='delay' 表示计算基于延迟的最短路介数，比默认的跳数更准 
+        bet_dict = nx.betweenness_centrality(G, weight='delay', normalized=True)
+        
+        # 2. 计算 PageRank
+        try:
+            pr_dict = nx.pagerank(G, weight='bandwidth')
+        except:
+            # 某些图如果不连通可能会报错，给个兜底
+            pr_dict = {n: 0.0 for n in G.nodes()}
+
+        # 3. 计算聚类系数
+        clust_dict = nx.clustering(G)
+        
+        assert isinstance(clust_dict, dict), "clust_dict is not a dict"
+
+        # 4. 赋值回图节点
+        for n in G.nodes():
+            G.nodes[n]['pagerank'] = pr_dict.get(n, 0.0)
+            G.nodes[n]['betweenness'] = bet_dict.get(n, 0.0)
+            G.nodes[n]['clustering'] = clust_dict.get(n, 0.0)
+        
+        return G
+  
+    def scale_topology_bandwidth(self, G: nx.Graph, scale: float):
+        """
+        等比例缩放图中所有边的带宽。
+
+        Args:
+        G (nx.Graph): NetworkX 图对象 (会被原地修改)
+        scale (float): 缩放比例 (例如 1.5 代表增加 50%，0.8 代表减少 20%)
+
+        Returns:
+        nx.Graph: 修改后的图对象
+        """
+        # 遍历图中所有的边
+        # data=True 表示我们会获取边的属性字典
+        for u, v, data in G.edges(data=True):
+
+            # 检查这条边是否有带宽属性
+            # 获取旧带宽
+            old_bw = data['bandwidth']
+            # 计算新带宽
+            new_bw = old_bw * scale
+            # 更新属性
+            data['capacity'] = new_bw
+            data['bandwidth'] = new_bw
+
+        # vprint(f"[Graph] 已将拓扑带宽缩放 {scale} 倍 (Key: {bw_key})")
+        return G
+
+    def refresh_dynamic_state(self, G, difficulty=1.0):
+        """
+        [核心逻辑] 模拟网络动态变化
+        1. 随机生成背景流量 (Utilization)
+        2. 基于 M/M/1 模型推导 Delay 和 Loss
+        """
+        for u, v in G.edges():
+
+            for u, v in G.edges():
+                if difficulty < 0.3:
+                    # [简单模式] 几乎无拥塞，Agent 只需要学会连通性
+                    utilization = random.uniform(0.0, 0.1)
+                elif difficulty < 0.7:
+                    # [中等模式] 偶尔有拥塞
+                    utilization = random.uniform(0.2, 0.5)
+                else:
+                    # [困难模式] 真实的 Beta 分布，包含严重拥塞
+                    utilization = random.betavariate(2, 5)
+                
+            G[u][v]['utilization'] = utilization
+            # 获取物理属性
+            capacity = float(G[u][v].get('capacity', 100.0)) # Mbps
+            base_delay = float(G[u][v].get('delay', 5.0))    # ms (物理传播延迟)
+            
+            # 2. M/M/1 推导排队延迟 (Queueing Delay)
+            # Delay_total = Delay_prop + Delay_queue
+            # Delay_queue = (1 / (µ - λ)) - (1/µ)  => 简化为  Base / (1 - rho)
+            # 为了防止除以0，rho 上限设为 0.99
+            rho = min(utilization, 0.99)
+            
+            # 估算排队因子 (Scaling Factor)
+            # 假设当利用率 0% 时，延迟 = base_delay
+            # 当利用率 90% 时，延迟会显著增加
+            # 这里使用一个简化的排队公式:
+            queue_delay = (10.0 * rho) / (1.0 - rho) # 10.0 是排队系数
+            
+            total_delay = base_delay + queue_delay
+            
+            # 3. M/M/1/K 推导丢包率 (Packet Loss)
+            # 假设队列长度有限 (K)，根据利用率估算丢包概率
+            # 当利用率低时，丢包几乎为0；利用率接近1时，丢包指数上升
+            if rho < 0.8:
+                    loss = 0.0
+            else:
+                    loss = 1.0 * math.pow((rho - 0.8) / 0.2, 2)
+                
+            # 更新图属性 (供 Agent 观测)
+            G[u][v]['delay'] = total_delay
+            G[u][v]['loss' ] = loss
+            
+            # 更新带宽 (剩余带宽)
+            # available_bw = capacity * (1 - rho)
+            G[u][v]['bandwidth'] = capacity * (1.0 - rho)
+
+        return G
+
+    def select_source_destination(self) -> tuple[int, int]:
+        """随机选择不重复的源和目的节点。"""
+        if self.G is None:
+            raise ValueError("Topology must be generated first.")
+            
+        nodes = list(self.G.nodes())
+        
+        # 确保源和目的一定是连通的
+        while True:
+            s, d = random.sample(nodes, 2)
+            if nx.has_path(self.G, s, d):
+                return s, d
+</file>
+
+<file path="src/multi_service/utils/__init__.py">
+from .config_loadder import load_yaml_config, AttrDict
+from .networkx_watcher import get_graph_data
+
+from .ppo_memory import PPOMemory
+from .sdn_paraser import SdnParaser
+from .math_utils import compute_advantages
+from .fingerprint_manager import BankTrafficManager
+from .create_unique_log_dir import create_unique_log_dir
+from .routing_kernels import RoutingKernels
+from .checkpoint_manager import CheckpointManager
+</file>
+
+<file path="src/multi_service/utils/checkpoint_manager.py">
+import os
+import glob
+import re
+import json
+import subprocess
+import torch
+import tempfile
+
+from loguru import logger
+from typing import Optional, List, Dict, Any, Union
+from pathlib import Path
+from datetime import datetime
+
+# 假设 logger 已定义
+
+class CheckpointManager:
+    def __init__(self, checkpoint_dir: str, keep_count: int = 3, save_optimizer: bool = True):
+        self.checkpoint_dir = Path(checkpoint_dir)
+        self.keep_count = keep_count
+        self.save_optimizer = save_optimizer
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        # 维护一个 history 文件来避免加载大模型文件查找 best
+        self.history_file = self.checkpoint_dir / "history.json"
+        self._history = self._load_history()
+
+    def _load_history(self) -> List[Dict]:
+        if self.history_file.exists():
+            try:
+                with open(self.history_file, 'r') as f:
+                    return json.load(f)
+            except:
+                return []
+        return []
+
+    def _save_history(self) -> None:
+        with open(self.history_file, 'w') as f:
+            json.dump(self._history, f, indent=2)
+
+    @staticmethod
+    def get_git_commit_hash():
+        try:
+            return subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode('ascii').strip()
+        except Exception:
+            return "unknown"
+
+    def save(
+        self, 
+        model: torch.nn.Module, 
+        epoch: int | None = None, 
+        save_file: str | None = None,
+        metrics: Dict[str, float]| None = None, 
+        optimizer: torch.optim.Optimizer | None = None,
+        scheduler: torch.optim.lr_scheduler._LRScheduler | None = None,
+        **kwargs) -> str:
+        """
+        保存模型检查点，包含模型状态、优化器状态、学习率调度器状态、指标和 Git 提交哈希。
+        
+        参数:
+            model: 要保存的模型实例
+            epoch: 当前训练轮次（整数）
+            metrics: 训练指标字典（可选）
+            optimizer: 优化器实例（可选）
+            scheduler: 学习率调度器实例（可选）
+            **kwargs: 其他自定义字段（会被保存但不影响加载）
+            
+        返回:
+            检查点文件路径（字符串）
+        """
+        # --- 前置检查 (Pre-checks) ---
+        
+        # 1. 检查模型是否为空
+        if model is None:
+            raise ValueError("Cannot save checkpoint: 'model' is None.")
+            
+        # 2. 检查 Epoch 格式（防止传入 'last' 这种字符串导致后续排序崩溃）
+        # 只有当 save_file 未提供时，才严格检查 epoch
+        if save_file is None and (not isinstance(epoch, int) or epoch < 0):
+            raise ValueError(f"Epoch must be a non-negative integer, got {epoch} (type: {type(epoch)})")
+            
+        # 3. 检查保存目录是否存在（防止训练途中被人手滑删了文件夹）
+        # 如果不存在，这里可以做一个"自愈"操作，自动重建
+        if not self.checkpoint_dir.exists():
+            logger.warning(f"Checkpoint directory {self.checkpoint_dir} was missing. Re-creating it.")
+            self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+        # 4. 检查 Metrics 格式
+        if metrics is not None and not isinstance(metrics, dict):
+            logger.warning("'metrics' is not a dictionary. It might cause issues in history tracking.")
+            # 这里可以选择报错，也可以选择只是警告，看你对严谨性的要求
+
+        assert epoch is not None or save_file is not None, "Either epoch or save_file must be provided."
+
+        if epoch is not None:
+            filename = f"checkpoint_epoch_{epoch:06d}.pth"
+        
+        if save_file is not None:
+            checkpoint_path = self.checkpoint_dir / save_file
+        else :
+            checkpoint_path = self.checkpoint_dir / filename
+        
+        # 构造数据
+        checkpoint_data = {
+            'epoch': epoch,
+            'metrics': metrics,
+            'model_state_dict': model.state_dict(),
+
+            'optimizer_state_dict': optimizer.state_dict() if optimizer else None,
+            'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
+
+            'git_commit': self.get_git_commit_hash(),
+        }
+        
+        # 1. 原子化写入：先写临时文件，再 rename
+        try:
+            tmp_path = checkpoint_path.with_suffix('.tmp')
+            torch.save(checkpoint_data, tmp_path)
+            tmp_path.rename(checkpoint_path) # 原子操作，防止损坏
+            
+            # 2. 更新 history
+            self._history.append({
+                'epoch': epoch,
+                'path': str(checkpoint_path),
+                'metrics': metrics or {},
+                'timestamp': datetime.now().isoformat()
+            })
+            self._save_history()
+            
+            # 3. 清理旧权重 (基于 Epoch 排序，而非时间)
+            self._cleanup_old_checkpoints()
+            
+            return str(checkpoint_path)
+        except Exception as e:
+            logger.error(f"Error saving checkpoint: {e}")
+            raise e
+
+    def get_best_checkpoint(self, metric_key: str = 'reward', higher_is_better: bool = True) -> Optional[str]:
+        """
+        获取历史记录中最佳检查点路径，基于指定指标排序。
+        
+        参数:
+            metric_key: 要排序的指标键名（默认 'reward'）
+            higher_is_better: 是否指标值越高越好（默认 True）
+            
+        返回:
+            最佳检查点路径（字符串）或 None（如果没有记录或指标不存在）
+        """
+        if not self._history:
+            return None
+            
+        # 过滤掉没有该指标的记录
+        valid_records = [r for r in self._history if r.get('metrics') and metric_key in r['metrics']]
+        if not valid_records:
+            return None
+            
+        # 排序查找
+        sorted_records = sorted(
+            valid_records, 
+            key=lambda x: x['metrics'][metric_key], 
+            reverse=higher_is_better
+        )
+        best_record = sorted_records[0]
+        
+        # 验证文件是否存在
+        if os.path.exists(best_record['path']):
+            return best_record['path']
+        return None
+
+    def get_latest_checkpoint(self) -> str | None:
+        """
+        获取最新的 checkpoint 路径，基于 Epoch 排序。
+        
+        返回:
+            最新检查点路径（字符串）或 None（如果没有记录）
+        """
+        if not self._history:
+            return None
+            
+        # 按 epoch 从大到小排序
+        sorted_records = sorted(
+            self._history, 
+            key=lambda x: x['epoch'], 
+            reverse=True
+        )
+        latest_record = sorted_records[0]
+        
+        # 验证文件是否存在
+        if os.path.exists(latest_record['path']):
+            return latest_record['path']
+        return None
+    
+    def _cleanup_old_checkpoints(self) -> None:
+        # 基于文件名中的 epoch 数字解析，比 getmtime 更可靠
+        files = list(self.checkpoint_dir.glob("*_epoch_*.pth"))
+        
+        def parse_epoch(p: Path):
+            # 提取 000123
+            match = re.search(r'epoch_(\d+)', p.name)
+            return int(match.group(1)) if match else -1
+
+        # 按 epoch 从小到大排序
+        files.sort(key=parse_epoch)
+        
+        if len(files) > self.keep_count:
+            files_to_delete = files[:-self.keep_count]
+            for f in files_to_delete:
+                try:
+                    f.unlink() # Pathlib 的删除方法
+                    # 同步从 history 中移除
+                    self._history = [h for h in self._history if h['path'] != str(f)]
+                except Exception:
+                    pass
+            self._save_history()
+
+    def load(
+        self,
+        model: torch.nn.Module,
+        checkpoint_path: str | None = None,
+        optimizer: torch.optim.Optimizer | None = None,
+        scheduler: torch.optim.lr_scheduler._LRScheduler | None = None,
+        normalizer: Any | None = None,  # 新增：RL 专用的 RunningMeanStd 归一化器
+        device: str | torch.device = 'cpu',
+        strict: bool = True
+    ) -> Dict[str, Any]:
+        """
+        全能加载函数：支持断点续训和推理评估
+        
+        Args:
+            model: 模型实例 (必须)
+            checkpoint_path: 指定路径。如果为 None，自动查找最新的。
+            optimizer: 优化器。续训时必须传，推理时为 None。
+            scheduler: 学习率调度器。续训时建议传。
+            normalizer: RL 的状态归一化器 (RunningMeanStd)。RL 必须传！
+            device: 'cpu' 或 'cuda:0'。自动处理跨设备加载。
+            strict: 是否严格匹配模型键值 (微调时可设为 False)。
+            
+        Returns:
+            info_dict: 包含 'start_epoch', 'global_step', 'config', 'metrics' 等信息的字典
+        """
+        # 1. 确定加载哪个文件
+        if checkpoint_path is None:
+            checkpoint_path = self.get_latest_checkpoint()
+            if checkpoint_path is None:
+                logger.warning("No checkpoint found to load.")
+                return {} # 返回空字典，由外部判断是否报错
+        
+        ckpt_path_obj = Path(checkpoint_path)
+        if not ckpt_path_obj.exists():
+            logger.error(f"Checkpoint file not found: {ckpt_path_obj}")
+            raise FileNotFoundError(f"Checkpoint file not found: {ckpt_path_obj}")
+
+        logger.info(f"Loading checkpoint from: {ckpt_path_obj} ...")
+
+        try:
+            # 2. 加载文件 (处理 map_location 防止 GPU/CPU 不匹配报错)
+            checkpoint_data = torch.load(ckpt_path_obj, map_location=device)
+
+            # 3. 加载模型权重 (Model)
+            # state_dict key 可能会有 'module.' 前缀 (如果你用了 DataParallel)，这里可以自动修剪
+            state_dict = checkpoint_data['model_state_dict']
+            # consume_prefix_in_state_dict_if_present(state_dict, "module.") # 如果需要兼容多卡
+
+            new_state_dict = {}
+            for k, v in state_dict.items():
+                # 将旧的 gnn. 前缀替换为新的 encoder. 前缀
+                if k.startswith('gnn.'):
+                    new_key = k.replace('gnn.', 'encoder.')
+                    new_state_dict[new_key] = v
+                else:
+                    new_state_dict[k] = v
+            model.load_state_dict(new_state_dict, strict=strict)
+            
+            # 4. 加载优化器 (Optimizer) - 仅当传入且存在时
+            if optimizer is not None:
+                if 'optimizer_state_dict' in checkpoint_data:
+                    optimizer.load_state_dict(checkpoint_data['optimizer_state_dict'])
+                else:
+                    logger.warning("Optimizer provided but missing in checkpoint.")
+                    
+            # 5. 加载调度器 (Scheduler)
+            if scheduler is not None:
+                if 'scheduler_state_dict' in checkpoint_data:
+                    scheduler.load_state_dict(checkpoint_data['scheduler_state_dict'])
+                else:
+                    logger.warning("Scheduler provided but missing in checkpoint.")  
+            
+            # 6. 加载 RL 归一化器 (Normalizer) - 关键！
+            if normalizer is not None:
+                # 兼容不同的命名习惯，尝试找 obs_normalizer 或 running_mean_std
+                if 'obs_normalizer' in checkpoint_data:
+                    normalizer.load_state_dict(checkpoint_data['obs_normalizer'])
+                elif 'obs_rms' in checkpoint_data: # 另一种常见的命名
+                    normalizer.load_state_dict(checkpoint_data['obs_rms'])
+                else:
+                    logger.warning("Normalizer provided but missing in checkpoint.")
+
+            # 7. 提取元数据用于恢复训练状态
+            loaded_epoch = checkpoint_data.get('epoch', -1)
+            loaded_epoch = -1 if loaded_epoch is None else loaded_epoch
+            info = {
+                'start_epoch': loaded_epoch + 1,  # 续训应该从下一轮开始
+                'global_step': checkpoint_data.get('global_step', 0),
+                'config': checkpoint_data.get('config', {}),
+                'metrics': checkpoint_data.get('metrics', {}),
+                'best_metric': checkpoint_data.get('best_metric', None), # 如果你有存这个
+                'checkpoint_path': str(ckpt_path_obj)
+            }
+            
+            logger.info(f"Successfully loaded. Resume from Epoch {info['start_epoch']}.")
+            return info
+
+        except Exception as e:
+            logger.error(f"Failed to load checkpoint: {e}")
+            raise e
+</file>
+
+<file path="src/multi_service/utils/config_loadder.py">
+import yaml
+import os
+import shutil
+from pathlib import Path
+from .create_unique_log_dir import create_unique_log_dir
+
+class AttrDict(dict):
+    """
+    一个简单的扩展类，允许通过 . 访问字典属性，并支持递归嵌套。
+    例如：config.QOS_REWARD_PARAMS.GAMING.max_delay
+    """
+    def __init__(self, *args, **kwargs):
+        super(AttrDict, self).__init__(*args, **kwargs)
+        for key, value in self.items():
+            if isinstance(value, dict):
+                self[key] = AttrDict(value)
+
+    def __getattr__(self, key: str):
+        try:
+            return self[key]
+        except KeyError:
+            raise AttributeError(f"Configuration has no attribute '{key}'")
+
+def load_yaml_config(yaml_path: str) -> AttrDict:
+    """
+    调用 YAML 文件的核心函数。
+    """
+    if not os.path.exists(yaml_path):
+        raise FileNotFoundError(f"Config file not found: {yaml_path}")
+
+    with open(yaml_path, 'r', encoding='utf-8') as f:
+        try:
+            config_dict = yaml.safe_load(f)
+            # 封装为对象形式返回 
+            config = AttrDict(config_dict)
+            if hasattr(config, 'path'):
+                if hasattr(config.path, 'output_dir'):
+                    debug_mode = config.get("debug_mode", False)
+                    if debug_mode:
+                        # In debug mode, redirect everything to /tmp to avoid cluttering the workspace
+                        base_tmp = f"workspace/tmp/{config.name.exp_name}_debug"
+                        config.path.output_dir = base_tmp
+                        config.path.log_dir = os.path.join(base_tmp, "logs/")
+                        config.path.ckpt_dir = os.path.join(base_tmp, "checkpoints/")
+                        config.path.eval_dir = os.path.join(base_tmp, "eval_results/")
+                        config.path.config_dir = os.path.join(base_tmp, "configs/")
+                        
+                        if os.path.exists(base_tmp):
+                            shutil.rmtree(base_tmp)
+
+                        os.makedirs(config.path.log_dir, exist_ok=True)
+                        os.makedirs(config.path.ckpt_dir, exist_ok=True)
+                        os.makedirs(config.path.eval_dir, exist_ok=True)
+                        os.makedirs(config.path.config_dir, exist_ok=True)
+                        try:
+                            os.chmod(base_tmp, 0o777)
+                        except OSError:
+                            pass
+
+                    elif not "eval" in config.name.exp_name:
+                        config.path.output_dir = create_unique_log_dir(config.path.output_dir, experiment_name=config.name.exp_name)
+                        config.path.log_dir = os.path.join(config.path.output_dir, "logs/")
+                        config.path.ckpt_dir = os.path.join(config.path.output_dir, "checkpoints/")
+                        config.path.eval_dir = os.path.join(config.path.output_dir, "eval_results/")
+                        config.path.config_dir = os.path.join(config.path.output_dir, "configs/")
+
+                        os.chmod(config.path.output_dir, mode=0o777)
+                        if hasattr(config.path, 'log_dir'):
+                            os.makedirs(config.path.log_dir , exist_ok=True)
+                            os.chmod(config.path.log_dir, mode=0o777)
+                        if hasattr(config.path, 'ckpt_dir'):
+                            os.makedirs(config.path.ckpt_dir, exist_ok=True)
+                            os.chmod(config.path.ckpt_dir, mode=0o777)
+                        if hasattr(config.path, 'eval_dir'):
+                            os.makedirs(config.path.eval_dir, exist_ok=True)
+                            os.chmod(config.path.eval_dir, mode=0o777)
+                        if hasattr(config.path, 'config_dir'):
+                            os.makedirs(config.path.config_dir, exist_ok=True)
+                            os.chmod(config.path.config_dir, mode=0o777)
+
+            # 延迟导入 save_configs 以避免循环导入
+            from .config_saver import save_configs
+            return config
+        except yaml.YAMLError as e:
+            print(f"Error parsing YAML file: {e}")
+            return None  # pyright: ignore[reportReturnType]
+</file>
+
+<file path="src/multi_service/utils/config_saver.py">
+import os
+from omegaconf import DictConfig
+import yaml
+
+from loguru import logger
+
+def save_configs(config: DictConfig):
+    # 1. 保存完整的训练配置 (Train Config)
+    train_cfg_path = os.path.join(config.path.config_dir, "train_eval.yaml")
+    eval_cfg_path = os.path.join(config.path.config_dir, "eval_config.yaml")
+
+    with open(train_cfg_path, 'w', encoding='utf-8') as f:
+        # 将 AttrDict 转回 dict 进行 dump 
+        yaml.dump(dict(config), f, indent=2, sort_keys=False, allow_unicode=True)
+    
+    # 2. 构造精简的评估配置 (Eval Config)
+    # 只挑选评估需要的核心参数，例如模型架构和环境归一化参数 
+
+    eval_dict = {
+        "model": dict(config.model),
+        "env": dict(config.env) if hasattr(config, "env") else None,
+        "path": {
+        "eval_output" : config.path.eval_dir,
+        "ckpt_dir": config.path.ckpt_dir
+        }
+    }
+    
+    with open(eval_cfg_path, 'w', encoding='utf-8') as f:
+        yaml.dump(eval_dict, f, indent=2, sort_keys=False, allow_unicode=True)
+    
+    logger.info(f"Configs saved to {config.path.config_dir}")
+</file>
+
+<file path="src/multi_service/utils/create_unique_log_dir.py">
+from datetime import datetime
+import os
+
+def create_unique_log_dir(base_log_path, experiment_name="Exp"):
+    """
+    在基础路径下创建一个带有时间戳的子文件夹
+    输入: workspace/logs, "PPO_Training"
+    输出: workspace/logs/20251219_143005_PPO_Training
+    """
+    # 1. 生成时间戳字符串 (年月日_时分秒)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # 2. 拼接完整的文件夹路径 
+    unique_dir_name = f"{timestamp}_{experiment_name}"
+    full_path = os.path.join(base_log_path, unique_dir_name)
+    
+    # 3. 物理创建文件夹
+    os.makedirs(full_path, exist_ok=True)
+    
+    return full_path
+</file>
+
+<file path="src/multi_service/env/flow_generator.py">
+import random
+import networkx as nx
+import time
+import heapq
+import os  # 需要引入 os 模块来创建目录
+from enum import Enum
+from loguru import logger
+
+# === 配置与定义 ===
+class FlowType(Enum):
+    VOIP = 1
+    STREAMING = 2
+
+FLOW_PROFILES = {
+    FlowType.VOIP: {
+        'type': 'VOIP', 'protocol': 'UDP', 'ditg_preset': 'VoIP -x G.711.2',
+        'qoe_critical': {'max_delay': 150, 'max_jitter': 50}, 'reward_fn': 'E-Model'
+    },
+    FlowType.STREAMING: {
+        'type': 'STREAMING', 'protocol': 'UDP',
+        'ditg_manual': ' -c 1000 -C 3000',
+        'qoe_critical': {'min_bandwidth': 5, 'max_loss_rate': 1e-6}, 'reward_fn': '3GPP-QCI6'
+    }
+}
+
+class FlowGenerator:
+    def __init__(self):
+        pass
+
+    def get_random_flow(self) -> tuple[FlowType, dict]:
+        """随机选择一个流类型及其配置文件。"""
+        flow_type = random.choice(list(FlowType))
+        profile = FLOW_PROFILES[flow_type]
+        return flow_type, profile
+
+    # =========================================================================
+    # [核心模块] 背景流量生成 (Gravity Model + Aggregation)
+    # =========================================================================
+
+    def generate_traffic_matrix(self, nodes, G_nx, total_load_mbps=500.0):
+        """
+        [终极完整版] 基于等级重力 + 瓶颈约束 + 信令保留的流量生成算法
+        
+        Args:
+        nodes: 节点列表
+        G_nx: NetworkX 图对象 (必须包含 'capacity' 和 'tier' 属性)
+        total_load_mbps: 期望生成的全网总流量
+        """
+        tm = {}
+        
+        # ==========================================
+        # 1. 配置参数
+        # ==========================================
+        # [信令保护] 预留 0.5 Mbps 给 LLDP/OpenFlow/心跳包
+        SIGNALING_RESERVE = 0.5 
+        
+        # [等级重力] 定义不同等级节点的权重范围
+        # Tier 1 (Core): 权重 20-30 (引力极大)
+        # Tier 2 (Agg) : 权重 5-10  (引力中等)
+        # Tier 3 (Edge): 权重 1-3   (引力小)
+        TIER_MULTIPLIERS = {
+            1: (20.0, 30.0),
+            2: (5.0, 10.0),
+            3: (1.0, 3.0)
+        }
+
+        # ==========================================
+        # 2. 预计算路径瓶颈 (Bottleneck Calculation)
+        # ==========================================
+        # 目的：找出两点之间最窄的那段路，作为流量上限
+        path_bottlenecks = {}
+        
+        for u in nodes:
+            for v in nodes:
+                if u == v: continue
+                try:
+                    # 假设背景流走最短路 (Shortest Path)
+                    path = nx.shortest_path(G_nx, u, v)
+                    
+                    min_bw = float('inf')
+                    for i in range(len(path) - 1):
+                        u_curr, v_next = path[i], path[i+1]
+                        
+                        # 获取物理容量，默认为 100.0
+                        raw_cap = G_nx[u_curr][v_next].get('capacity', 100.0)
+                        
+                        # [关键] 强制扣除信令保留带宽
+                        usable_cap = max(0.0, raw_cap - SIGNALING_RESERVE)
+                        
+                        if usable_cap < min_bw:
+                            min_bw = usable_cap
+                    
+                    path_bottlenecks[(u, v)] = min_bw
+                    
+                except nx.NetworkXNoPath:
+                    path_bottlenecks[(u, v)] = 0.0
+
+        # ==========================================
+        # 3. 计算节点权重 (Tier-Aware Gravity)
+        # ==========================================
+        node_weights = {}
+        for node in nodes:
+            # 获取节点等级，默认为 3 (Edge)
+            # 注意：请确保你的图是通过 apply_gravity_bandwidth_model 处理过的
+            tier = G_nx.nodes[node].get('tier', 3)
+            
+            # 根据等级获取权重范围
+            min_w, max_w = TIER_MULTIPLIERS.get(tier, (1.0, 3.0))
+            node_weights[node] = random.uniform(min_w, max_w)
+
+        total_weight_score = sum(node_weights.values())
+
+        # ==========================================
+        # 4. 生成初步流量 (Initial Allocation)
+        # ==========================================
+        potential_flows = []
+        total_interaction_score = 0.0
+        
+        for u in nodes:
+            for v in nodes:
+                if u == v: continue
+                
+                bottleneck = path_bottlenecks.get((u, v), 0)
+                if bottleneck <= 0.1: continue # 路不通或带宽太小，跳过
+
+                # 重力公式：流量 ~ 权重u * 权重v
+                # Tier 1 <-> Tier 1 的得分将远高于 Edge <-> Edge
+                score = node_weights[u] * node_weights[v]
+                
+                # 加入随机扰动 (0.8 - 1.2)
+                score *= random.uniform(0.8, 1.2)
+                
+                potential_flows.append({
+                    'src': u,
+                    'dst': v,
+                    'score': score,
+                    'limit': bottleneck # 携带物理上限
+                })
+                total_interaction_score += score
+
+        if total_interaction_score == 0: return {}
+
+        # ==========================================
+        # 5. 分配实际带宽 (Apply Constraints)
+        # ==========================================
+        for flow in potential_flows:
+            # 按比例瓜分总负载
+            # 乘以 1.5 是因为后面会有截断，为了让总流量接近预期，稍微给点盈余
+            target_bw = (flow['score'] / total_interaction_score) * total_load_mbps * 1.5
+            
+            # [铁律] 绝对截断：不超过路径瓶颈的 95%
+            # 既留出了信令空间，又防止了单流撑爆链路
+            safe_max = flow['limit'] * 0.95
+            
+            final_bw = min(target_bw, safe_max)
+            
+            # 过滤掉小于 0.1M 的无意义微小流
+            if final_bw > 0.1:
+                tm[(flow['src'], flow['dst'])] = final_bw
+
+        # ==========================================
+        # 6. 聚合优化 (Aggregation)
+        # ==========================================
+        MAX_BG_FLOWS = 80 # 限制总流数，防止 Mininet 卡死
+
+        if len(tm) > MAX_BG_FLOWS:
+            # 选出 Top N 大流
+            top_flows = heapq.nlargest(MAX_BG_FLOWS, tm.items(), key=lambda x: x[1])
+            
+            # [注意] 这里不再进行 Scale Up (放大)
+            # 原因：如果放大，可能会导致原本被 limit 限制住的流再次突破瓶颈
+            # 我们宁愿流量少一点，也要保证物理安全
+            final_tm = dict(top_flows)
+            
+            logger.info(f"Optimized: kept top {MAX_BG_FLOWS} flows. Max flow: {top_flows[0][1]:.2f} Mbps")
+            return final_tm
+        
+        return tm
+
+    def simulate_tm_on_graph(self, G, tm_dict):
+        """
+        [Step 2: Simulate]
+        在内存中预演流量矩阵，计算利用率、延迟和丢包。
+        """
+        edge_loads = {e: 0.0 for e in G.edges()}
+
+        # 模拟最短路路由
+        for (s, d), bw in tm_dict.items():
+            try:
+                path = nx.shortest_path(G, s, d, weight=None)
+                for i in range(len(path) - 1):
+                    u, v = path[i], path[i+1]
+                    if (u, v) in edge_loads: edge_loads[(u, v)] += bw
+                    elif (v, u) in edge_loads: edge_loads[(v, u)] += bw
+            except nx.NetworkXNoPath:
+                continue 
+
+        # 更新图属性 (MM1 模型)
+        for u, v, data in G.edges(data=True):
+            capacity = float(data.get('capacity', 100.0))
+            prop_delay = float(data.get('base_delay', 5.0)) # 假设原始延迟存为 base_delay
+            
+            current_load = edge_loads.get((u, v), 0.0) + edge_loads.get((v, u), 0.0)
+            rho = min(current_load / (capacity + 1e-6), 0.999)
+            
+            # M/M/1 延迟公式
+            queue_delay = 10.0 * (rho / (1.0 - rho))
+            total_delay = prop_delay + min(queue_delay, 500.0)
+            
+            # 丢包率模型 (Soft Threshold)
+            if rho < 0.8: loss = 0.0
+            else: loss = 0.05 * ((rho - 0.8) / 0.2) ** 2
+
+            data['utilization'] = rho
+            data['bandwidth'] = capacity * (1.0 - rho)
+            data['delay'] = total_delay
+            data['loss'] = loss
+
+        return G
+
+    def apply_traffic_matrix_to_mininet(self, net, tm_dict, G_nx, install_rules_func, duration=1000):
+        """
+        [Step 4: Execute]
+        注入背景流 (Ghost Traffic)。
+        增强功能：详细的生命周期打印 & 独立日志记录。
+        """
+        logger.info(f"Injecting {len(tm_dict)} background flows (Ghost Strategy)...")
+        logger.debug(f"Duration set to: {duration} seconds (Ensure this > target flow time!)")
+        
+        BG_COOKIE = 0xB000
+        BG_TOS = 184
+
+        # ==========================================
+        # Phase 0: 确保接收端在线 (Signaling Ready)
+        # ==========================================
+        logger.debug("Starting ITGRecv daemons on all hosts...")
+        for h in net.hosts:
+        # 建议记录 Recv 日志以便排查控制平面问题
+            h.popen(f"nice -n 2 ITGRecv > /tmp/itgrecv_{h.name}.log 2>&1 &")
+        
+        time.sleep(1)
+        # ==========================================
+        # Phase 1: 铺设路径 & 设置陷阱
+        # ==========================================
+        logger.debug("Installing routing rules & Ghost drop policies...")
+        configured_drops = set()
+
+        for (u, v) in tm_dict.keys():
+            try:
+                path_nodes = nx.shortest_path(G_nx, u, v, weight=None)
+            except:
+                continue
+
+            # 1.1 全程铺路 (Forwarding)
+            if len(path_nodes) > 1:
+                install_rules_func(net, path_nodes, tos=BG_TOS, dst_port=11000, cookie=BG_COOKIE)
+
+            # 1.2 终点设卡 (Drop UDP Only)
+            dst_host = net.get(f'h{v}')
+            dst_ip = dst_host.IP()
+            last_switch_name = f's{path_nodes[-1]}'
+            last_switch = net.get(last_switch_name)
+            
+            drop_key = (last_switch_name, dst_ip)
+            if drop_key not in configured_drops:
+                # [CRITICAL FIX] 只丢弃 UDP 数据包 (nw_proto=17)，放行 TCP 握手信令
+                cmd_drop = (
+                f'ovs-ofctl -O OpenFlow13 add-flow {last_switch_name} '
+                f'"cookie={hex(BG_COOKIE)},priority=200,dl_type=0x0800,'
+                f'nw_dst={dst_ip},nw_proto=17,nw_tos={BG_TOS},actions=drop"'
+                )
+                last_switch.cmd(cmd_drop)
+                configured_drops.add(drop_key)
+
+        time.sleep(1.0) # 稍微多给点时间让流表同步到 Datapath
+
+        # ==========================================
+        # Phase 2: 启动发送端 (带详细监控)
+        # ==========================================
+
+        bg_processes = [] # 存储进程对象，防止被垃圾回收
+
+        count = 0
+        for (u, v), bw in tm_dict.items():
+            h_src = net.get(f'h{u}')
+            h_dst = net.get(f'h{v}')
+            dst_ip = h_dst.IP()
+            
+            # 计算 PPS
+            pps = min(int(bw * 1_000_000 / 8000), 3000)
+            if pps < 1: pps = 1
+            # ITGSend 命令
+            # 使用 nohup 或直接后台运行，并将输出重定向到文件
+            cmd_send = (
+                f"ITGSend -a {dst_ip} "
+                f"-T UDP "
+                f"-C {pps*2} "
+                f"-c 1000 "
+                f"-rp 11000 "
+                f"-t {duration * 1000} "
+                f"-b {BG_TOS} "
+            )
+            
+            # 使用 popen 启动并在 Python 层持有句柄
+            proc = h_src.popen(cmd_send, shell=True)
+            bg_processes.append(proc)
+        
+            count += 1
+            if count % 10 == 0: time.sleep(0.1)
+
+        return bg_processes
+</file>
+
+<file path="src/multi_service/env/sdn_wrapper.py">
+from omegaconf import DictConfig, ListConfig
+from torch_geometric.data.data import Data
+from loguru import logger
+import time
+from typing import Any, Literal
+import torch
+import networkx as nx
+import random
+from mininet.cli import CLI
+from omegaconf import DictConfig
+from . import sdn_controller as mc
+from .flow_generator import FLOW_PROFILES, FlowType
+from .flow_generator import FlowGenerator
+from .network_generator import TopologyGenerator
+from ..utils import AttrDict, get_graph_data
+
+
+
+class SdnWrapper:
+    # 初始化背景流
+    def __init__(self, topo: nx.Graph, config: DictConfig, bg_traffic_nodes: list | None = None) -> None:
+        """
+        __init__ 的 Docstring
+        
+        :param 
+            topo: 拓扑图
+            config: 
+                max_steps: 最大寻路跳数
+                bg_cookie: 背景流cookie
+                flow_cookie: 业务流cookie
+                bg_duration: 背景流持续时间
+                total_flow_load: 默认背景流负载
+            bg_traffic_nodes: 允许生成背景流的节点列表 (默认为 None，表示全图)
+        """
+        self.config = config
+        self.bg_traffic_nodes = bg_traffic_nodes
+
+        # --- 1. 基础组件初始化 ---
+        self.flow_gen = FlowGenerator()
+        self.topo_gen = TopologyGenerator()
+
+        self.blueprint_G = topo
+        self.current_G = self.blueprint_G.copy()
+
+        self.src_nodes = config.topo.train.src_nodes
+        self.dst_nodes = config.topo.train.dst_nodes
+
+        # --- 2. 启动 Mininet (修复顺序 Bug) ---
+        # 必须先创建生成器对象，再 enter
+        self.net_gen = mc.get_a_mininet(self.blueprint_G.copy(), is_test=False)
+        self.net = self.net_gen.__enter__()
+        
+        # 启动后才能初始化监控
+        self.monitor = mc.NetworkMonitor(self.net)
+        
+        # --- 3. 状态管理 ---
+        self.bg_processes = []
+        self.bg_start_time = 0
+        self.active_cookies = set()
+
+        # --- 4. Cookie 与 配置 ---
+        self.cookie_mask = 0xF000
+        self.bg_cookie_start = getattr(config.env, 'bg_cookie', 0xB000)
+        self.agent_cookie_start = getattr(config.env, 'flow_cookie', 0xA000)
+        self.bg_duration = getattr(config.env, 'bg_duration', 60) 
+        
+        # 任务状态
+        self.s_node = None
+        self.d_node = None
+        self.current_flow_type = None
+        self.step_count = 0 
+        self.path_so_far = [] 
+        self.current_node = None 
+        self.dist_matrix = dict(nx.all_pairs_shortest_path_length(self.blueprint_G))
+        self.shaping_weight = getattr(config.env, 'shaping_weight', 0.1)
+    
+    # 重新启动背景流量/重新发送业务流
+    def reset_bg(self, current_load_mbps: float | None = None) -> Data:
+        """
+        Args:
+            force_hard (bool): 强制执行 Hard Reset
+            current_load_mbps (float): [课程学习] 指定当前的背景流量负载
+        """
+        target_load = current_load_mbps if current_load_mbps else self.config.env.total_load_mbps
+        self._hard_reset_background_traffic(target_load)
+
+        return self.get_observation()
+
+    def reset_flow(self):
+        mc.clean_flow_rules(self.net, cookie=self.agent_cookie_start, mask=self.cookie_mask)
+        return self.get_observation()
+    
+    # 动作掩码
+    def get_action_mask(self):
+        """
+        生成最终可用的动作掩码 (True 代表合法动作)
+        统一处理所有掩码规则：
+            1. 边的起点必须是当前节点
+            2. 禁止走回头路（除非只有回头路可走）
+            3. 排除已访问过的所有节点（不仅是前一个）
+        """
+
+        edge_index = self.observation_data.edge_index
+
+        assert(edge_index is not None)
+        num_edges = edge_index.shape[1]
+        mask = torch.zeros(num_edges, dtype=torch.bool)
+        
+        # 获取所有边的起点和终点
+        source_nodes = edge_index[0, :]
+        target_nodes = edge_index[1, :]
+        
+        # 1. 基础规则：边的起点必须是当前节点
+        is_current_node_edge = (source_nodes == self.current_node)
+        
+        # 2. 获取已访问节点集合
+        visited_nodes = set(self.path_so_far)
+        
+        # 3. 生成掩码：只允许到未访问节点的边
+        valid_edges = torch.zeros(num_edges, dtype=torch.bool)
+        for i in range(num_edges):
+            if is_current_node_edge[i]:
+                target_node = target_nodes[i].item()
+                if target_node not in visited_nodes:
+                    valid_edges[i] = True
+        
+        # 4. 严格规则：只返回有效边，如果是死胡同则全为False
+        mask = valid_edges
+            
+        return mask
+    
+    # 更新图状态，返回图状态
+    def get_observation(self):
+        # --- 1. 物理同步 ---
+        self.current_G = self.monitor.sync_state_to_graph(duration=0.05)
+        
+        # --- 2. 特征提取 ---
+        # Hop-by-Hop 关键：S_node 填 self.current_node
+        assert isinstance(self.current_node, int), "self.current_node 必须是整数"
+        assert(self.current_node is not None)
+        assert(self.d_node is not None)
+
+        data, _ = get_graph_data(
+            self.current_G.copy(), 
+            self.current_node, 
+            self.d_node,      
+            self.config 
+        )
+        
+        self.observation_data = data
+        data.action_mask = self.get_action_mask()
+
+        return data
+    
+    # 结束环境
+    def close(self):
+        logger.info("Closing environment...")
+        self._kill_bg_processes()
+        # 退出前最后清理一次，保持宿主机干净
+        mc.clean_flow_rules(self.net, cookie=self.bg_cookie_start, mask=self.cookie_mask)
+        mc.clean_flow_rules(self.net, cookie=self.agent_cookie_start, mask=self.cookie_mask)
+        
+        if hasattr(self, 'net_gen') and self.net_gen:
+            try:
+                self.net_gen.__exit__(None, None, None)
+            except Exception as e:
+                print(f"Error closing mininet context: {e}")
+
+    # 重置背景流，打印新的网络状态
+    def _hard_reset_background_traffic(self, load_mbps: float):
+        """
+        环境重置：注入指定负载的背景流
+        """
+        logger.info(f">>> Hard Reset | Load: {load_mbps:.1f} Mbps <<<")
+        
+        # 1. 清理
+        self._kill_bg_processes()
+        mc.clean_flow_rules(self.net, cookie=self.bg_cookie_start, mask=self.cookie_mask)
+        mc.clean_flow_rules(self.net, cookie=self.agent_cookie_start, mask=self.cookie_mask)
+        self.active_cookies.clear()
+        
+        # 2. 生成 (使用传入的动态负载)
+        
+        # 确定生成背景流的节点集合
+        bg_nodes = self.bg_traffic_nodes if self.bg_traffic_nodes is not None else list(self.blueprint_G.nodes())
+        
+        tm = self.flow_gen.generate_traffic_matrix(
+            bg_nodes, 
+            self.blueprint_G.copy(), 
+            total_load_mbps=load_mbps 
+        )
+        
+        # 3. 注入 (1.5倍冗余时长)
+        safe_duration = int(self.bg_duration * 1.5)
+        self.bg_processes = self.flow_gen.apply_traffic_matrix_to_mininet(
+            self.net, tm, self.blueprint_G.copy(), 
+            install_rules_func=mc.install_path_rules,
+            duration=safe_duration
+        )
+        
+        # 4. 更新时间戳
+        self.bg_start_time = time.time()
+        
+        # 5. 等待流量稳定 (给 TCP 爬坡和队列积压一点时间)
+        time.sleep(3)
+
+        for _ in range(3):
+            self.get_observation()
+            time.sleep(0.5)
+
+    # 清空背景流
+    def _kill_bg_processes(self):
+        for proc in self.bg_processes:
+            try:
+                proc.terminate() # 先尝试温和终止
+                proc.wait(timeout=0.1)
+            except:
+                try:
+                    proc.kill() # 强制杀死
+                except:
+                    pass
+        self.bg_processes = []
+
+    # 执行一跳动作，获取环境奖励
+    def step(
+        self, action_edge_idx: int
+    ) -> tuple[Data, float | Any, Literal[True], dict[str, Any]] | tuple[Any | Data, Any, bool, dict[str, Any]]:
+        """
+        执行一跳动作，返回下一个状态、奖励、是否结束、额外信息
+        params:
+            action_edge_idx: 动作索引，对应 edge_index 中的边
+
+        Returns: 
+            next_state: 下一个状态
+            reward: 奖励
+            done: 是否结束
+            info: 额外信息
+        """
+        info: dict[str, Any] = {}
+
+        # 1. 解析动作
+        assert(self.observation_data.edge_index is not None)
+
+        try:
+            # 增加防越界保护
+            u = self.observation_data.edge_index[0, action_edge_idx].item()
+            v = self.observation_data.edge_index[1, action_edge_idx].item()
+        except IndexError:
+            logger.error("Action index out of bounds!")
+            import traceback
+            traceback.print_exc()
+            exit()
+        
+        # 2. 合法性检查
+        if u != self.current_node:
+            logger.error(f"Illegal Move: {self.current_node} -> {u} impossible. Valid edges start from {self.current_node}")
+            import traceback
+            traceback.print_exc()
+            exit()
+
+        # 3. 执行移动
+        self.current_node = v
+        self.path_so_far.append(v)
+        self.step_count += 1
+        
+        done = False
+
+        step_reward = 0
+        
+        assert(self.current_flow_type is not None)
+        
+        info['flow_type'] = self.current_flow_type.name
+
+        # 4. 状态判定
+        if v == self.d_node:
+            # === Success ===
+            done = True
+        
+            # 生成 Cookie
+            cookie = self.agent_cookie_start + len(self.active_cookies) % 4096
+            self.active_cookies.add(cookie)
+
+            # 打印路径状态 (用于调试)
+            logger.debug(f"Path: {self.path_so_far}, FlowType: {self.current_flow_type.name.upper()}")
+            
+            protocol_str = FLOW_PROFILES[self.current_flow_type]['protocol']
+            # A. 下发规则
+            mc.install_path_rules(
+                self.net, self.path_so_far, 
+                tos=32, dst_port=12000, cookie=cookie, protocol=protocol_str)
+
+            # B. 测量 QoS
+            src_host = self.net.get(f'h{self.s_node}')
+            dst_host = self.net.get(f'h{self.d_node}')
+            
+            qos_reward, qoe_reward = mc.measure_path_qos(
+                server=dst_host,
+                client=src_host,
+                path_route=self.path_so_far,
+                flow_type=self.current_flow_type,
+                config=self.config )
+            
+            logger.debug(f"QoS: {qos_reward:.4f} | QoE: {qoe_reward:.4f} | Path: {self.path_so_far}")
+            total_reward = qos_reward # 这里你可以选择返回 qos_reward 还是 qoe_reward
+
+            info['qos'] = qos_reward
+            info['path'] = self.path_so_far
+
+            return self.get_observation(), total_reward, True, info
+
+        elif v in self.path_so_far[:-1]:
+            # === Loop ===
+            done = True
+            step_reward -= 10.0 
+            info['error'] = 'loop_detected'
+
+        elif self.step_count >= self.config.topo.train.max_steps:
+            # === Timeout ===
+            done = True
+            step_reward -= 10.0 # 超时惩罚
+            info['error'] = 'max_steps'
+
+        # 5. 更新观察 (Observation)
+        # 下一跳的 Observation 中，Source 特征可能需要变为 Current Node
+        # 或者你需要让 GNN 知道 "Current Position" 在哪里
+        next_state = self.get_observation()
+        return next_state, step_reward, done, info
+
+    def get_path_reward(
+        self, s_node: int, d_node: int, path_route: list[int], flow_type: FlowType
+    ):
+        cookie = self.agent_cookie_start + len(self.active_cookies) % 4096
+        self.active_cookies.add(cookie)
+
+        # 打印路径状态 (用于调试)
+        logger.debug(f"Path: {path_route}, FlowType: {flow_type.name.upper()}")
+        
+        protocol_str = FLOW_PROFILES[flow_type]['protocol']
+        # A. 下发规则
+        mc.install_path_rules(
+            self.net, path_route, 
+            tos=32, dst_port=12000, cookie=cookie, protocol=protocol_str)
+
+        # B. 测量 QoS
+        src_host = self.net.get(f'h{s_node}')
+        dst_host = self.net.get(f'h{d_node}')
+        
+        qos_reward, qoe_reward = mc.measure_path_qos(
+            server=dst_host,
+            client=src_host,
+            path_route=path_route,
+            flow_type=flow_type,
+            config=self.config )
+        
+        logger.debug(f"QoS: {qos_reward:.4f} | QoE: {qoe_reward:.4f} | Path: {path_route}")
+        return qos_reward, qoe_reward
+</file>
+
+<file path="src/multi_service/utils/fingerprint_manager.py">
+from omegaconf import DictConfig
+import torch
+import random
+
+from loguru import logger
+
+
+class BankTrafficManager:
+    """
+    使用预存指纹库的流量管理器
+    """
+
+    def __init__(self, src_nodes: list, dst_nodes: list,
+                 fgpt_path: str) -> None:
+        self.src_nodes = src_nodes
+        self.dst_nodes = dst_nodes
+        self.fgpt_path = fgpt_path
+        # 加载指纹库
+        raw_bank = torch.load(self.fgpt_path, map_location='cpu')
+
+        # 将所有 Tensor 统一为 (1, 30, 2) 维度
+        self.bank = {}
+        for k, v_list in raw_bank.items():
+            processed_list = []
+            for t in v_list:
+                if t.dim() == 2:
+                    t = t.unsqueeze(0)
+                processed_list.append(t)
+            self.bank[k.lower()] = processed_list
+
+        logger.debug(
+            f"Fingerprint Bank loaded and pre-processed from {self.fgpt_path}")
+
+    def generate_batch(self,
+                       batch_size: int,
+                       src_nodes: list | None = None,
+                       dst_nodes: list | None = None) -> list:
+        """
+        均衡生成各类型的流，从库中随机采样指纹
+        """
+        # 避免循环引用，在此处导入
+        from ..env.flow_generator import FlowType
+
+        flows = []
+        all_types = list(FlowType)
+        num_types = len(all_types)
+
+        # 1. 规划每种类型的数量 (Balanced Sampling)
+        base_count = batch_size // num_types
+        remainder = batch_size % num_types
+
+        target_types = []
+        for t in all_types:
+            target_types.extend([t] * base_count)
+
+        # 余数随机分配
+        if remainder > 0:
+            target_types.extend(random.sample(all_types, remainder))
+
+        # 打乱顺序
+        random.shuffle(target_types)
+
+        # 确定源宿节点池
+        src_pool = src_nodes if src_nodes is not None else self.src_nodes
+        dst_pool = dst_nodes if dst_nodes is not None else self.dst_nodes
+
+        for f_type in target_types:
+            # 2. 随机选择源宿节点
+            s = random.choice(src_pool)
+            d = random.choice(dst_pool)
+
+            # 3. 从预处理过的库中采样
+            type_key = f_type.name.lower()
+            available_fingerprints = self.bank.get(type_key, [])
+
+            if not available_fingerprints:
+                logger.error(f"No fingerprint data for type: {f_type.name}!")
+                # 兜底：生成全 0 的张量
+                fingerprint = torch.zeros((1, 30, 2))
+            else:
+                # 随机抽取并移动到目标设备
+                fingerprint = random.choice(available_fingerprints)
+
+            # 构建 Flow 对象
+            flow_obj = type(
+                'Flow', (), {
+                    'src': s,
+                    'dst': d,
+                    'label': f_type.value - 1,
+                    'flow_type': f_type,
+                    'fingerprint': fingerprint
+                })
+            flows.append(flow_obj)
+
+        return flows
+</file>
+
+<file path="src/multi_service/utils/routing_kernels.py">
+import networkx as nx
+
+class RoutingKernels:
+    @staticmethod
+    def calculate_hybrid_weight(delay: float, bandwidth: float, bw_priority: float=1.0) -> float:
+        """
+        在不考虑利用率的情况下，综合延迟和带宽计算链路代价。
+        
+        Args:
+            delay: 链路物理延迟 (ms) 
+            bandwidth: 链路物理容量 (Mbps) 
+            bw_priority: 带宽优先级系数。值越大，模型越倾向于避开低带宽路径。
+        """
+        
+        delay_cost = delay / 20  
+        
+        # 2. 带宽代价 (反比逻辑)
+        # 代价与带宽成反比：100M 链路贡献 1.0 代价，10M 链路贡献 10.0 代价
+        # 这能强迫 Dijkstra 避开窄带宽路，即使它延迟很低
+        bw_cost = -(bandwidth/100)
+        
+        # 3. 组合代价
+        # 返回两者的加权和
+        return delay_cost + bw_cost
+
+    @staticmethod
+    def get_smart_path_labels(G_nx: nx.Graph, target_node: str):
+        """
+        基于混合权重计算全图导航标签
+        """
+        # 1. 使用 Dijkstra 计算到 Target 的加权最短路
+        # 注意：这里的 weight 必须是我们刚才注入的 'hybrid_weight'
+        try:
+            weighted_dist = nx.single_source_dijkstra_path_length(
+                G_nx, target_node, weight='hybrid_weight'
+            )
+        except:
+            return {}, {}
+
+        # 2. 生成动作概率标签 (Softmax Target)
+        # 如果 v 是 u 的最优下一跳，则 prob=1，否则=0
+        next_hop_labels = {} 
+        
+        for u in G_nx.nodes():
+            if u == target_node or u not in weighted_dist:
+                continue
+            
+            best_neighbor = None
+            min_cost = float('inf')
+            
+            # 遍历邻居找最优解
+            # 逻辑：Dist(u) = Weight(u,v) + Dist(v)
+            for v in G_nx.neighbors(u):
+                if v not in weighted_dist: continue
+                
+                # 获取边权重
+                w = G_nx[u][v]['hybrid_weight']
+                path_cost = w + weighted_dist[v]
+                
+                if path_cost < min_cost:
+                    min_cost = path_cost
+                    best_neighbor = v
+            
+            # 记录最优下一跳 (这里做简单的 One-hot，也可以做 Multi-hot)
+            if best_neighbor is not None:
+                next_hop_labels[u] = best_neighbor
+                
+        return next_hop_labels
+</file>
+
+</files>

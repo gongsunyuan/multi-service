@@ -1,0 +1,27 @@
+_target_: multi_service.trainers.ppo_trainer.PPOTrainer
+
+eval_src_nodes: ${eval.src_nodes}
+eval_dst_nodes: ${eval.dst_nodes}
+
+checkpoint_dir: ${path.checkpoint_dir}
+tensorboard_dir: ${path.tensorboard_dir}
+
+qos_reward: ${qos_reward}
+train_max_steps: ${topo.train.max_steps}
+eval_max_steps: ${topo.eval.max_steps} 
+
+batch_size: 100
+max_epochs: 1000
+save_interval: 10
+
+agent: ${agent.model}
+
+memory: 
+  _target_: multi_service.utils.PPOMemory
+  device: ${device}
+
+fgprt_bank: 
+  _target_: multi_service.utils.BankTrafficManager
+  src_nodes: ${topo.train.src_nodes}
+  dst_nodes: ${topo.train.dst_nodes}
+  fgpt_path: ${path.fgpt_path}

@@ -1,0 +1,19 @@
+bg_duration: 600
+
+src_nodes: [0,]
+dst_nodes: [5,]
+
+min_link_bw: 10
+max_link_bw: 100.0
+
+max_link_loss: 5.0
+
+min_link_delay: 1.0
+max_link_delay: 200.0
+
+bg_cookie: 0xB000
+flow_cookie: 0xA000
+
+max_steps: 20
+
+name: "abilene.graphml"

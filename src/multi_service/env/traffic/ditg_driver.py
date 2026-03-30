@@ -90,7 +90,7 @@ def ensure_server_surgical(host_node, start_port=15000, max_retries=3):
         if pid_info:
             pid = pid_info.split('/')[0]
             if pid.isdigit():
-                logger.debug(f"Port {current_port} busy by PID {pid}. Cleaning...")
+                logger.trace(f"Port {current_port} busy by PID {pid}. Cleaning...")
                 host_node.cmd(f"kill -9 {pid}")
                 sleep(0.1) # Yield to OS
 
@@ -141,7 +141,7 @@ def run_itg_safe(client_node, server_node, log_file, flow_type, duration_sec, ti
     try:
         # --- Step 1: Start Server ---
         server_proc, actual_port = ensure_server_surgical(server_node)
-        logger.debug(f"Server {server_node.name} listening on {actual_port}")
+        logger.trace(f"Server {server_node.name} listening on {actual_port}")
 
         # --- Step 2: Generate Client Command ---
         # Crucial: Client must send to 'actual_port'
@@ -153,8 +153,8 @@ def run_itg_safe(client_node, server_node, log_file, flow_type, duration_sec, ti
             sig_port=actual_port, # Sync ports!
             log_file=log_file )
 
-        logger.debug(f"{client_node.name} -> {target_ip}:{actual_port} ({flow_type}); Timeout: {timeout_sec}")
-        logger.debug(f"Send command: {cmd}")
+        logger.trace(f"{client_node.name} -> {target_ip}:{actual_port} ({flow_type}); Timeout: {timeout_sec}")
+        logger.trace(f"Send command: {cmd}")
         # --- Step 3: Start Client ---
         # os.setsid creates a new process group, allowing us to kill the whole tree later
         client_proc = client_node.popen(
@@ -169,7 +169,7 @@ def run_itg_safe(client_node, server_node, log_file, flow_type, duration_sec, ti
         try:
             stdout, stderr = client_proc.communicate(timeout=timeout_sec)
             # Check for immediate D-ITG errors in stderr
-            logger.debug(f"{stdout}")
+            logger.trace(f"{stdout}")
             if stderr:
                 err_str = stderr.decode('utf-8', errors='ignore')
                 if "Connection refused" in err_str or "Connect error" in err_str:
@@ -178,15 +178,15 @@ def run_itg_safe(client_node, server_node, log_file, flow_type, duration_sec, ti
             return True # Success
 
         except subprocess.TimeoutExpired as e:
-            logger.debug(f"Flow timed out (> {timeout_sec}s). Saving logs...")
-            logger.debug(f"ITGSend output: {e.stdout}")
+            logger.trace(f"Flow timed out (> {timeout_sec}s). Saving logs...")
+            logger.trace(f"ITGSend output: {e.stdout}")
             # Graceful Shutdown: Send SIGINT to the Process Group
             # This tells D-ITG to stop sending and flush logs to disk
             try:
                 os.killpg(os.getpgid(client_proc.pid), signal.SIGINT)
                 client_proc.communicate(timeout=2) # Give it 2s to write file
             except:
-                logger.debug("Process unresponsive.")
+                logger.trace("Process unresponsive.")
                 os.killpg(os.getpgid(client_proc.pid), signal.SIGKILL)
       
             # For TCP, a timeout is a valid result (congestion), not necessarily a crash.
@@ -196,14 +196,14 @@ def run_itg_safe(client_node, server_node, log_file, flow_type, duration_sec, ti
     except ConnectionError as e:
         # --- Step 5: Retry Logic ---
         if retry_count < 2: # Retry once
-            logger.debug(f"Connection failed. Retrying...")
+            logger.trace(f"Connection failed. Retrying...")
             # Clean up server before retrying
             if server_proc: 
                 server_proc.terminate()
                 server_proc.wait()
             return run_itg_safe(client_node, server_node, log_file, flow_type, duration_sec, timeout_sec, retry_count + 1)
         else:
-            logger.debug(f"Connection refused after retries.")
+            logger.trace(f"Connection refused after retries.")
             return False
 
     except Exception as e:
@@ -219,7 +219,7 @@ def run_itg_safe(client_node, server_node, log_file, flow_type, duration_sec, ti
             except:
                 server_proc.kill()
 
-def measure_path_qos(server, client, path_route, flow_type, config, resend=False):
+def measure_path_qos(server, client, path_route, flow_type, qos_reward_config, resend=False):
     """
     [完美健壮版] 解决时序竞争与解析失败
     """
@@ -259,15 +259,15 @@ def measure_path_qos(server, client, path_route, flow_type, config, resend=False
     # 检查文件是否存在 (防止传输完全失败导致无日志)
     check_log = server.cmd(f"ls {recv_log}")
     if "No such file" in check_log and not resend:
-        logger.debug("No log generated. Resend same cmd again")
+        logger.trace("No log generated. Resend same cmd again")
         client.cmd(f"rm -f {recv_log}")
-        return measure_path_qos(server, client, path_route, flow_type, config, resend=True)
+        return measure_path_qos(server, client, path_route, flow_type, qos_reward_config, resend=True)
 
     # 运行解码器拿到文本结果 
     # 解析结果 
     # Meta-DRL 
     try:
-        logger.debug(f"Running ITGDec on {recv_log}...")
+        logger.trace(f"Running ITGDec on {recv_log}...")
 
         # 1. 启动进程
         with client.popen(
@@ -284,14 +284,14 @@ def measure_path_qos(server, client, path_route, flow_type, config, resend=False
 
             if dec_proc.returncode != 0 and not resend:
                 dec_proc.kill()
-                logger.debug(f"ITGDec failed with code {dec_proc.returncode}")
-                return measure_path_qos(server, client, path_route, flow_type, config, resend=True)
+                logger.trace(f"ITGDec failed with code {dec_proc.returncode}")
+                return measure_path_qos(server, client, path_route, flow_type, qos_reward_config, resend=True)
             else:
                 dec_output = stdout
-                logger.debug("Success dec recieve file")
+                logger.trace("Success dec recieve file")
 
     except subprocess.TimeoutExpired:
-        logger.debug("ITGDec Timed out!")
+        logger.trace("ITGDec Timed out!")
         dec_proc.kill()
         dec_output = ""
 
@@ -303,28 +303,32 @@ def measure_path_qos(server, client, path_route, flow_type, config, resend=False
     qos_metrics, no_packet_arrive = parse_ditg_output(dec_output)    
     if no_packet_arrive:
         if not resend :
-            logger.debug(f"No packet arrive : Resend cmd again")
-            return measure_path_qos(server, client, path_route, flow_type, config, resend=True)
+            logger.trace(f"No packet arrive : Resend cmd again")
+            return measure_path_qos(server, client, path_route, flow_type, qos_reward_config, resend=True)
         else :
-            logger.debug(f"Fail to send packet, bad path")
+            logger.trace(f"Fail to send packet, bad path")
             return -1.0, -1.0
 
     # 假设 qos_metrics 里的数值已经拿到了
     d = qos_metrics['delay']
     j = qos_metrics['jitter']
     b = qos_metrics['bandwidth']
-    l = qos_metrics['loss_rate']
+    l = qos_metrics['loss_rate']*100
     
-    logger.debug(f"QoS: delay={d:.3f}ms, jitter={j:.3f}ms, bw={b:.3f}Mbps, loss={l:.3f}%")
+    logger.trace(f"{flow_type.name.upper()} QoS attrabutes:")
+    logger.trace(f"    bw    ={b:.3f}Mbps")
+    logger.trace(f"    loss  ={l:.3f}%")
+    logger.trace(f"    delay ={d:.3f}ms") 
+    logger.trace(f"    jitter={j:.3f}ms")
 
     # 计算 Reward
     qoe_reward = calculate_qoe_reward(qos_metrics, FLOW_PROFILES[flow_type])
     qos_reward = calculate_qos_reward(
         delay_ms=qos_metrics['delay'],
-        loss_percent=qos_metrics['loss_rate'],
+        loss_percent=qos_metrics['loss_rate']*100,
         jitter_ms=qos_metrics['jitter'],
         flow_type_str=flow_type.name,
-        config=config
+        qos_reward_config=qos_reward_config
     )
 
     return qos_reward, qoe_reward

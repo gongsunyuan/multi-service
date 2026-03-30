@@ -8,7 +8,7 @@ import torch
 from torch_geometric.data import Batch # 必须导入这个用于处理图批处理
 
 class PPOMemory:
-  def __init__(self, device: str) -> None:
+  def __init__(self, device: str="cpu") -> None:
     self.device = device
     self.states = []
     self.values = []

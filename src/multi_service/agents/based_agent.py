@@ -4,10 +4,9 @@ from abc import ABC, abstractmethod
 from torch_geometric.data import Data
 
 class BaseSDNAgent(nn.Module, ABC):
-    def __init__(self, config):
+    def __init__(self, device):
         super().__init__()
-        self.config = config
-        self.device = torch.device(config.device if torch.cuda.is_available() else "cpu")
+        self.device = device
 
     @abstractmethod
     def get_node_embeddings(self, graph_data, fingerprint):

@@ -1,0 +1,6 @@
+topo_name: Bimodal_Ladder_14.graphml
+
+src_nodes: [0,]
+dst_nodes: [13,]
+
+max_steps: 20

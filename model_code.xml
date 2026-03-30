@@ -1,0 +1,494 @@
+This file is a merged representation of a subset of the codebase, containing specifically included files, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of a subset of the repository's contents that is considered the most important context.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Only files matching these patterns are included: src/multi_service/agents/full_agent.py, src/multi_service/models/**/**
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+src/
+  multi_service/
+    agents/
+      full_agent.py
+    models/
+      __init__.py
+      encoders.py
+      heads.py
+      layers.py
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="src/multi_service/agents/full_agent.py">
+from omegaconf import DictConfig
+import torch
+import torch.nn as nn
+from torch.nn import functional as F
+from torch.optim import lr_scheduler
+from loguru import logger
+from multi_service.agents.based_agent import BaseSDNAgent
+from multi_service.utils import compute_advantages
+from multi_service.models import FilmGenerator, FilmGNN, actor, critic
+
+
+class FullAgent(BaseSDNAgent):
+    """
+    Full Agent: Uses GNN for node encoding and FiLM for fingerprint modulation.
+    """
+
+    def __init__(self,
+                 node_dim,
+                 edge_dim,
+                 hidden_dim,
+                 fingerprint_dim,
+                 gnn_layers,
+                 gnn_heads,
+                 dropout,
+                 film_lr,
+                 gnn_lr,
+                 clip_eps,
+                 ppo_epochs,
+                 entropy_coef,
+                 weight_decay,
+                 device_name="cpu"):
+
+        device = torch.device(
+            device_name if torch.cuda.is_available() else "cpu")
+        super().__init__(device)
+
+        self.clip_eps = clip_eps
+        self.ppo_epochs = ppo_epochs
+        self.entropy_coef = entropy_coef
+
+        # 1. Initialize Intent Generator (FiLM)
+        self.film = FilmGenerator(fingerprint_dim=fingerprint_dim,
+                                  hidden_dim=hidden_dim,
+                                  gnn_layers=gnn_layers,
+                                  dropout=dropout)
+
+        # 2. Initialize Core Encoder (GNN)
+        self.encoder = FilmGNN(node_dim=node_dim,
+                               edge_dim=edge_dim,
+                               hidden_dim=hidden_dim,
+                               gnn_layers=gnn_layers,
+                               gnn_heads=gnn_heads,
+                               dropout=dropout)
+
+        logger.debug("FullAgent initialized with GNN and FiLM",
+                     tag="agent init")
+
+        # 3. Initialize Decision Heads
+        critic_input_dim = hidden_dim * 2
+        actor_input_dim = hidden_dim * 3 + edge_dim
+        self.actor = actor(input_dim=actor_input_dim)
+        self.critic = critic(input_dim=critic_input_dim)
+
+        param_groups = [
+            {
+                'params': self.film.parameters(),
+                'lr': film_lr
+            },
+            {
+                'params': self.encoder.parameters(),
+                'lr': gnn_lr
+            },
+            {
+                'params': self.actor.parameters(),
+                'lr': gnn_lr
+            },
+            {
+                'params': self.critic.parameters(),
+                'lr': gnn_lr
+            },
+        ]
+
+        self.optimizer = torch.optim.Adam(param_groups,
+                                          weight_decay=weight_decay)
+        self.scheduler = lr_scheduler.ReduceLROnPlateau(
+            self.optimizer,
+            mode='max',
+            factor=0.5,
+            patience=20,
+            threshold=0.0005,
+            min_lr=1e-6,
+        )
+        self.to(self.device)
+
+    def get_node_embeddings(self, graph_data, fingerprint):
+        """
+        Uses FiLM generator to modulate GNN embeddings based on fingerprint.
+        """
+        # Generate FiLM parameters from fingerprint
+        film_params = self.film(fingerprint.float())
+
+        # Apply GNN with FiLM modulation
+        return self.encoder(graph_data.x, graph_data.edge_index,
+                            graph_data.edge_attr, film_params,
+                            getattr(graph_data, 'batch', None))
+
+    def get_action(self,
+                   state,
+                   node_embeds,
+                   action_mask,
+                   curr_node_idx,
+                   target_node_idx,
+                   neighbor_indices,
+                   neighbor_edge_attrs,
+                   deterministic=False):
+        if len(neighbor_indices) == 0:
+            return None, None, None, None
+
+        neighbor_indices_tensor = torch.tensor(neighbor_indices,
+                                               device=node_embeds.device)
+        neighbor_feats = node_embeds[neighbor_indices_tensor]  # (K, H)
+        curr_feat = node_embeds[curr_node_idx].unsqueeze(0)  # (1, H)
+        target_feat = node_embeds[target_node_idx].unsqueeze(0)  # (1, H)
+
+        K = len(neighbor_indices)
+        actor_input = torch.cat([
+            curr_feat.repeat(K, 1),
+            target_feat.repeat(K, 1), neighbor_feats, neighbor_edge_attrs
+        ],dim=-1)
+
+        logits = self.actor(actor_input).squeeze(-1)
+        if action_mask is not None:
+            logits[~action_mask] = -1e9
+
+        if deterministic:
+            action_idx = torch.argmax(logits).item()
+            log_prob = torch.tensor(0.0).to(logits.device)
+        else:
+            probs = F.softmax(logits, dim=0)
+            dist = torch.distributions.Categorical(probs)
+            action_idx = dist.sample().item()
+            log_prob = dist.log_prob(
+                torch.tensor(action_idx, device=logits.device))
+
+        return int(neighbor_indices[action_idx]), log_prob, logits, action_idx
+
+    def evaluate_value(self, node_embeds, curr_node_idx, target_node_idx):
+        curr_feat = node_embeds[curr_node_idx]
+        target_feat = node_embeds[target_node_idx]
+        return self.critic(torch.cat([curr_feat, target_feat], dim=-1))
+
+    def evaluate_batch(self, batch_graph, fingerprints, curr_node_indices,
+                       target_node_indices, actions):
+        node_embeds = self.get_node_embeddings(batch_graph, fingerprints)
+        batch_ptr = batch_graph.ptr[:-1]
+        curr_global_idx = curr_node_indices + batch_ptr
+        target_global_idx = target_node_indices + batch_ptr
+
+        # Critic Evaluation
+        critic_input = torch.cat(
+            [node_embeds[curr_global_idx], node_embeds[target_global_idx]],
+            dim=-1)
+        state_values = self.critic(critic_input).squeeze(-1)
+
+        new_log_probs, dist_entropies = [], []
+        edge_index, edge_attr = batch_graph.edge_index, batch_graph.edge_attr
+
+        for i in range(len(actions)):
+            u_global = curr_global_idx[i].item()
+            neighbor_mask = (edge_index[0] == u_global)
+            neighbor_global_indices = edge_index[1][neighbor_mask]
+
+            # [Fix] Handle Dead End (No Neighbors)
+            if neighbor_global_indices.numel() == 0:
+                # If no neighbors, this was a dead-end step.
+                # The agent couldn't choose an action, so we assign 0 log_prob and 0 entropy.
+                # This ensures the actor loss is not affected by this inevitable failure.
+                new_log_probs.append(torch.tensor(0.0, device=self.device))
+                dist_entropies.append(torch.tensor(0.0, device=self.device))
+                continue
+
+            neighbor_feats = node_embeds[neighbor_global_indices]
+            c_feat = node_embeds[u_global].unsqueeze(0)
+            t_feat = node_embeds[target_global_idx[i]].unsqueeze(0)
+
+            K = neighbor_feats.size(0)
+            actor_input = torch.cat([
+                c_feat.repeat(K, 1),
+                t_feat.repeat(K, 1), neighbor_feats, edge_attr[neighbor_mask]
+            ],
+                                    dim=-1)
+
+            logits = self.actor(actor_input).squeeze(-1)
+            mask = batch_graph.action_mask[neighbor_mask]
+            logits[~mask] = -1e9
+
+            dist = torch.distributions.Categorical(torch.softmax(logits,
+                                                                 dim=0))
+            new_log_probs.append(dist.log_prob(actions[i]))
+            dist_entropies.append(dist.entropy())
+
+        return torch.stack(new_log_probs), state_values, torch.stack(
+            dist_entropies)
+
+    def update(self, memory):
+        (states_batch, actions, old_log_probs, values, rewards, is_terminals,
+         fingerprints, curr_idxs, target_idxs) = memory.get_all()
+
+        advantages = compute_advantages(rewards, values,
+                                        is_terminals).to(self.device)
+        advantages = (advantages - advantages.mean()) / (advantages.std() +
+                                                         1e-5)
+
+        returns = advantages + values
+
+        for _ in range(self.ppo_epochs):
+            new_log_probs, state_values, dist_entropy = self.evaluate_batch(
+                states_batch, fingerprints, curr_idxs, target_idxs, actions)
+
+            ratio = torch.exp(new_log_probs - old_log_probs)
+            surr1 = ratio * advantages
+            surr2 = torch.clamp(ratio, 1 - self.clip_eps,
+                                1 + self.clip_eps) * advantages
+            actor_loss = -torch.min(surr1, surr2).mean()
+
+            critic_loss = 0.5 * F.mse_loss(state_values, returns)
+            entropy_loss = -self.entropy_coef * dist_entropy.mean()
+
+            loss = actor_loss + critic_loss + entropy_loss
+            self.optimizer.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(self.parameters(), max_norm=0.5)
+            self.optimizer.step()
+
+        memory.clear()
+        return actor_loss.item() / self.ppo_epochs, critic_loss.item(
+        ) / self.ppo_epochs
+
+    def get_current_lr(self):
+        return self.optimizer.param_groups[0]['lr']
+</file>
+
+<file path="src/multi_service/models/__init__.py">
+from .encoders import FilmGenerator, FilmGNN
+from .heads import actor, critic
+</file>
+
+<file path="src/multi_service/models/heads.py">
+import torch.nn as nn
+
+class actor(nn.Module):
+    """
+    演员网络，用于生成动作。
+    
+    参数:
+        input_dim: 输入维度，通常是状态空间的维度。
+            current_node: 当前节点的状态向量。
+            target_node: 目标节点的状态向量。
+            neighbor_nodes: 当前节点的邻居节点状态向量。
+            edge_attrs: 当前节点与邻居节点之间的边特征向量。
+    输出:
+        动作值，范围通常在 [-1, 1] 之间。
+    """
+    def __init__(self, input_dim, dropout=0.1):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, 128),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(64, 1))
+  
+    def forward(self, x):
+        return self.net(x)
+
+class critic(nn.Module):
+    """
+    评论家网络，用于评估状态价值。
+
+    参数:
+        input_dim: 输入维度，通常是状态空间的维度。
+            current_node: 当前节点的状态向量。
+            target_node: 目标节点的状态向量。
+    输出:
+        状态价值估计值。
+    """
+    def __init__(self, input_dim, dropout=0.1):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, 128),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(64, 1))
+    
+    def forward(self, x):
+        return self.net(x)
+</file>
+
+<file path="src/multi_service/models/layers.py">
+import torch.nn as nn
+</file>
+
+<file path="src/multi_service/models/encoders.py">
+from networkx import config
+from omegaconf import DictConfig, ListConfig
+import torch
+import torch.nn as nn
+from torch_geometric.nn import GATv2Conv
+import torch.nn.functional as F
+
+class FilmGenerator(nn.Module):
+    """
+    [模块1] 意图生成器
+    输入: 流量指纹 (Sequence)
+    输出: GNN 的调制参数 (Gamma, Beta)
+    """
+
+    def __init__(self, fingerprint_dim, hidden_dim, gnn_layers, dropout=0.1):
+        super().__init__()
+        self.lstm = nn.LSTM(fingerprint_dim, hidden_dim, batch_first=True)
+        
+        # Dropout
+        self.dropout = nn.Dropout(dropout)
+
+        # 输出层生成所有 GNN 层的 Gamma 和 Beta
+        # 每一层需要 2 个参数向量 (gamma, beta)，共 gnn_layers 层
+        self.head = nn.Linear(hidden_dim, hidden_dim * 2 * gnn_layers)
+        
+        # 初始化为 Identity (Gamma=1, Beta=0)
+        self._init_weights()
+
+    def _init_weights(self):
+        # 将 head 的权重和偏置设为极小值/零，使得初始输出接近 0
+        nn.init.constant_(self.head.weight, 0.0)
+        nn.init.constant_(self.head.bias, 0.0)
+
+    def forward(self, fingerprint):
+        """
+        forward 的 Docstring
+        
+        :param fingerprint: 流量指纹 (Batch, Seq_Len, fingerprint_dim)
+        :return: GNN FiLM 调制参数 (Batch, gnn_layers * 2 * hidden_dim)
+        """
+    
+        # fingerprint: (Batch, Seq_Len, 2)
+        _, (h_n, _) = self.lstm(fingerprint)
+        # h_n: (1, Batch, Hidden) -> (Batch, Hidden)
+        intent = h_n.squeeze(0)
+        
+        # Apply Dropout
+        intent = self.dropout(intent)
+
+        # 生成参数 (Batch, Layers * 2 * Hidden)
+        params = self.head(intent)
+        # 由于初始化为0，这里 +1.0 让 Gamma 初始为 1
+        # Split 逻辑: [Layer1_Gamma, Layer1_Beta, Layer2_Gamma, ...]
+        return params
+
+class FilmGNN(nn.Module):
+    """
+    [模块2] 全局感知骨干
+    融合: 节点特征 + 边特征 + FiLM 调制
+    """
+    def __init__(self, node_dim, edge_dim, hidden_dim, gnn_layers, gnn_heads, dropout=0.1):
+            """
+            __init__ 的 Docstring
+            
+            :param node_dim: 节点特征维度
+            :param edge_dim: 边特征维度
+            :param hidden_dim: GNN 隐藏层维度
+            :param gnn_layers: GNN 层数
+            :param gnn_heads: 多头注意力头数
+            :param dropout: Dropout 率
+            """
+            super().__init__()
+            self.num_layers = gnn_layers
+            self.hidden_dim = hidden_dim
+
+            # 初始编码
+            self.node_encoder = nn.Linear(node_dim, hidden_dim)
+            self.edge_encoder = nn.Linear(edge_dim, edge_dim) # 边特征维度通常较小，可先升维或保持
+            
+            # GAT 层列表
+            self.convs = nn.ModuleList()
+            self.norms = nn.ModuleList()
+            self.dropout = nn.Dropout(dropout)
+            
+            for _ in range(self.num_layers):
+                # edge_dim 参数开启边特征融合
+                self.convs.append(GATv2Conv(hidden_dim, hidden_dim, edge_dim=edge_dim, heads=gnn_heads, concat=False, dropout=dropout))
+                self.norms.append(nn.LayerNorm(hidden_dim))
+
+    def forward(self, x, edge_index, edge_attr, film_params, batch_vector=None):
+        
+        x = self.node_encoder(x)
+        edge_attr = self.edge_encoder(edge_attr)
+        
+        # 2. 确保 view 的维度包含 Batch Size
+        batch_size = film_params.size(0)
+        params = film_params.view(batch_size, self.num_layers, 2, self.hidden_dim)
+        
+        for i in range(self.num_layers):
+            x_in = x
+            x = self.convs[i](x, edge_index, edge_attr=edge_attr)
+            x = self.norms[i](x)
+            
+            # 3. 取出第 i 层的参数 (Batch, Hidden)
+            layer_params = params[:, i, :, :] 
+            gamma = layer_params[:, 0, :] + 1.0 
+            beta = layer_params[:, 1, :]        
+            
+            # ================= [标准解法核心] =================
+            if batch_vector is not None:
+                # 利用 batch_vector (N,) 从 gamma (B, H) 中查表
+                # 结果变为 (N, H)，与节点数量一一对应
+                gamma_expanded = gamma[batch_vector] 
+                beta_expanded = beta[batch_vector]
+                x = x * gamma_expanded + beta_expanded
+            else:
+                # 兼容单图推理的情况 (batch_size=1)
+                x = x * gamma + beta
+            # ==================================================
+
+            x = F.relu(x)
+            x = self.dropout(x)
+            x = x + x_in 
+            
+        return x
+</file>
+
+</files>

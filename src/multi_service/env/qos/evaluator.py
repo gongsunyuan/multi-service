@@ -6,8 +6,8 @@ from loguru import logger
 from omegaconf import DictConfig
 from ..flow_generator import FlowType, FLOW_PROFILES
 from ..e_model import (
-    FullG107Calculator, 
-    RigorousVideoEvaluator, 
+    FullG107Calculator,
+    RigorousVideoEvaluator,
     RigorousLegacyFPSEvaluator)
 
 # [Global Instances - Stateful/Stateless managers]
@@ -26,15 +26,12 @@ def parse_ditg_output(output_str: str) -> tuple[dict[str, Any], bool]:
         'jitter': 0.0,     # 单位: ms
         'bandwidth': 0.0,  # 单位: Mbps
         'loss_rate': 1.0}  # 范围: 0.0 - 1.0 (默认为1.0即全丢，防止无数据时误判为满分)
-  
-    no_packet_arrive = False
-  
-    if not output_str:
-        logger.debug("can't catch output str -- the str is None")
-        return metrics, True
 
-    logger.debug("parsing ditg output ...")
-    # logger.log(output_str)
+    no_packet_arrive = False
+
+    if not output_str:
+        logger.error("can't catch output str -- the str is None")
+        return metrics, True
     try:
         # --- 1. 提取平均延迟 (Average delay) ---
         # 示例行: Average delay            =     0.000234 s
@@ -44,9 +41,9 @@ def parse_ditg_output(output_str: str) -> tuple[dict[str, Any], bool]:
             if 'nan' not in val.lower(): # 过滤掉 -nan
                 metrics['delay'] = float(val) * 1000.0 # 秒 -> 毫秒
         else:
-            logger.debug("no delay found")
-            logger.debug(f"原始输出片段:\n{output_str[:200]}") # 调试用
-    
+            logger.error("no delay found")
+            # logger.debug(f"原始输出片段:\n{output_str[:200]}") # 调试用
+
         jitter_match = re.search(r"Average jitter\s+=\s+([-\d\.nan]+)\s+s", output_str)
         if jitter_match:
             val = jitter_match.group(1)
@@ -75,7 +72,7 @@ def parse_ditg_output(output_str: str) -> tuple[dict[str, Any], bool]:
             val = loss_match.group(1)
             if 'nan' not in val.lower():
                 metrics['loss_rate'] = float(val)/100.0
-        else: 
+        else:
             logger.debug("no loss found")
             # logger.debug(f"原始输出片段:\n{output_str[:200]}") # 调试用
 
@@ -106,10 +103,10 @@ def calculate_qoe_reward(qos_metrics: dict, flow_profile: dict) -> float:
     j = qos_metrics.get('jitter', 0.1)      # ms
     l = qos_metrics.get('loss_rate', 0.0) * 100.0 # Convert to % (0-100)
     b = qos_metrics.get('bandwidth', 0.0) * 1000.0 # Convert to kbps
-  
+
     # 2. 识别业务类型
 
-    f_type_enum = flow_profile.get('type') 
+    f_type_enum = flow_profile.get('type')
 
     assert f_type_enum is not None, "flow type is None"
 
@@ -117,13 +114,13 @@ def calculate_qoe_reward(qos_metrics: dict, flow_profile: dict) -> float:
 
     mos = 1.0
     shaping_bonus = 0.0
-  
+
     # 3. 计算 Base MOS 和 Shaping Bonus
     if 'voip' in f_type:
         # --- VoIP Logic ---
         # Base: ITU G.107 (假设 voip_calc 已实现)
         mos = voip_calc.calculate_mos(delay_ms=d, loss_pct=l, jitter_ms=j)
-    
+
         # Shaping: 鼓励延迟 < 150ms。每降低 10ms，奖励增加约 0.003
         # 范围: [0.0, 0.05]
         if mos > 4.0: # 只有体验良好时才谈优化
@@ -133,13 +130,13 @@ def calculate_qoe_reward(qos_metrics: dict, flow_profile: dict) -> float:
         # --- Video Logic ---
         # Base: ITU P.1203 简化版
         mos = video_calc.calculate_mos(
-            loss_pct=l, rtt_ms=d*2, physical_bw_kbps=b, 
+            loss_pct=l, rtt_ms=d*2, physical_bw_kbps=b,
             duration_sec=6.0, stateless_mode=True
         )
-    
+
         # Shaping: 鼓励带宽冗余。
         # 假设 1080p 需要 5000kbps，如果能提供 8000kbps，给一点奖励作为缓冲安全区
-        target_bw = 5000.0 
+        target_bw = 5000.0
         if mos > 4.0 and b > target_bw:
             # 范围: [0.0, 0.05]
             # Log函数让收益边际递减，避免Agent为了无限带宽而绕远路
@@ -149,7 +146,7 @@ def calculate_qoe_reward(qos_metrics: dict, flow_profile: dict) -> float:
         # --- Gaming Logic ---
         # Base: 针对 FPS 优化的模型
         mos = fps_game_calc.calculate_mos(delay_ms=d, loss_pct=l, jitter_ms=j)
-    
+
         # Shaping: Gaming 对延迟极度敏感，给予更高的引导权重
         # 范围: [0.0, 0.1]
         # 强迫 Agent 区分 20ms 和 5ms
@@ -159,47 +156,56 @@ def calculate_qoe_reward(qos_metrics: dict, flow_profile: dict) -> float:
     # 4. 归一化 Reward (Normalization)
     # 原始 MOS: 1.0 (Bad) ~ 4.5 (Excellent)
     # 目标区间: -1.0 ~ 1.0
-  
+
     # 先把 MOS 线性映射到 [-1.0, 0.9] (留 0.1 给 Bonus)
-    # (MOS - 1.0) / 3.5 * 1.9 - 1.0 
+    # (MOS - 1.0) / 3.5 * 1.9 - 1.0
     # 简化版: (MOS - 3.0) / 1.5 范围约为 [-1.33, 1.0]
-  
+
     # 我们使用更保守的映射，确保加上 Bonus 后不超过 1.0
     normalized_base = (mos - 1.0) / 3.5 # 映射到 [0, 1]
     reward = (normalized_base * 2) - 1 # 映射到 [-1, 1]
-  
+
     # 5. 叠加 Bonus
     final_reward = reward + shaping_bonus
-  
+
     # 6. 悬崖惩罚 (Cliff Penalty) & 边界截断
     # 如果 MOS 太低，说明完全不可用，直接给 -1.0，忽略任何带宽优势
     if mos < 1.5:
         return -1.0
-      
+
     # 确保数值稳定，截断在 [-1.0, 1.0]
     return float(np.clip(final_reward, -1.0, 1.0))
 
-def calculate_qos_reward(delay_ms: float, loss_percent: float, jitter_ms: float, flow_type_str: str, config: DictConfig) -> float:
-    qos_reward_info = config.qos_reward
-    loss_normalized = loss_percent
+
+import numpy as np
+
+def calculate_qos_reward(delay_ms: float, loss_percent: float, 
+                         jitter_ms: float, flow_type_str: str, 
+                         qos_reward_config: DictConfig) -> float:
+    qos_reward_info = qos_reward_config
+    
+    # --- 1. 延迟平滑处理 ---
+    # 结合抖动计算等效延迟（Jitter 对交互式流如 VoIP 影响极大）
+    effective_delay = delay_ms + 2 * jitter_ms 
+    
+    # --- 2. 延迟高斯归一化 ---
+    delay_sigma = qos_reward_info.delay_sigma
     min_delay = qos_reward_info[flow_type_str.upper()]['min_delay']
-    max_delay = qos_reward_info[flow_type_str.upper()]['max_delay']
-    delay_normalized = min(max((delay_ms - min_delay) / (max_delay - min_delay), 0.0), 1.0)
-    min_jitter = qos_reward_info[flow_type_str.upper()]['min_jitter']
-    max_jitter = qos_reward_info[flow_type_str.upper()]['max_jitter']
-    jitter_normalized = min(max((jitter_ms - min_jitter) / (max_jitter - min_jitter), 0.0), 1.0)
+    # 完美延迟时 delay_score = 1.0
+    delay_score = np.exp(-((effective_delay - min_delay)**2) / (2 * delay_sigma**2))
     
+    # --- 3. 丢包高斯归一化 ---
+    loss_sigma = qos_reward_info.loss_sigma
+    # 0丢包时 loss_score = 1.0
+    loss_score = np.exp(-(loss_percent**2) / (2 * loss_sigma**2))
     
+    # --- 4. 业务差异化加权 ---
     weight = qos_reward_info[flow_type_str.upper()]['w']
-
-    qos_reward = 5 - (
-        weight[0] * delay_normalized +
-        weight[1] * jitter_normalized +
-        weight[2] * loss_normalized 
-    ) 
-
-    # qos reward in range [-sum_w, sum_w]
-    qos_reward = qos_reward/2.5-1
-    return qos_reward
-
+    # 合并得分：表现越好，final_score 越接近 1.0
+    final_score = (weight[0] * delay_score + weight[1] * loss_score)
     
+    # --- 5. 映射到 [-1, 1] 空间 ---
+    # final_score 原本范围 [0, 1] -> 变换后为 [-1, 1]
+    qos_reward = final_score * 2 - 1
+    
+    return float(np.clip(qos_reward, -1.0, 1.0))

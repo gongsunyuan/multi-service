@@ -18,27 +18,57 @@ from ..utils import AttrDict, get_graph_data
 
 class SdnWrapper:
     # 初始化背景流
-    def __init__(self, config: DictConfig | ListConfig ) -> None:
+    def __init__(
+        self, 
+        topo: nx.Graph, 
+        src_nodes: list,
+        dst_nodes: list,
+        max_steps: int,
+        train_stats: dict | DictConfig,
+        eval_stats: dict | DictConfig,
+        qos_reward: dict | DictConfig,
+        bg_cookie: int = 0xB000,
+        flow_cookie: int = 0xA000,
+        bg_duration: int = 60,
+        shaping_weight: float = 0.1,
+        total_load_mbps: float = 100.0,
+        bg_traffic_nodes: list | None = None) -> None:
         """
         __init__ 的 Docstring
         
-        :param config: 
-            graph_path: 图绝对路径
+        :param 
+            topo: 拓扑图
+            src_nodes: 源节点列表
+            dst_nodes: 目的节点列表
             max_steps: 最大寻路跳数
+            topo_stats: 拓扑统计信息 (for get_graph_data)
+            qos_reward: QoS 奖励配置 (for measure_path_qos)
             bg_cookie: 背景流cookie
             flow_cookie: 业务流cookie
             bg_duration: 背景流持续时间
-            total_flow_load: 默认背景流负载
+            shaping_weight: 流量整形权重
+            total_load_mbps: 默认背景流负载
+            bg_traffic_nodes: 允许生成背景流的节点列表 (默认为 None，表示全图)
         """
-        self.config = config
+        self.bg_traffic_nodes = bg_traffic_nodes
+        self.total_load_mbps = total_load_mbps
+        self.max_steps = max_steps
+        
+        self.topo_stats = train_stats
+        self.train_stats = train_stats
+        self.eval_stats = eval_stats
+
+        self.qos_reward_config = qos_reward
 
         # --- 1. 基础组件初始化 ---
         self.flow_gen = FlowGenerator()
         self.topo_gen = TopologyGenerator()
-        self.blueprint_G = self.topo_gen.load_topology(config.path.graph_path)
+
+        self.blueprint_G = topo
         self.current_G = self.blueprint_G.copy()
-        self.src_nodes = config.env.src_nodes
-        self.dst_nodes = config.env.dst_nodes
+
+        self.src_nodes = src_nodes
+        self.dst_nodes = dst_nodes
 
         # --- 2. 启动 Mininet (修复顺序 Bug) ---
         # 必须先创建生成器对象，再 enter
@@ -49,25 +79,23 @@ class SdnWrapper:
         self.monitor = mc.NetworkMonitor(self.net)
         
         # --- 3. 状态管理 ---
-        self.bg_processes = []
         self.bg_start_time = 0
-        self.active_cookies = set()
 
         # --- 4. Cookie 与 配置 ---
         self.cookie_mask = 0xF000
-        self.bg_cookie_start = getattr(config.env, 'bg_cookie', 0xB000)
-        self.agent_cookie_start = getattr(config.env, 'flow_cookie', 0xA000)
-        self.bg_duration = getattr(config.env, 'bg_duration', 60) 
+        self.bg_cookie_start = bg_cookie
+        self.agent_cookie_start = flow_cookie
+        self.bg_duration = bg_duration
         
         # 任务状态
         self.s_node = None
         self.d_node = None
         self.current_flow_type = None
         self.step_count = 0 
-        self.path_so_far = [] 
+        self.path_so_far = []
         self.current_node = None 
         self.dist_matrix = dict(nx.all_pairs_shortest_path_length(self.blueprint_G))
-        self.shaping_weight = getattr(config.env, 'shaping_weight', 0.1)
+        self.shaping_weight = shaping_weight
     
     # 重新启动背景流量/重新发送业务流
     def reset_bg(self, current_load_mbps: float | None = None) -> Data:
@@ -76,7 +104,7 @@ class SdnWrapper:
             force_hard (bool): 强制执行 Hard Reset
             current_load_mbps (float): [课程学习] 指定当前的背景流量负载
         """
-        target_load = current_load_mbps if current_load_mbps else self.config.env.total_load_mbps
+        target_load = current_load_mbps if current_load_mbps else self.total_load_mbps
         self._hard_reset_background_traffic(target_load)
 
         return self.get_observation()
@@ -127,11 +155,11 @@ class SdnWrapper:
     # 更新图状态，返回图状态
     def get_observation(self):
         # --- 1. 物理同步 ---
-        self.current_G = self.monitor.sync_state_to_graph(self.blueprint_G.copy(), duration=0.05)
+        self.current_G = self.monitor.sync_state_to_graph(duration=0.05)
         
         # --- 2. 特征提取 ---
         # Hop-by-Hop 关键：S_node 填 self.current_node
-        assert isinstance(self.current_node, int), "self.current_node 必须是整数"
+        assert isinstance(self.current_node, int), f"self.current_node 必须是整数：但是 {self.current_node}"
         assert(self.current_node is not None)
         assert(self.d_node is not None)
 
@@ -139,7 +167,8 @@ class SdnWrapper:
             self.current_G.copy(), 
             self.current_node, 
             self.d_node,      
-            self.config 
+            self.topo_stats,
+            self.max_steps
         )
         
         self.observation_data = data
@@ -175,10 +204,14 @@ class SdnWrapper:
         self.active_cookies.clear()
         
         # 2. 生成 (使用传入的动态负载)
+        
+        # 确定生成背景流的节点集合
+        bg_nodes = self.bg_traffic_nodes if self.bg_traffic_nodes is not None else list(self.blueprint_G.nodes())
+        
         tm = self.flow_gen.generate_traffic_matrix(
-        self.blueprint_G.nodes(), 
-        self.blueprint_G.copy(), 
-        total_load_mbps=load_mbps 
+            bg_nodes, 
+            self.blueprint_G.copy(), 
+            total_load_mbps=load_mbps 
         )
         
         # 3. 注入 (1.5倍冗余时长)
@@ -249,7 +282,6 @@ class SdnWrapper:
             traceback.print_exc()
             exit()
 
-        # 3. 执行移动
         self.current_node = v
         self.path_so_far.append(v)
         self.step_count += 1
@@ -270,10 +302,7 @@ class SdnWrapper:
             # 生成 Cookie
             cookie = self.agent_cookie_start + len(self.active_cookies) % 4096
             self.active_cookies.add(cookie)
-
-            # 打印路径状态 (用于调试)
-            logger.debug(f"Path: {self.path_so_far}, FlowType: {self.current_flow_type.name.upper()}")
-            
+    
             protocol_str = FLOW_PROFILES[self.current_flow_type]['protocol']
             # A. 下发规则
             mc.install_path_rules(
@@ -289,10 +318,12 @@ class SdnWrapper:
                 client=src_host,
                 path_route=self.path_so_far,
                 flow_type=self.current_flow_type,
-                config=self.config )
+                qos_reward_config=self.qos_reward_config )
             
-            logger.debug(f"QoS: {qos_reward:.4f} | QoE: {qoe_reward:.4f} | Path: {self.path_so_far}")
-            total_reward = qos_reward # 这里你可以选择返回 qos_reward 还是 qoe_reward
+            logger.trace(f"QoS: {qos_reward:.4f} | QoE: {qoe_reward:.4f} | Path: {self.path_so_far}")
+            # Add potential reward to final reward too? 
+            # Usually terminal reward replaces step reward. 
+            total_reward = qos_reward + step_reward 
 
             info['qos'] = qos_reward
             info['path'] = self.path_so_far
@@ -302,13 +333,13 @@ class SdnWrapper:
         elif v in self.path_so_far[:-1]:
             # === Loop ===
             done = True
-            step_reward -= 10.0 
+            step_reward += -2.0  # Reduced from -10.0
             info['error'] = 'loop_detected'
 
-        elif self.step_count >= self.config.train.max_steps:
+        elif self.step_count >= self.max_steps:
             # === Timeout ===
             done = True
-            step_reward -= 10.0 # 超时惩罚
+            step_reward += -2.0 # Reduced from -10.0
             info['error'] = 'max_steps'
 
         # 5. 更新观察 (Observation)
@@ -317,3 +348,31 @@ class SdnWrapper:
         next_state = self.get_observation()
         return next_state, step_reward, done, info
 
+    def get_path_reward(
+        self, s_node: int, d_node: int, path_route: list[int], flow_type: FlowType
+    ):
+        cookie = self.agent_cookie_start + len(self.active_cookies) % 4096
+        self.active_cookies.add(cookie)
+
+        # 打印路径状态 (用于调试)
+        logger.debug(f"Path: {path_route}, FlowType: {flow_type.name.upper()}")
+        
+        protocol_str = FLOW_PROFILES[flow_type]['protocol']
+        # A. 下发规则
+        mc.install_path_rules(
+            self.net, path_route, 
+            tos=32, dst_port=12000, cookie=cookie, protocol=protocol_str)
+
+        # B. 测量 QoS
+        src_host = self.net.get(f'h{s_node}')
+        dst_host = self.net.get(f'h{d_node}')
+        
+        qos_reward, qoe_reward = mc.measure_path_qos(
+            server=dst_host,
+            client=src_host,
+            path_route=path_route,
+            flow_type=flow_type,
+            qos_reward_config=self.qos_reward_config )
+        
+        logger.debug(f"QoS: {qos_reward:.4f} | QoE: {qoe_reward:.4f} | Path: {path_route}")
+        return qos_reward, qoe_reward 
